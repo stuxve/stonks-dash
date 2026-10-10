@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>stonks-dash</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='9' height='9' fill='%2330cc5a'/%3E%3Crect x='10' width='6' height='9' fill='%23f63538'/%3E%3Crect y='10' width='6' height='6' fill='%23bf4045'/%3E%3Crect x='7' y='10' width='9' height='6' fill='%2335764e'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>stonks<b>dash</b></div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-view="markets" class="active">Markets</button>
+    <button role="tab" data-view="portfolio">My portfolio</button>
+    <button role="tab" data-view="hours">Market hours</button>
+  </nav>
+  <div class="grow"></div>
+  <span id="demo-badge" class="badge" hidden title="STONKS_PROVIDER=mock — synthetic prices">Demo data</span>
+  <div class="seg" id="base-seg" aria-label="Base currency">
+    <button data-v="EUR">EUR</button><button data-v="USD">USD</button>
+  </div>
+  <span id="status" class="status"></span>
+  <button id="refresh-btn" class="icon-btn" title="Refresh now" aria-label="Refresh">
+    <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
+  </button>
+  <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
+    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
+</header>
+
+<main>
+  <!-- ============================ MARKETS ============================ -->
+  <section id="view-markets" class="view">
+    <div class="boardbar">
+      <div id="board-chips" class="chips" role="tablist" aria-label="Boards"></div>
+      <button id="add-board" class="btn ghost">+ Board</button>
+      <button id="edit-board" class="btn ghost">Edit board</button>
+    </div>
+    <div class="toolbar">
+      <div class="seg period-seg" data-scope="markets"></div>
+      <label class="ctl">Size
+        <select id="m-size">
+          <option value="cap">Market cap</option>
+          <option value="cap_sqrt">Market cap √</option>
+          <option value="equal">Equal</option>
+          <option value="weight">Custom weight</option>
+        </select>
+      </label>
+      <label class="ctl">Group
+        <select id="m-group">
+          <option value="custom">Custom groups</option>
+          <option value="sector">Sector</option>
+          <option value="industry">Industry</option>
+          <option value="type">Asset type</option>
+          <option value="none">No grouping</option>
+        </select>
+      </label>
+      <label class="ctl">Range
+        <select class="range-sel"></select>
+      </label>
+      <input id="m-filter" class="filter" type="search" placeholder="Highlight… (AAPL, bank)" aria-label="Highlight tiles">
+      <div class="grow"></div>
+      <div id="m-breadth" class="breadth"></div>
+    </div>
+    <div class="crumbs" id="m-crumbs"></div>
+    <div class="map" id="m-map"><div class="loading">Loading…</div></div>
+    <div class="legend" id="m-legend"></div>
+  </section>
+
+  <!-- ============================ PORTFOLIO ============================ -->
+  <section id="view-portfolio" class="view" hidden>
+    <div class="kpis" id="kpis"></div>
+    <div class="toolbar">
+      <label class="ctl">Color by
+        <select id="p-color">
+          <option value="pnl">Total P&amp;L %</option>
+          <option value="period">Price change (period)</option>
+        </select>
+      </label>
+      <div class="seg period-seg" data-scope="portfolio"></div>
+      <label class="ctl">Size
+        <select id="p-size">
+          <option value="value">Market value</option>
+          <option value="cost">Invested</option>
+          <option value="equal">Equal</option>
+        </select>
+      </label>
+      <label class="ctl">Group
+        <select id="p-group">
+          <option value="account">Account</option>
+          <option value="group_name">My groups</option>
+          <option value="sector">Sector</option>
+          <option value="type">Asset type</option>
+          <option value="none">No grouping</option>
+        </select>
+      </label>
+      <label class="ctl">Range
+        <select class="range-sel"></select>
+      </label>
+      <label class="ctl check" title="Show several buys of the same asset as one position (weighted average cost). Nothing is changed in your data.">
+        <input type="checkbox" id="p-combine" checked> Combine lots
+      </label>
+      <div class="grow"></div>
+      <button id="add-position" class="btn primary">+ Add position</button>
+    </div>
+    <div class="crumbs" id="p-crumbs"></div>
+    <div class="map short" id="p-map"><div class="loading">Loading…</div></div>
+    <div class="legend" id="p-legend"></div>
+    <div class="table-wrap">
+      <table id="p-table" class="grid">
+        <thead></thead><tbody></tbody><tfoot></tfoot>
+      </table>
+    </div>
+  </section>
+  <!-- ============================ MARKET HOURS ============================ -->
+  <section id="view-hours" class="view" hidden>
+    <div class="toolbar hours-bar">
+      <div class="clock"><b id="h-clock">--:--:--</b><span id="h-date"></span><span id="h-tz" class="hint"></span></div>
+      <div id="h-summary" class="breadth"></div>
+      <div class="grow"></div>
+      <label class="ctl">Times
+        <span class="seg" id="h-tzmode"><button data-v="mine">My time</button><button data-v="local">Exchange time</button></span>
+      </label>
+      <label class="ctl">Timeline
+        <span class="seg" id="h-window"><button data-v="today">Today</button><button data-v="rolling">Next 24h</button></span>
+      </label>
+      <button id="h-choose" class="btn ghost">Choose markets</button>
+    </div>
+    <div class="hours" id="h-board"><div class="loading">Loading…</div></div>
+    <p class="hint hours-legend">
+      <span class="lg reg"></span> Regular session <span class="lg ext"></span> US pre-market / after-hours
+      <span class="lg early"></span> Early close <span class="lg holb"></span> Holiday · gaps are lunch breaks · timeline in your time zone.
+      FX, CME and crypto follow weekly rules and ignore holidays.
+    </p>
+    <h3 class="sub-h">Holidays &amp; early closes — next 14 days</h3>
+    <div class="table-wrap">
+      <table class="grid" id="h-upcoming"><thead><tr><th>Date</th><th>Market</th><th>Event</th></tr></thead><tbody></tbody></table>
+    </div>
+  </section>
+</main>
+
+<div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+
+<!-- ============================ DIALOGS ============================ -->
+<dialog id="dlg-board" class="dlg wide">
+  <form method="dialog" class="dlg-head"><h2>Edit board</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <div class="dlg-body">
+    <div class="row">
+      <label class="field grow">Board name<input id="b-name" type="text"></label>
+      <label class="field">Default size
+        <select id="b-size">
+          <option value="cap">Market cap</option><option value="cap_sqrt">Market cap (√)</option>
+          <option value="equal">Equal</option><option value="weight">Custom weight</option>
+        </select>
+      </label>
+      <label class="field">Default group
+        <select id="b-group">
+          <option value="custom">Custom</option><option value="sector">Sector</option>
+          <option value="industry">Industry</option><option value="type">Asset type</option><option value="none">None</option>
+        </select>
+      </label>
+    </div>
+    <div class="addrow">
+      <div class="field grow symbol-search">Add symbol
+        <input id="b-add-symbol" type="text" placeholder="Ticker, name or ISIN (e.g. IE00B3RBWM25)" autocomplete="off">
+        <ul class="suggest" hidden></ul>
+      </div>
+      <label class="field">Label<input id="b-add-label" type="text" placeholder="optional"></label>
+      <label class="field">Group<input id="b-add-group" type="text" list="b-groups" placeholder="optional"></label>
+      <button id="b-add-btn" class="btn primary">Add</button>
+    </div>
+    <datalist id="b-groups"></datalist>
+    <p class="hint">Custom group overrides automatic sector grouping. Weight is used when Size = Custom weight. Edits save as you type.</p>
+    <div class="table-wrap tall">
+      <table class="grid" id="b-items">
+        <thead><tr><th>Symbol</th><th>Label</th><th>Group</th><th class="num">Weight</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="dlg-foot">
+    <button id="b-delete" class="btn danger">Delete board</button>
+    <div class="grow"></div>
+    <button id="b-up" class="btn ghost" title="Move board left">◀ Move</button>
+    <button id="b-down" class="btn ghost" title="Move board right">Move ▶</button>
+    <button id="b-done" class="btn primary">Done</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-position" class="dlg">
+  <form method="dialog" class="dlg-head"><h2 id="pos-title">Add position</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <form id="pos-form" class="dlg-body">
+    <div class="field symbol-search">Symbol
+      <input name="symbol" type="text" placeholder="Ticker, name or ISIN" autocomplete="off">
+      <ul class="suggest" hidden></ul>
+    </div>
+    <div id="pos-quote" class="hint"></div>
+    <label class="field">Display name<input name="name" type="text" placeholder="optional"></label>
+    <div class="row">
+      <label class="field grow">Quantity<input name="quantity" type="number" step="any" min="0" required></label>
+      <label class="field grow">Avg. cost / unit<input name="avg_cost" type="number" step="any" min="0" required></label>
+      <label class="field">Cost currency<select name="currency"></select></label>
+    </div>
+    <p class="hint">Cost currency is what you paid in. Bought a US stock from a EUR account? Enter the EUR cost per share so P&amp;L includes the FX effect exactly.</p>
+    <div class="row">
+      <label class="field">Purchase date<input name="bought_at" type="date"></label>
+      <label class="field grow">Account / broker<input name="account" type="text" list="acct-list" placeholder="e.g. DEGIRO"></label>
+      <label class="field grow">Group<input name="group_name" type="text" list="pgroup-list" placeholder="e.g. Core, Satellite"></label>
+    </div>
+    <datalist id="acct-list"></datalist><datalist id="pgroup-list"></datalist>
+    <label class="check"><input type="checkbox" id="pos-manual"> Manual price (asset not on Yahoo, e.g. pension plan)</label>
+    <label class="field" id="pos-manual-wrap" hidden>Current price per unit (in cost currency)<input name="manual_price" type="number" step="any" min="0"></label>
+    <label class="field">Notes<input name="notes" type="text"></label>
+    <div id="pos-error" class="error" hidden></div>
+  </form>
+  <div class="dlg-foot">
+    <button id="pos-delete" class="btn danger" hidden>Delete</button>
+    <div class="grow"></div>
+    <button class="btn ghost" onclick="this.closest('dialog').close()">Cancel</button>
+    <button id="pos-save" class="btn primary">Save</button>
+  </div>
+</dialog>
+
+<dialog id="dlg-hours" class="dlg wide">
+  <form method="dialog" class="dlg-head"><h2>Choose markets</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <div class="dlg-body"><div id="h-catalog" class="catalog"></div></div>
+  <div class="dlg-foot"><div class="grow"></div>
+    <button class="btn ghost" onclick="this.closest('dialog').close()">Cancel</button>
+    <button id="h-save" class="btn primary">Save</button></div>
+</dialog>
+
+<dialog id="dlg-settings" class="dlg">
+  <form method="dialog" class="dlg-head"><h2>Settings</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <div class="dlg-body">
+    <label class="field">Color scheme
+      <select id="s-scheme">
+        <option value="classic">Classic red / green</option>
+        <option value="cvd">Colorblind-safe red / blue</option>
+      </select>
+    </label>
+    <label class="field">Tile label
+      <select id="s-label">
+        <option value="symbol">Ticker</option>
+        <option value="name">Name / custom label</option>
+      </select>
+    </label>
+    <label class="field">Auto-refresh
+      <select id="s-refresh">
+        <option value="0">Off</option><option value="30">Every 30 s</option>
+        <option value="60">Every minute</option><option value="300">Every 5 min</option><option value="900">Every 15 min</option>
+      </select>
+    </label>
+    <div class="field">Backup
+      <div class="row">
+        <a class="btn ghost" href="/api/export" download="stonks-dash-backup.json">Export JSON</a>
+        <label class="btn ghost">Import JSON…<input id="s-import" type="file" accept="application/json" hidden></label>
+      </div>
+      <p class="hint">Import replaces boards and positions with the file's contents.</p>
+    </div>
+  </div>
+  <div class="dlg-foot"><div class="grow"></div><button class="btn primary" onclick="this.closest('dialog').close()">Done</button></div>
+</dialog>
+
+<script src="/static/vendor/d3.min.js"></script>
+<script src="/static/hours.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

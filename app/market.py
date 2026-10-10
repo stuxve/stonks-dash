@@ -1,0 +1,456 @@
+"""Market data: providers (Yahoo via yfinance, or a deterministic mock) and a caching quote engine
+that computes period changes (1D..1Y), normalizes sub-unit currencies and converts to a base currency."""
+from __future__ import annotations
+
+import hashlib
+import logging
+import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field, asdict
+from datetime import date, timedelta
+
+import numpy as np
+import pandas as pd
+
+log = logging.getLogger("stonks.market")
+
+PERIODS = ("1D", "1W", "1M", "3M", "6M", "YTD", "1Y")
+SUBUNITS = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0), "ZAc": ("ZAR", 100.0),
+            "ILA": ("ILS", 100.0), "KWF": ("KWD", 1000.0)}
+
+
+def normalize_currency(ccy: str | None) -> tuple[str, float]:
+    """Return (major currency, divisor). GBp -> (GBP, 100)."""
+    if not ccy:
+        return "USD", 1.0
+    if ccy in SUBUNITS:
+        return SUBUNITS[ccy]
+    return ccy.upper(), 1.0
+
+
+def _clean_series(s: pd.Series) -> pd.Series:
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if s.empty:
+        return s
+    idx = pd.DatetimeIndex(s.index)
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    s.index = idx.normalize()
+    s = s[~s.index.duplicated(keep="last")].sort_index()
+    return s.astype(float)
+
+
+# --------------------------------------------------------------------------------------
+# Providers
+# --------------------------------------------------------------------------------------
+class YahooProvider:
+    name = "yahoo"
+
+    def __init__(self):
+        import os
+        import yfinance as yf  # imported lazily so tests can run without network
+        cache = os.path.join(os.getenv("STONKS_DATA_DIR", "/data"), "yf-cache")
+        try:
+            os.makedirs(cache, exist_ok=True)
+            yf.set_tz_cache_location(cache)
+        except Exception as e:  # read-only FS etc. — yfinance still works without the tz cache
+            log.info("yfinance cache disabled: %s", e)
+        self.yf = yf
+
+    def closes(self, symbols: list[str], start: date | None = None, period: str | None = None) -> dict[str, pd.Series]:
+        if not symbols:
+            return {}
+        kw = dict(interval="1d", auto_adjust=False, group_by="ticker", threads=True,
+                  progress=False, multi_level_index=True, timeout=20)
+        if start is not None:
+            kw["start"] = start.isoformat()
+        else:
+            kw["period"] = period or "5d"
+        try:
+            df = self.yf.download(list(symbols), **kw)
+        except Exception as e:  # network / rate limit
+            log.warning("download failed for %d symbols: %s", len(symbols), e)
+            return {}
+        out: dict[str, pd.Series] = {}
+        if df is None or df.empty:
+            return out
+        for sym in symbols:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    lv0 = df.columns.get_level_values(0)
+                    if sym in lv0:
+                        sub = df[sym]
+                    elif sym in df.columns.get_level_values(1):
+                        sub = df.xs(sym, axis=1, level=1)
+                    else:
+                        continue
+                    col = sub["Close"]
+                else:
+                    col = df["Close"]
+                s = _clean_series(col)
+                if not s.empty:
+                    out[sym] = s
+            except Exception as e:
+                log.debug("parse %s failed: %s", sym, e)
+        return out
+
+    def info(self, symbol: str) -> dict:
+        t = self.yf.Ticker(symbol)
+        info: dict = {}
+        try:
+            info = t.get_info() or {}
+        except Exception as e:
+            log.info("info failed for %s: %s", symbol, e)
+        meta = {
+            "name": info.get("shortName") or info.get("longName") or symbol,
+            "long_name": info.get("longName"),
+            "currency": info.get("currency"),
+            "quote_type": info.get("quoteType"),
+            "sector": info.get("sector") or info.get("sectorDisp"),
+            "industry": info.get("industry") or info.get("industryDisp"),
+            "category": info.get("category") or info.get("fundFamily"),
+            "exchange": info.get("fullExchangeName") or info.get("exchange"),
+            "market_cap": info.get("marketCap") or info.get("totalAssets") or info.get("netAssets"),
+        }
+        if not meta["currency"] or not meta["market_cap"]:
+            try:
+                fi = t.fast_info
+                meta["currency"] = meta["currency"] or fi.get("currency")
+                meta["market_cap"] = meta["market_cap"] or fi.get("marketCap")
+                meta["quote_type"] = meta["quote_type"] or fi.get("quoteType")
+            except Exception:
+                pass
+        if not meta["currency"]:
+            # Without the currency we'd silently convert at the wrong FX rate: don't cache, retry later.
+            raise LookupError(f"no metadata for {symbol}")
+        return meta
+
+    def search(self, query: str, limit: int = 10) -> list[dict]:
+        try:
+            s = self.yf.Search(query, max_results=limit, news_count=0, lists_count=0,
+                               recommended=0, include_cb=False, raise_errors=False)
+            quotes = s.quotes or []
+        except Exception as e:
+            log.info("search failed: %s", e)
+            return []
+        out = []
+        for q in quotes:
+            if not q.get("symbol"):
+                continue
+            out.append({
+                "symbol": q["symbol"],
+                "name": q.get("shortname") or q.get("longname") or q["symbol"],
+                "exchange": q.get("exchDisp") or q.get("exchange"),
+                "type": q.get("typeDisp") or q.get("quoteType"),
+            })
+        return out
+
+
+class MockProvider:
+    """Deterministic synthetic data so the app (and tests) run without network access."""
+    name = "mock"
+
+    SECTORS = {
+        "Technology": "AAPL MSFT NVDA AVGO ORCL CRM AMD CSCO IBM INTU ADBE QCOM TXN NOW MU AMAT PLTR ASML.AS SAP.DE IDR.MC AMS.MC",
+        "Communication Services": "GOOGL META NFLX DIS T VZ DTE.DE TEF.MC CLNX.MC",
+        "Consumer Cyclical": "AMZN TSLA HD MCD MC.PA RMS.PA ITX.MC PUIG.MC UBER",
+        "Financial Services": "BRK-B JPM V MA BAC WFC GS MS AXP ALV.DE SAN.MC BBVA.MC CABK.MC SAB.MC BKT.MC UNI.MC MAP.MC ISP.MI UCG.MI HSBA.L BNP.PA INGA.AS",
+        "Healthcare": "LLY JNJ ABBV UNH MRK ABT TMO ISRG SAN.PA NOVO-B.CO ROG.SW NOVN.SW AZN.L GRF.MC ROVI.MC",
+        "Consumer Defensive": "WMT COST PG KO PM PEP OR.PA NESN.SW ULVR.L",
+        "Energy": "XOM CVX TTE.PA SHEL.L REP.MC",
+        "Industrials": "GE CAT BA SIE.DE AIR.PA SU.PA RHM.DE ACS.MC AENA.MC FER.MC IAG.MC SCYR.MC LOG.MC",
+        "Utilities": "NEE IBE.MC ENEL.MI ELE.MC NTGY.MC RED.MC ENG.MC ANA.MC ANE.MC SLR.MC",
+        "Basic Materials": "LIN ACX.MC MTS.MC",
+        "Real Estate": "COL.MC MRL.MC",
+    }
+    ETFS = set("VWCE.DE IWDA.AS EUNL.DE SXR8.DE CSPX.L VUSA.AS IS3N.DE XDWD.DE MEUD.PA EQQQ.DE "
+               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD".split())
+
+    def __init__(self):
+        self._sector = {s: sec for sec, syms in self.SECTORS.items() for s in syms.split()}
+        self.fail = set()  # symbols that should behave as unknown (for tests)
+
+    @staticmethod
+    def _seed(sym: str) -> int:
+        return int(hashlib.sha256(sym.encode()).hexdigest()[:8], 16)
+
+    def _quote_type(self, sym: str) -> str:
+        if sym.startswith("^") or sym in ("FTSEMIB.MI", "PSI20.LS", "000001.SS", "DX-Y.NYB"):
+            return "INDEX"
+        if sym.endswith("-USD"):
+            return "CRYPTOCURRENCY"
+        if sym.endswith("=F"):
+            return "FUTURE"
+        if sym.endswith("=X"):
+            return "CURRENCY"
+        if sym in self.ETFS:
+            return "ETF"
+        if sym.startswith("0P"):
+            return "MUTUALFUND"
+        return "EQUITY"
+
+    def _currency(self, sym: str) -> str:
+        if sym.endswith("=X"):
+            pair = sym[:-2]
+            return pair[3:6] if len(pair) == 6 else "USD"
+        for suf, c in ((".DE", "EUR"), (".AS", "EUR"), (".PA", "EUR"), (".MC", "EUR"), (".MI", "EUR"),
+                       (".LS", "EUR"), (".L", "GBp"), (".SW", "CHF"), (".CO", "DKK"), (".SS", "CNY"),
+                       (".HK", "HKD"), (".T", "JPY")):
+            if sym.endswith(suf):
+                return c
+        return "USD"
+
+    _FX = {"EURUSD": 1.09, "GBPUSD": 1.27, "CHFUSD": 1.13, "DKKUSD": 0.146, "JPYUSD": 0.0067,
+           "CNYUSD": 0.138, "HKDUSD": 0.128, "ZARUSD": 0.055}
+
+    def _base_level(self, sym: str) -> float:
+        if sym.endswith("=X"):
+            pair = sym[:-2]
+            a, b = pair[:3], pair[3:6]
+            usd = lambda c: 1.0 if c == "USD" else self._FX.get(f"{c}USD", 1.0)  # noqa: E731
+            return usd(a) / usd(b)
+        r = np.random.default_rng(self._seed(sym))
+        qt = self._quote_type(sym)
+        if qt == "INDEX":
+            return float(r.uniform(800, 40000))
+        if qt == "CRYPTOCURRENCY":
+            return float(r.choice([0.2, 1.5, 30, 150, 600, 3000, 60000]) * r.uniform(0.8, 1.3))
+        lvl = float(np.exp(r.uniform(np.log(5), np.log(900))))
+        return lvl * (100 if self._currency(sym) == "GBp" else 1)
+
+    def _series(self, sym: str, start: date) -> pd.Series:
+        r = np.random.default_rng(self._seed(sym))
+        end = date.today()
+        days = pd.bdate_range(start=date(end.year - 2, 1, 1), end=end)
+        if self._quote_type(sym) == "CRYPTOCURRENCY":
+            days = pd.date_range(start=date(end.year - 2, 1, 1), end=end)
+        vol = 0.004 if sym.endswith("=X") else (0.035 if sym.endswith("-USD") else r.uniform(0.008, 0.022))
+        drift = 0.0 if sym.endswith("=X") else r.uniform(-0.0003, 0.0011)
+        rets = r.normal(drift, vol, len(days))
+        level = self._base_level(sym) * np.exp(np.cumsum(rets) - np.sum(rets))
+        # intraday wobble on the last bar so auto-refresh visibly changes something
+        minute = int(time.time() // 60)
+        level[-1] *= float(np.exp(np.random.default_rng(self._seed(sym) ^ minute).normal(0, vol * 0.3)))
+        s = pd.Series(level, index=days)
+        return s[s.index >= pd.Timestamp(start)]
+
+    def closes(self, symbols, start=None, period=None):
+        if start is None:
+            start = date.today() - timedelta(days=8)
+        return {s: self._series(s, start) for s in symbols if s not in self.fail}
+
+    def info(self, symbol: str) -> dict:
+        r = np.random.default_rng(self._seed(symbol) + 7)
+        qt = self._quote_type(symbol)
+        cap = None
+        if qt == "EQUITY":
+            cap = float(np.exp(r.uniform(np.log(1.5e10), np.log(3.5e12))))
+        elif qt in ("ETF", "MUTUALFUND"):
+            cap = float(np.exp(r.uniform(np.log(2e9), np.log(6e11))))
+        elif qt == "CRYPTOCURRENCY":
+            cap = float(np.exp(r.uniform(np.log(5e9), np.log(1.8e12))))
+        return {
+            "name": symbol.split(".")[0].replace("^", "") + (" Index" if qt == "INDEX" else " Corp" if qt == "EQUITY" else ""),
+            "long_name": None,
+            "currency": self._currency(symbol),
+            "quote_type": qt,
+            "sector": self._sector.get(symbol) if qt == "EQUITY" else None,
+            "industry": None,
+            "category": "Global equity" if qt == "ETF" else None,
+            "exchange": "MOCK",
+            "market_cap": cap,
+        }
+
+    def search(self, query: str, limit: int = 10) -> list[dict]:
+        from . import seeds
+        pool = set(seeds.US_MEGACAPS + seeds.EUROPE_LEADERS + seeds.IBEX35 + seeds.CRYPTO)
+        pool |= {s for s, *_ in seeds.WORLD_INDICES + seeds.INDEX_FUNDS_ETFS + seeds.MACRO}
+        q = query.strip().upper()
+        hits = sorted(s for s in pool if q in s)[:limit]
+        return [{"symbol": s, "name": self.info(s)["name"], "exchange": "MOCK",
+                 "type": self._quote_type(s)} for s in hits]
+
+
+# --------------------------------------------------------------------------------------
+# Quote engine
+# --------------------------------------------------------------------------------------
+@dataclass
+class Quote:
+    symbol: str
+    ok: bool = False
+    name: str | None = None
+    currency: str = "USD"          # major unit (GBp normalized to GBP)
+    price: float | None = None
+    prev_close: float | None = None
+    last_date: str | None = None
+    changes: dict = field(default_factory=dict)   # period -> pct (e.g. -1.23)
+    market_cap: float | None = None               # in `currency`
+    quote_type: str | None = None
+    sector: str | None = None
+    industry: str | None = None
+    category: str | None = None
+    exchange: str | None = None
+    spark: list = field(default_factory=list)     # last ~30 closes for tooltip sparkline
+
+    def to_dict(self):
+        return asdict(self)
+
+
+def _ref_close(s: pd.Series, target: pd.Timestamp) -> float | None:
+    sub = s[s.index <= target]
+    if sub.empty:
+        return None
+    return float(sub.iloc[-1])
+
+
+def compute_changes(s: pd.Series) -> tuple[float | None, float | None, dict, str | None]:
+    """Return (last, prev_close, changes{period: pct}, last_date) from a daily close series."""
+    if s is None or s.empty:
+        return None, None, {}, None
+    last_ts = s.index[-1]
+    last = float(s.iloc[-1])
+    prev = float(s.iloc[-2]) if len(s) >= 2 else None
+    targets = {
+        "1W": last_ts - pd.Timedelta(days=7),
+        "1M": last_ts - pd.DateOffset(months=1),
+        "3M": last_ts - pd.DateOffset(months=3),
+        "6M": last_ts - pd.DateOffset(months=6),
+        "YTD": pd.Timestamp(year=last_ts.year - 1, month=12, day=31),
+        "1Y": last_ts - pd.DateOffset(years=1),
+    }
+    ch = {"1D": (last / prev - 1) * 100 if prev else None}
+    for p, t in targets.items():
+        ref = _ref_close(s, t)
+        ch[p] = (last / ref - 1) * 100 if ref else None
+    ch = {k: (None if v is None or not math.isfinite(v) else round(v, 4)) for k, v in ch.items()}
+    return last, prev, ch, last_ts.date().isoformat()
+
+
+class QuoteEngine:
+    def __init__(self, provider, db, recent_ttl: float = 60, history_ttl: float = 6 * 3600,
+                 meta_ttl: float = 24 * 3600, workers: int = 8):
+        self.p = provider
+        self.db = db
+        self.recent_ttl = recent_ttl
+        self.history_ttl = history_ttl
+        self.meta_ttl = meta_ttl
+        self.workers = workers
+        self._recent: dict[str, tuple[float, pd.Series]] = {}
+        self._hist: dict[str, tuple[float, pd.Series]] = {}
+        self._miss: dict[str, float] = {}   # negative cache for symbols with no data
+        self._meta_miss: dict[str, float] = {}
+        self.meta_retry = 600.0
+        self._lock = threading.Lock()
+        self.last_update: float | None = None
+
+    # ---- raw series with TTL caches ----
+    def _fetch(self, cache: dict, symbols: list[str], ttl: float, **kw) -> None:
+        now = time.time()
+        stale = [s for s in symbols
+                 if (s not in cache or now - cache[s][0] > ttl)
+                 and not (s in self._miss and now - self._miss[s] < ttl)]
+        if not stale:
+            return
+        for i in range(0, len(stale), 80):
+            chunk = stale[i:i + 80]
+            data = self.p.closes(chunk, **kw)
+            for s in chunk:
+                if s in data:
+                    cache[s] = (now, data[s])
+                    self._miss.pop(s, None)
+                elif s not in cache:
+                    self._miss[s] = now
+
+    def series(self, symbols: list[str]) -> dict[str, pd.Series]:
+        symbols = list(dict.fromkeys(symbols))
+        with self._lock:
+            self._fetch(self._hist, symbols, self.history_ttl, start=date.today() - timedelta(days=400))
+            self._fetch(self._recent, symbols, self.recent_ttl, period="5d")
+            self.last_update = time.time()
+            out = {}
+            for s in symbols:
+                parts = [c[1] for c in (self._hist.get(s), self._recent.get(s)) if c is not None]
+                if not parts:
+                    continue
+                merged = pd.concat(parts)
+                merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+                out[s] = merged
+            return out
+
+    # ---- metadata ----
+    def meta(self, symbols: list[str]) -> dict[str, dict]:
+        symbols = list(dict.fromkeys(symbols))
+        have = self.db.get_meta(symbols, self.meta_ttl)
+        now = time.time()
+        missing = [s for s in symbols if s not in have
+                   and now - self._meta_miss.get(s, 0) > self.meta_retry]
+        if missing:
+            def fetch(s):
+                try:
+                    return s, self.p.info(s)
+                except Exception as e:
+                    log.info("meta %s failed: %s", s, e)
+                    return s, None
+            with ThreadPoolExecutor(max_workers=self.workers) as ex:
+                for s, m in ex.map(fetch, missing):
+                    if m:
+                        self.db.put_meta(s, m)
+                        have[s] = m
+                        self._meta_miss.pop(s, None)
+                    else:
+                        self._meta_miss[s] = time.time()
+        # stale cache beats nothing (e.g. Yahoo rate-limited us)
+        still = [s for s in symbols if s not in have]
+        if still:
+            have.update(self.db.get_meta(still, max_age=10 * 365 * 86400))
+        return have
+
+    # ---- quotes ----
+    def quotes(self, symbols: list[str]) -> dict[str, Quote]:
+        symbols = [s for s in dict.fromkeys(symbols) if s]
+        ser = self.series(symbols)
+        meta = self.meta(symbols)
+        out = {}
+        for s in symbols:
+            m = meta.get(s) or {}
+            ccy, div = normalize_currency(m.get("currency"))
+            q = Quote(symbol=s, name=m.get("name") or s, currency=ccy, quote_type=m.get("quote_type"),
+                      sector=m.get("sector"), industry=m.get("industry"), category=m.get("category"),
+                      exchange=m.get("exchange"))
+            mc = m.get("market_cap")
+            q.market_cap = float(mc) if mc else None
+            series = ser.get(s)
+            if series is not None and not series.empty:
+                last, prev, ch, ld = compute_changes(series)
+                q.ok = True
+                q.price = last / div
+                q.prev_close = prev / div if prev else None
+                q.changes = ch
+                q.last_date = ld
+                q.spark = [round(float(v) / div, 6) for v in series.iloc[-30:].tolist()]
+            out[s] = q
+        return out
+
+    # ---- FX ----
+    def fx_rates(self, currencies: set[str], base: str) -> dict[str, float]:
+        """Map currency -> multiplier to convert into `base`."""
+        base = base.upper()
+        rates = {base: 1.0}
+        need = sorted(c for c in currencies if c and c != base)
+        if not need:
+            return rates
+        pairs = {c: f"{c}{base}=X" for c in need}
+        ser = self.series(list(pairs.values()))
+        for c, pair in pairs.items():
+            s = ser.get(pair)
+            if s is not None and not s.empty:
+                rates[c] = float(s.iloc[-1])
+            elif c != "USD" and base != "USD":
+                # try via USD cross
+                via = self.series([f"{c}USD=X", f"USD{base}=X"])
+                a, b = via.get(f"{c}USD=X"), via.get(f"USD{base}=X")
+                if a is not None and b is not None and not a.empty and not b.empty:
+                    rates[c] = float(a.iloc[-1]) * float(b.iloc[-1])
+        return rates

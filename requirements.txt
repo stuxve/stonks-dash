@@ -1,0 +1,8 @@
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pandas==3.0.6
+numpy==2.5.3
+# Yahoo changes its endpoints now and then; newer yfinance releases follow. Rebuild with --pull to update.
+yfinance>=1.7.0
+# Exchange holiday calendars are data that ships with each release: keep it current.
+exchange_calendars>=4.13.2

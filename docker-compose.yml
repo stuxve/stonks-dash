@@ -1,0 +1,27 @@
+services:
+  stonks-dash:
+    build: .
+    image: stonks-dash:latest
+    container_name: stonks-dash
+    restart: unless-stopped
+    ports:
+      # No auth built in: bound to localhost by default.
+      # For LAN / VPN access set STONKS_BIND=0.0.0.0 (or put it behind your reverse proxy).
+      - "${STONKS_BIND:-127.0.0.1}:${STONKS_PORT:-8000}:8000"
+    environment:
+      TZ: ${TZ:-Europe/Madrid}
+      STONKS_PROVIDER: ${STONKS_PROVIDER:-yahoo}      # yahoo | mock (offline demo data)
+      STONKS_QUOTE_TTL: ${STONKS_QUOTE_TTL:-60}       # seconds between live price fetches
+      STONKS_HISTORY_TTL: ${STONKS_HISTORY_TTL:-21600}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - stonks-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  stonks-data:
