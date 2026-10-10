@@ -71,11 +71,27 @@
   <!-- ============================ PORTFOLIO ============================ -->
   <section id="view-portfolio" class="view" hidden>
     <div class="kpis" id="kpis"></div>
+    <div class="subnav" id="p-subnav" role="tablist">
+      <button data-sub="holdings" class="active">Holdings</button>
+      <button data-sub="performance">Performance vs index</button>
+      <button data-sub="allocation">Allocation</button>
+      <button data-sub="exposure">Exposure</button>
+      <button data-sub="costs">Costs</button>
+      <button data-sub="taxes">Taxes · ES</button>
+      <button data-sub="ledger">Transactions</button>
+      <div class="grow"></div>
+      <button id="add-position" class="btn primary">+ Buy</button>
+      <button id="add-sell" class="btn ghost">Sell</button>
+      <button id="add-div" class="btn ghost">Dividend</button>
+    </div>
+
+    <div id="p-sub-holdings" class="psub">
     <div class="toolbar">
       <label class="ctl">Color by
         <select id="p-color">
           <option value="pnl">Total P&amp;L %</option>
           <option value="period">Price change (period)</option>
+          <option value="bench">Vs index (same dates)</option>
         </select>
       </label>
       <div class="seg period-seg" data-scope="portfolio"></div>
@@ -101,8 +117,6 @@
       <label class="ctl check" title="Show several buys of the same asset as one position (weighted average cost). Nothing is changed in your data.">
         <input type="checkbox" id="p-combine" checked> Combine lots
       </label>
-      <div class="grow"></div>
-      <button id="add-position" class="btn primary">+ Add position</button>
     </div>
     <div class="crumbs" id="p-crumbs"></div>
     <div class="map short" id="p-map"><div class="loading">Loading…</div></div>
@@ -111,6 +125,163 @@
       <table id="p-table" class="grid">
         <thead></thead><tbody></tbody><tfoot></tfoot>
       </table>
+    </div>
+    </div>
+
+    <!-- performance vs benchmark -->
+    <div id="p-sub-performance" class="psub" hidden>
+      <div class="toolbar">
+        <label class="ctl">Benchmark
+          <select id="perf-bench">
+            <option value="IWDA.AS">MSCI World — IWDA.AS</option>
+            <option value="VWCE.DE">FTSE All-World — VWCE.DE</option>
+            <option value="SXR8.DE">S&amp;P 500 — SXR8.DE</option>
+            <option value="EQQQ.DE">Nasdaq-100 — EQQQ.DE</option>
+            <option value="IS3N.DE">Emerging markets — IS3N.DE</option>
+            <option value="MEUD.PA">Stoxx Europe 600 — MEUD.PA</option>
+            <option value="__custom">Other ticker…</option>
+          </select>
+        </label>
+        <input id="perf-bench-custom" type="text" placeholder="Ticker, e.g. VOO" hidden>
+        <div class="seg" id="perf-range"><button data-v="6M">6M</button><button data-v="1Y">1Y</button><button data-v="YTD">YTD</button><button data-v="ALL" class="active">All</button></div>
+        <div class="grow"></div>
+        <span class="hint" id="perf-note"></span>
+      </div>
+      <div class="kpis small" id="perf-kpis"></div>
+      <div class="chart-card">
+        <div class="chart-legend" id="perf-legend"></div>
+        <div id="perf-chart" class="chart"><div class="loading">Loading history…</div></div>
+      </div>
+      <p class="hint perf-explain">Every euro you invested or took out on a date is mirrored as a buy or sell of the benchmark on that same date (“shadow portfolio”).
+        Annual return is money-weighted (XIRR), so it accounts for when you added money.</p>
+      <h3 class="sub-h">Each position vs the index over the same dates</h3>
+      <div class="table-wrap"><table class="grid" id="perf-table"><thead></thead><tbody></tbody></table></div>
+    </div>
+
+    <!-- allocation targets -->
+    <div id="p-sub-allocation" class="psub" hidden>
+      <div class="toolbar">
+        <label class="ctl">Allocate by
+          <select id="alloc-dim">
+            <option value="group_name">My groups</option>
+            <option value="type">Asset type</option>
+            <option value="account">Account</option>
+            <option value="sector">Sector</option>
+            <option value="symbol">Each asset</option>
+          </select>
+        </label>
+        <label class="ctl">Measure by
+          <span class="seg" id="alloc-basis"><button data-v="value">Market value</button><button data-v="cost">Money invested</button></span>
+        </label>
+        <div class="grow"></div>
+        <span id="alloc-sum" class="hint"></span>
+      </div>
+      <div class="table-wrap"><table class="grid" id="alloc-table"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
+      <div class="addrow alloc-add">
+        <div class="field grow symbol-search"><span id="alloc-new-label">Add an asset you don't hold yet</span>
+          <input id="alloc-new-name" type="text" autocomplete="off" placeholder="Search a real ticker, company or ISIN — e.g. VWCE, Apple, IE00BK5BQT80">
+          <ul class="suggest" hidden></ul>
+        </div>
+        <label class="field" id="alloc-new-pct-label">Target %<input id="alloc-new-pct" type="number" min="0" max="100" step="0.5"></label>
+        <button id="alloc-new-btn" class="btn ghost">Add</button>
+        <div id="alloc-new-hint" class="hint alloc-hint"></div>
+      </div>
+      <div class="contrib">
+        <h3 class="sub-h">Next order</h3>
+        <div class="row plan-inputs">
+          <label class="field">Goal — total money invested<input id="plan-goal" type="number" min="0" step="100" placeholder="e.g. 5000"></label>
+          <label class="field">Monthly contribution<input id="plan-monthly" type="number" min="0" step="10" placeholder="e.g. 300"></label>
+          <div class="field">Orders per month <span class="seg" id="plan-k"><button data-v="1">1</button><button data-v="2">2</button><button data-v="3">3</button></span></div>
+          <p class="hint grow">Tells you what to buy with this month's money: the asset furthest below its target, based on the money you've invested (not market value).
+            Whole orders only, so you pay as few fixed fees as possible. Buys only — nothing is sold. After you record the buy, the next order updates.</p>
+        </div>
+        <div id="plan-out"></div>
+      </div>
+      <div class="contrib">
+        <h3 class="sub-h">Monthly plan</h3>
+        <p class="hint">The whole path to your goal with the same goal, monthly amount and orders per month as above. It is recalculated every time you record a buy.</p>
+        <div class="row plan-inputs">
+          <label class="field">Expected return per year (%)<input id="proj-ret" type="number" step="0.5" placeholder="6"></label>
+          <label class="field">± range (%)<input id="proj-band" type="number" step="0.5" min="0" placeholder="2"></label>
+          <p class="hint grow">Used only for the projection below — an assumption, not a prediction. Markets don't move in straight lines; the range shows how much a couple of points per year changes the outcome.</p>
+        </div>
+        <div id="mplan-out"></div>
+      </div>
+    </div>
+
+    <!-- look-through exposure -->
+    <div id="p-sub-exposure" class="psub" hidden>
+      <div class="toolbar">
+        <div class="seg" id="expo-dim"><button data-v="companies" class="active">Companies</button><button data-v="sectors">Sectors</button><button data-v="countries">Countries</button><button data-v="currencies">Currencies</button></div>
+        <label class="ctl check" id="expo-rest-wrap"><input type="checkbox" id="expo-rest" checked> Show “Other holdings” of funds</label>
+        <div class="grow"></div>
+        <div class="chart-legend inline-legend"><span class="lk s-port"><i class="sq"></i>Direct</span><span class="lk s-bench"><i class="sq"></i>Through funds</span></div>
+      </div>
+      <div class="callout" id="expo-overlap" hidden></div>
+      <div class="chart-card"><div id="expo-bars" class="xbars"></div></div>
+      <p class="hint" id="expo-note"></p>
+      <div class="table-wrap"><table class="grid" id="expo-table"><thead></thead><tbody></tbody></table></div>
+      <h3 class="sub-h">Your funds</h3>
+      <div class="table-wrap"><table class="grid" id="expo-funds"><thead></thead><tbody></tbody></table></div>
+    </div>
+
+    <!-- costs & fees -->
+    <div id="p-sub-costs" class="psub" hidden>
+      <div class="kpis small" id="cost-kpis"></div>
+      <div class="callout warn" id="cost-missing" hidden></div>
+      <h3 class="sub-h first">By account</h3>
+      <div class="table-wrap"><table class="grid" id="cost-accounts"><thead></thead><tbody></tbody></table></div>
+      <p class="hint">A fixed fee hurts small orders: €1 on a €20 buy is 5%, on €500 it's 0.2%. Grouping buys into fewer, larger orders — or using the broker's free savings plans if it has them — keeps this low.</p>
+      <div class="cost-cols">
+        <div><h3 class="sub-h">Most expensive trades</h3><div class="table-wrap"><table class="grid" id="cost-top"><thead></thead><tbody></tbody></table></div></div>
+        <div><h3 class="sub-h">Fund running costs (TER)</h3><div class="table-wrap"><table class="grid" id="cost-ongoing"><thead></thead><tbody></tbody></table></div>
+          <h3 class="sub-h">By year</h3><div class="table-wrap"><table class="grid" id="cost-years"><thead></thead><tbody></tbody></table></div></div>
+      </div>
+    </div>
+
+    <!-- Spanish taxes -->
+    <div id="p-sub-taxes" class="psub" hidden>
+      <div class="toolbar">
+        <label class="ctl">Tax year <select id="tax-year"></select></label>
+        <div class="grow"></div>
+        <span class="hint">IRPF · base del ahorro · EUR</span>
+      </div>
+      <div class="kpis small" id="tax-kpis"></div>
+      <div class="callout warn" id="tax-warnings" hidden></div>
+      <div id="tax-detail"></div>
+      <h3 class="sub-h">Sales</h3>
+      <div class="table-wrap"><table class="grid" id="tax-sales"><thead></thead><tbody></tbody></table></div>
+      <div id="tax-now">
+        <h3 class="sub-h">Losses you could realize to offset this year's gains</h3>
+        <div class="table-wrap"><table class="grid" id="tax-harvest"><thead></thead><tbody></tbody></table></div>
+        <h3 class="sub-h">If you sold today</h3>
+        <div class="table-wrap"><table class="grid" id="tax-whatif"><thead></thead><tbody></tbody><tfoot></tfoot></table></div>
+      </div>
+      <h3 class="sub-h">All years</h3>
+      <div class="table-wrap"><table class="grid" id="tax-years"><thead></thead><tbody></tbody></table></div>
+      <div class="addrow prior-row">
+        <div class="field grow">Losses carried from years before you used this app <div id="tax-prior" class="chips-in"></div></div>
+        <label class="field">Year<input id="tax-prior-year" type="number" min="1990" step="1" placeholder="2024"></label>
+        <label class="field">Pending loss (€)<input id="tax-prior-amt" type="number" min="0" step="any"></label>
+        <button id="tax-prior-add" class="btn ghost">Add</button>
+      </div>
+      <p class="hint" id="tax-note"></p>
+    </div>
+
+    <!-- transactions ledger -->
+    <div id="p-sub-ledger" class="psub" hidden>
+      <h3 class="sub-h first">Realized per year <span class="hint">— FIFO per asset and account, FX of each date</span></h3>
+      <div class="table-wrap"><table class="grid" id="years-table"><thead></thead><tbody></tbody></table></div>
+      <div class="toolbar ledger-bar">
+        <h3 class="sub-h">All transactions</h3>
+        <div class="grow"></div>
+        <label class="ctl">Year <select id="led-year"></select></label>
+        <label class="ctl">Type
+          <select id="led-type"><option value="">All</option><option value="BUY">Buys</option><option value="SELL">Sells</option><option value="DIVIDEND">Dividends</option></select>
+        </label>
+      </div>
+      <div class="table-wrap"><table class="grid" id="led-table"><thead></thead><tbody></tbody></table></div>
+      <p class="hint" id="led-note"></p>
     </div>
   </section>
   <!-- ============================ MARKET HOURS ============================ -->
@@ -201,6 +372,7 @@
       <label class="field grow">Quantity<input name="quantity" type="number" step="any" min="0" required></label>
       <label class="field grow">Avg. cost / unit<input name="avg_cost" type="number" step="any" min="0" required></label>
       <label class="field">Cost currency<select name="currency"></select></label>
+      <label class="field">Fees<input name="fees" type="number" step="any" min="0" placeholder="0"></label>
     </div>
     <p class="hint">Cost currency is what you paid in. Bought a US stock from a EUR account? Enter the EUR cost per share so P&amp;L includes the FX effect exactly.</p>
     <div class="row">
@@ -228,6 +400,45 @@
   <div class="dlg-foot"><div class="grow"></div>
     <button class="btn ghost" onclick="this.closest('dialog').close()">Cancel</button>
     <button id="h-save" class="btn primary">Save</button></div>
+</dialog>
+
+<dialog id="dlg-tx" class="dlg">
+  <form method="dialog" class="dlg-head"><h2 id="tx-title">Record a sale</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <form id="tx-form" class="dlg-body">
+    <div class="row">
+      <div class="field grow symbol-search">Symbol
+        <input name="symbol" type="text" autocomplete="off" required>
+        <ul class="suggest" hidden></ul>
+      </div>
+      <label class="field grow">Account<input name="account" type="text" list="acct-list"></label>
+      <label class="field">Date<input name="date" type="date" required></label>
+    </div>
+    <div id="tx-held" class="hint"></div>
+    <div class="row" data-mode="SELL">
+      <label class="field grow">Quantity sold
+        <span class="inline"><input name="quantity" type="number" step="any" min="0"><button type="button" id="tx-all" class="btn ghost">All</button></span>
+      </label>
+      <label class="field grow">Price per unit<input name="price" type="number" step="any" min="0"></label>
+      <label class="field">Fees<input name="fees" type="number" step="any" min="0" placeholder="0"></label>
+    </div>
+    <div class="row" data-mode="DIVIDEND">
+      <label class="field grow">Gross amount<input name="amount" type="number" step="any" min="0"></label>
+      <label class="field grow">Withheld at source<input name="withholding" type="number" step="any" min="0" placeholder="0"></label>
+    </div>
+    <div class="row">
+      <label class="field">Currency<select name="currency"></select></label>
+      <label class="field grow">Notes<input name="notes" type="text"></label>
+    </div>
+    <p class="hint" data-mode="SELL">Sales are matched to your oldest buys first (FIFO, per asset and account), the way Hacienda computes the gain.</p>
+    <p class="hint" data-mode="DIVIDEND">Enter what the broker reports: gross dividend and the tax withheld (e.g. 15% for US stocks with W-8BEN).</p>
+    <div id="tx-error" class="error" hidden></div>
+  </form>
+  <div class="dlg-foot">
+    <button id="tx-delete" class="btn danger" hidden>Delete</button>
+    <div class="grow"></div>
+    <button class="btn ghost" onclick="this.closest('dialog').close()">Cancel</button>
+    <button id="tx-save" class="btn primary">Save</button>
+  </div>
 </dialog>
 
 <dialog id="dlg-settings" class="dlg">
@@ -264,6 +475,9 @@
 
 <script src="/static/vendor/d3.min.js"></script>
 <script src="/static/hours.js"></script>
+<script src="/static/planner.js"></script>
+<script src="/static/insights.js"></script>
+<script src="/static/portfolio.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -385,6 +385,7 @@
     state.port = await api(`/api/portfolio?base=${base()}`);
     $("#demo-badge").hidden = state.port.provider !== "mock";
     drawPortfolio();
+    pf.onPortfolio();
     stamp(state.port.as_of);
   }
 
@@ -433,6 +434,13 @@
       value, cost, pnl,
       pnl_pct: cost ? (pnl / cost) * 100 : null,
       day_pnl: sum("day_pnl"),
+      ...(() => {
+        const withB = lots.filter((l) => l.bench_value != null && l.cost);
+        if (!withB.length) return {};
+        const c = withB.reduce((a, l) => a + l.cost, 0), bv = withB.reduce((a, l) => a + l.bench_value, 0);
+        const vv = withB.reduce((a, l) => a + l.value, 0);
+        return { bench_value: bv, vs_bench: ((vv - bv) / c) * 100, bench_ret: (bv / c - 1) * 100 };
+      })(),
       account: accounts.length > 1 ? `${accounts.length} accounts` : accounts[0] || null,
       group_name: groups.length > 1 ? `${groups.length} groups` : groups[0] || null,
       bought_at: dates[0] || null,       // held since the first buy
@@ -450,7 +458,7 @@
     const positions = shownPositions(d, v);
     const period = state.settings.period || "1D";
     $$('.period-seg[data-scope="portfolio"]').forEach((s) => s.classList.toggle("disabled", v.color !== "period"));
-    const valueOf = (p) => (!p.ok ? null : v.color === "pnl" ? p.pnl_pct : p.changes?.[period]);
+    const valueOf = (p) => (!p.ok ? null : v.color === "pnl" ? p.pnl_pct : v.color === "bench" ? p.vs_bench ?? null : p.changes?.[period]);
     const vals = positions.map(valueOf);
     const range = currentRange(vals);
     const color = makeColor(range);
@@ -469,7 +477,7 @@
       tooltip: (p) => portfolioTip(p, period, color, v.color),
     });
     renderCrumbs("#p-crumbs", "portfolio", drawPortfolio);
-    renderLegend($("#p-legend"), range, color, v.color === "pnl" ? "Total P&L" : `${period} change`);
+    renderLegend($("#p-legend"), range, color, v.color === "pnl" ? "Total P&L" : v.color === "bench" ? `vs ${d.benchmark?.symbol || "index"} (pp)` : `${period} change`);
     renderTable(d, positions);
   }
 
@@ -480,6 +488,10 @@
       ["Invested", fmtMoney(t.cost, b), "cost basis at current FX"],
       ["Unrealized P&L", `<span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)}</span>`, `<span class="${cls(t.pnl)}">${fmtPct(t.pnl_pct)}</span>`],
       ["Today", `<span class="${cls(t.day_pnl)}">${fmtSigned(t.day_pnl, b)}</span>`, `<span class="${cls(t.day_pnl)}">${fmtPct(t.day_pct)}</span>`],
+      ["Realized + dividends", `<span class="${cls((t.realized || 0) + (t.dividends || 0))}">${fmtSigned((t.realized || 0) + (t.dividends || 0), b)}</span>`,
+        `sold ${fmtSigned(t.realized || 0, b)} · div. ${fmtSigned(t.dividends || 0, b)}${t.fees ? ` · fees ${fmtMoney(t.fees, b)}` : ""}`],
+      ["Vs index", t.vs_bench == null ? "—" : `<span class="${cls(t.vs_bench)}">${t.vs_bench > 0 ? "+" : t.vs_bench < 0 ? "−" : ""}${Math.abs(t.vs_bench).toFixed(2)} pp</span>`,
+        t.vs_bench == null ? `${esc(state.port?.benchmark?.symbol || "")} unavailable` : `index on same dates: ${fmtMoney(t.bench_value, b)}`],
     ].map(([k, v, d]) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`).join("");
   }
 
@@ -496,6 +508,7 @@
       ["Today", `<span class="${cls(p.day_pnl)}">${fmtSigned(p.day_pnl, b)}</span>`],
       ["Weight", total && p.value ? fmtPct(p.value / total * 100, 1).replace("+", "") : "—"],
     ];
+    if (p.vs_bench != null) rows.push([`Vs ${esc(state.port.benchmark?.symbol || "index")}`, `<span class="${cls(p.vs_bench)}">${fmtPP(p.vs_bench)}</span> <span class="sub">idx ${fmtPct(p.bench_ret, 1)}</span>`]);
     if (p.bought_at) rows.push([p.lots ? "Held (first buy)" : "Held", `${fmtHeld(p.bought_at)} <span class="sub">· ${fmtDate(p.bought_at)}</span>`]);
     if (p.account) rows.push([p.lots && p.account.endsWith("accounts") ? "Accounts" : "Account",
       esc(p.lots && p.account.endsWith("accounts") ? [...new Set(p.lots.map((l) => l.account))].join(", ") : p.account)]);
@@ -527,8 +540,13 @@
     { key: "value", label: "Value", num: true },
     { key: "pnl", label: "P&L", num: true },
     { key: "pnl_pct", label: "P&L %", num: true },
+    { key: "vs_bench", label: "Vs index", num: true },
     { key: "weight", label: "Weight", num: true },
   ];
+  const fmtPP = (v) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} pp`);
+  const vsCell = (p) => (p.vs_bench == null
+    ? `<td class="num"><span class="sub">—</span></td>`
+    : `<td class="num ${cls(p.vs_bench)}" title="Index over the same dates: ${fmtPct(p.bench_ret)}">${fmtPP(p.vs_bench)}<div class="sub">idx ${fmtPct(p.bench_ret, 1)}</div></td>`);
   function renderTable(d, positions = d.positions) {
     const b = base();
     const total = d.totals.value || 0;
@@ -554,8 +572,9 @@
       <td class="num">${fmtMoney(l.value, b)}</td>
       <td class="num ${cls(l.pnl)}">${fmtSigned(l.pnl, b)}</td>
       <td class="num ${cls(l.pnl_pct)}">${fmtPct(l.pnl_pct)}</td>
+      ${vsCell(l)}
       <td class="num">${total && l.value ? (l.value / total * 100).toFixed(1) + "%" : "—"}</td>
-      <td><div class="row-actions"><button class="edit" title="Edit lot">Edit</button><button class="del" title="Delete lot">Delete</button></div></td></tr>`;
+      <td><div class="row-actions"><button class="sell" title="Sell from this account">Sell</button><button class="edit" title="Edit lot">Edit</button><button class="del" title="Delete lot">Delete</button></div></td></tr>`;
     t.tBodies[0].innerHTML = rows.map((p) => (p.lots ? `<tr class="merged ${open.has(p.mkey) ? "open" : ""}" data-mkey="${esc(p.mkey)}">` : `<tr data-id="${p.id}">`) + `
       <td class="asset">${p.lots ? `<button class="exp" title="Show lots">${open.has(p.mkey) ? "▾" : "▸"}</button>` : ""}<b>${esc(p.symbol || "—")}</b>${p.quote_type === "MANUAL" ? '<span class="pill">manual</span>' : ""}${p.lots ? `<span class="pill">${p.lots.length} lots</span>` : ""}<div class="sub">${esc(p.display_name)}</div></td>
       <td>${esc(p.account || "")}${p.group_name ? `<div class="sub">${esc(p.group_name)}</div>` : ""}</td>
@@ -567,14 +586,16 @@
       <td class="num">${fmtMoney(p.value, b)}</td>
       <td class="num ${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</td>
       <td class="num ${cls(p.pnl_pct)}">${fmtPct(p.pnl_pct)}</td>
+      ${vsCell(p)}
       <td class="num">${p.weight == null ? "—" : p.weight.toFixed(1) + "%"}</td>
-      <td>${p.lots ? `<div class="row-actions"><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
-        : `<div class="row-actions"><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
+      <td>${p.lots ? `<div class="row-actions"><button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
+        : `<div class="row-actions"><button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
     </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map(lotRow).join("") : "")).join("");
     const tt = d.totals;
     t.tFoot.innerHTML = rows.length ? `<tr><td>Total</td><td></td><td></td><td></td><td></td><td></td>
       <td class="num ${cls(tt.day_pct)}">${fmtPct(tt.day_pct)}</td><td class="num">${fmtMoney(tt.value, b)}</td>
-      <td class="num ${cls(tt.pnl)}">${fmtSigned(tt.pnl, b)}</td><td class="num ${cls(tt.pnl_pct)}">${fmtPct(tt.pnl_pct)}</td><td class="num">100%</td><td></td></tr>` : "";
+      <td class="num ${cls(tt.pnl)}">${fmtSigned(tt.pnl, b)}</td><td class="num ${cls(tt.pnl_pct)}">${fmtPct(tt.pnl_pct)}</td>
+      <td class="num ${cls(tt.vs_bench)}">${tt.vs_bench == null ? "—" : fmtPP(tt.vs_bench)}</td><td class="num">100%</td><td></td></tr>` : "";
   }
   $("#p-table").addEventListener("click", async (e) => {
     const th = e.target.closest("th.sortable");
@@ -582,6 +603,16 @@
       const k = th.dataset.k;
       state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (k === "display_name" || k === "account" ? 1 : -1) };
       return renderTable(state.port, shownPositions(state.port, pView()));
+    }
+    const sellBtn = e.target.closest(".sell");
+    if (sellBtn) {
+      const row = sellBtn.closest("tr");
+      const shown = shownPositions(state.port, pView());
+      const p = row.dataset.mkey ? shown.find((x) => x.mkey === row.dataset.mkey)
+        : state.port.positions.find((x) => x.id === +row.dataset.id);
+      if (p) pf.openTx("SELL", { symbol: p.symbol, account: p.lots ? (p.lots.every((l) => l.account === p.lots[0].account) ? p.lots[0].account : "") : p.account });
+      e.stopPropagation();
+      return;
     }
     const mr = e.target.closest("tr[data-mkey]");
     if (mr) {
@@ -593,8 +624,8 @@
     if (!tr) return;
     const pos = state.port.positions.find((p) => p.id === +tr.dataset.id);
     if (e.target.closest(".edit")) openPosition(pos);
-    if (e.target.closest(".del") && confirm(`Delete ${pos.symbol || pos.display_name}?`)) {
-      await api(`/api/positions/${pos.id}`, { method: "DELETE" });
+    if (e.target.closest(".del") && confirm(`Delete this buy of ${pos.symbol || pos.display_name}?`)) {
+      try { await api(`/api/positions/${pos.id}`, { method: "DELETE" }); } catch (err) { alert(err.message); }
       loadPortfolio(true);
     }
   });
@@ -857,13 +888,13 @@
     } catch (e) { box.textContent = e.message; }
   }
   $("#add-position").addEventListener("click", () => openPosition(null));
-  function openPosition(p) {
+  function openPosition(p, prefill = null) {
     editingPos = p;
     posForm.reset();
     $("#pos-error").hidden = true;
     $("#pos-quote").textContent = "";
     posForm.name.placeholder = "optional";
-    $("#pos-title").textContent = p ? `Edit ${p.symbol || p.display_name}` : "Add position";
+    $("#pos-title").textContent = p ? `Edit buy · ${p.symbol || p.display_name || p.name}` : "Record a buy";
     $("#pos-delete").hidden = !p;
     const all = state.port?.positions || [];
     $("#acct-list").innerHTML = [...new Set(all.map((x) => x.account).filter(Boolean))].map((a) => `<option value="${esc(a)}">`).join("");
@@ -872,9 +903,11 @@
     const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
     posForm.bought_at.max = iso(new Date());
     posForm.bought_at.value = p ? "" : iso(new Date());
+    posForm.fees.dataset.manual = p && p.fees != null ? "1" : "";
     if (p) {
-      for (const k of ["symbol", "name", "quantity", "avg_cost", "currency", "account", "group_name", "manual_price", "notes", "bought_at"]) {
-        if (p[k] != null) posForm[k].value = p[k];
+      for (const k of ["symbol", "name", "quantity", "avg_cost", "currency", "account", "group_name", "manual_price", "notes", "bought_at", "fees"]) {
+        const v = k === "quantity" && p.orig_quantity != null ? p.orig_quantity : p[k];
+        if (v != null) posForm[k].value = v;
       }
       if (!CURRENCIES.includes(p.currency)) {
         posForm.currency.insertAdjacentHTML("beforeend", `<option>${esc(p.currency)}</option>`);
@@ -884,8 +917,15 @@
     const manual = p ? p.manual_price != null : false;
     $("#pos-manual").checked = manual;
     $("#pos-manual-wrap").hidden = !manual;
+    if (!p && prefill) {
+      for (const k of ["symbol", "quantity", "avg_cost", "account", "group_name"]) {
+        if (prefill[k] != null && prefill[k] !== "") posForm[k].value = prefill[k];
+      }
+      if (prefill.currency && CURRENCIES.includes(prefill.currency)) posForm.currency.value = prefill.currency;
+    }
     dlgPos.showModal();
     if (p?.symbol && !manual) previewQuote(p.symbol, false);
+    else if (prefill?.symbol) previewQuote(prefill.symbol, !prefill.currency);
   }
   $("#pos-save").addEventListener("click", async () => {
     const f = posForm;
@@ -901,6 +941,7 @@
       manual_price: $("#pos-manual").checked ? num(f.manual_price) : null,
       notes: f.notes.value.trim() || null,
       bought_at: f.bought_at.value || null,
+      fees: num(f.fees),
     };
     const err = $("#pos-error");
     if (!body.quantity || body.avg_cost == null) { err.textContent = "Quantity and average cost are required."; err.hidden = false; return; }
@@ -914,8 +955,10 @@
     } catch (e) { err.textContent = e.message; err.hidden = false; }
   });
   $("#pos-delete").addEventListener("click", async () => {
-    if (!editingPos || !confirm(`Delete ${editingPos.symbol || editingPos.display_name}?`)) return;
-    await api(`/api/positions/${editingPos.id}`, { method: "DELETE" });
+    if (!editingPos || !confirm(`Delete this buy of ${editingPos.symbol || editingPos.display_name || editingPos.name}?`)) return;
+    try { await api(`/api/positions/${editingPos.id}`, { method: "DELETE" }); } catch (err) {
+      $("#pos-error").textContent = err.message; $("#pos-error").hidden = false; return;
+    }
     dlgPos.close();
     loadPortfolio(true);
   });
@@ -944,6 +987,13 @@
       dlgSet.close();
     } catch (err) { alert(`Import failed: ${err.message}`); }
     e.target.value = "";
+  });
+
+  // ================================================================== portfolio extras (static/portfolio.js)
+  const pf = window.StonksPortfolio({
+    api, esc, state, saveSettings, base, fmtPct, fmtPP, fmtMoney, fmtSigned, fmtNum, fmtPrice, fmtDate, fmtHeld, cls,
+    showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
+    CURRENCIES, TYPE_LABEL, $, $$,
   });
 
   // ================================================================== boot

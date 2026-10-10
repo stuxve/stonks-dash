@@ -30,6 +30,17 @@ def normalize_currency(ccy: str | None) -> tuple[str, float]:
     return ccy.upper(), 1.0
 
 
+def _ter(v) -> float | None:
+    """Expense ratio as a fraction (0.0007). Yahoo sometimes reports it in percent (0.07)."""
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(x) or x <= 0:
+        return None
+    return x / 100 if x > 0.03 else x
+
+
 def _clean_series(s: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce").dropna()
     if s.empty:
@@ -113,6 +124,8 @@ class YahooProvider:
             "category": info.get("category") or info.get("fundFamily"),
             "exchange": info.get("fullExchangeName") or info.get("exchange"),
             "market_cap": info.get("marketCap") or info.get("totalAssets") or info.get("netAssets"),
+            "country": info.get("country"),
+            "ter": _ter(info.get("netExpenseRatio") or info.get("annualReportExpenseRatio")),
         }
         if not meta["currency"] or not meta["market_cap"]:
             try:
@@ -126,6 +139,42 @@ class YahooProvider:
             # Without the currency we'd silently convert at the wrong FX rate: don't cache, retry later.
             raise LookupError(f"no metadata for {symbol}")
         return meta
+
+    def fund(self, symbol: str) -> dict | None:
+        """Top holdings, sector weights, asset classes and expense ratio of an ETF / mutual fund."""
+        try:
+            fd = self.yf.Ticker(symbol).funds_data
+        except Exception as e:  # noqa: BLE001
+            log.info("funds_data %s failed: %s", symbol, e)
+            return None
+
+        def get(attr):
+            try:
+                v = getattr(fd, attr)
+                return v() if callable(v) else v
+            except Exception as e:  # noqa: BLE001
+                log.debug("funds_data %s.%s: %s", symbol, attr, e)
+                return None
+
+        out = {"holdings": [], "sectors": {}, "asset_classes": {}, "ter": None, "category": None}
+        th = get("top_holdings")
+        if th is not None and not getattr(th, "empty", True):
+            for sym, row in th.iterrows():
+                out["holdings"].append({"symbol": str(sym), "name": str(row.get("Name") or sym),
+                                        "weight": float(row.get("Holding Percent") or 0)})
+        out["sectors"] = {k: float(v) for k, v in (get("sector_weightings") or {}).items() if v is not None}
+        out["asset_classes"] = {k: float(v) for k, v in (get("asset_classes") or {}).items() if v is not None}
+        ops = get("fund_operations")
+        try:
+            if ops is not None and "Annual Report Expense Ratio" in ops.index:
+                out["ter"] = _ter(ops.loc["Annual Report Expense Ratio"].iloc[0])
+        except Exception:  # noqa: BLE001
+            pass
+        ov = get("fund_overview") or {}
+        out["category"] = ov.get("categoryName")
+        if not (out["holdings"] or out["sectors"] or out["ter"]):
+            return None
+        return out
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         try:
@@ -166,7 +215,8 @@ class MockProvider:
         "Real Estate": "COL.MC MRL.MC",
     }
     ETFS = set("VWCE.DE IWDA.AS EUNL.DE SXR8.DE CSPX.L VUSA.AS IS3N.DE XDWD.DE MEUD.PA EQQQ.DE "
-               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD".split())
+               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD IBCF.MU URTH IEMG VGK EZU EWP EWJ EWU BNDW".split())
+    NO_FUND_DATA = {"IBCF.MU"}   # simulates European listings Yahoo publishes no composition for
 
     def __init__(self):
         self._sector = {s: sec for sec, syms in self.SECTORS.items() for s in syms.split()}
@@ -223,11 +273,18 @@ class MockProvider:
     def _series(self, sym: str, start: date) -> pd.Series:
         r = np.random.default_rng(self._seed(sym))
         end = date.today()
-        days = pd.bdate_range(start=date(end.year - 2, 1, 1), end=end)
+        days = pd.bdate_range(start=date(end.year - 6, 1, 1), end=end)
         if self._quote_type(sym) == "CRYPTOCURRENCY":
-            days = pd.date_range(start=date(end.year - 2, 1, 1), end=end)
-        vol = 0.004 if sym.endswith("=X") else (0.035 if sym.endswith("-USD") else r.uniform(0.008, 0.022))
-        drift = 0.0 if sym.endswith("=X") else r.uniform(-0.0003, 0.0011)
+            days = pd.date_range(start=date(end.year - 6, 1, 1), end=end)
+        qt = self._quote_type(sym)
+        if sym.endswith("=X"):
+            vol, drift = 0.004, 0.0
+        elif qt == "CRYPTOCURRENCY":
+            vol, drift = 0.035, r.uniform(-0.0005, 0.0015)
+        elif qt in ("ETF", "INDEX", "MUTUALFUND"):
+            vol, drift = r.uniform(0.006, 0.012), r.uniform(0.0001, 0.0004)
+        else:
+            vol, drift = r.uniform(0.010, 0.022), r.uniform(-0.0003, 0.0008)
         rets = r.normal(drift, vol, len(days))
         level = self._base_level(sym) * np.exp(np.cumsum(rets) - np.sum(rets))
         # intraday wobble on the last bar so auto-refresh visibly changes something
@@ -253,7 +310,7 @@ class MockProvider:
             cap = float(np.exp(r.uniform(np.log(5e9), np.log(1.8e12))))
         return {
             "name": symbol.split(".")[0].replace("^", "") + (" Index" if qt == "INDEX" else " Corp" if qt == "EQUITY" else ""),
-            "long_name": None,
+            "long_name": {"IBCF.MU": "iShsV-S&P500 EUR Hgd U.ETF AccR"}.get(symbol),
             "currency": self._currency(symbol),
             "quote_type": qt,
             "sector": self._sector.get(symbol) if qt == "EQUITY" else None,
@@ -261,7 +318,38 @@ class MockProvider:
             "category": "Global equity" if qt == "ETF" else None,
             "exchange": "MOCK",
             "market_cap": cap,
+            "country": self._country(symbol) if qt == "EQUITY" else None,
+            "ter": round(float(r.uniform(0.0007, 0.0025)), 5) if qt in ("ETF", "MUTUALFUND") else None,
         }
+
+    def _country(self, sym: str) -> str:
+        for suf, c in ((".DE", "Germany"), (".AS", "Netherlands"), (".PA", "France"), (".MC", "Spain"),
+                       (".MI", "Italy"), (".LS", "Portugal"), (".L", "United Kingdom"), (".SW", "Switzerland"),
+                       (".CO", "Denmark")):
+            if sym.endswith(suf):
+                return c
+        return "Taiwan" if sym == "TSM" else "United States"
+
+    def fund(self, symbol: str) -> dict | None:
+        if self._quote_type(symbol) not in ("ETF", "MUTUALFUND") or symbol in self.NO_FUND_DATA:
+            return None
+        from . import seeds
+        r = np.random.default_rng(self._seed(symbol) + 11)
+        names = {"AAPL": "Apple Inc", "MSFT": "Microsoft Corp", "NVDA": "NVIDIA Corp", "AMZN": "Amazon.com Inc",
+                 "GOOGL": "Alphabet Inc Class A", "META": "Meta Platforms Inc Class A", "AVGO": "Broadcom Inc",
+                 "TSLA": "Tesla Inc", "BRK-B": "Berkshire Hathaway Inc Class B", "JPM": "JPMorgan Chase & Co",
+                 "LLY": "Eli Lilly and Co", "V": "Visa Inc Class A", "TSM": "Taiwan Semiconductor Manufacturing Co Ltd",
+                 "ASML": "ASML Holding NV"}
+        pool = list(names)
+        picks = [pool[i] for i in r.choice(len(pool), size=10, replace=False)]
+        w = np.sort(r.uniform(0.008, 0.06, size=10))[::-1]
+        sectors = dict(zip(["technology", "financial_services", "healthcare", "consumer_cyclical", "industrials",
+                            "communication_services", "consumer_defensive", "energy", "basic_materials",
+                            "utilities", "realestate"], r.dirichlet(np.ones(11) * 2)))
+        return {"holdings": [{"symbol": s, "name": names[s], "weight": float(x)} for s, x in zip(picks, w)],
+                "sectors": {k: float(v) for k, v in sectors.items()},
+                "asset_classes": {"stockPosition": 0.995, "cashPosition": 0.005},
+                "ter": round(float(r.uniform(0.0007, 0.0025)), 5), "category": None}
 
     def search(self, query: str, limit: int = 10) -> list[dict]:
         from . import seeds
@@ -339,6 +427,7 @@ class QuoteEngine:
         self.workers = workers
         self._recent: dict[str, tuple[float, pd.Series]] = {}
         self._hist: dict[str, tuple[float, pd.Series]] = {}
+        self._full: dict[str, tuple[float, date, pd.Series]] = {}   # long history since an arbitrary start
         self._miss: dict[str, float] = {}   # negative cache for symbols with no data
         self._meta_miss: dict[str, float] = {}
         self.meta_retry = 600.0
@@ -379,10 +468,69 @@ class QuoteEngine:
                 out[s] = merged
             return out
 
+    def history(self, symbols: list[str], start: date) -> dict[str, pd.Series]:
+        """Daily closes since `start` in MAJOR currency units (GBp → GBP), merged with the latest bar."""
+        symbols = [s for s in dict.fromkeys(symbols) if s]
+        now = time.time()
+        with self._lock:
+            need = [s for s in symbols
+                    if not (s in self._full and self._full[s][1] <= start and now - self._full[s][0] < self.history_ttl)
+                    and not (s in self._miss and now - self._miss[s] < self.recent_ttl)]
+            for i in range(0, len(need), 80):
+                chunk = need[i:i + 80]
+                data = self.p.closes(chunk, start=start - timedelta(days=10))
+                for s in chunk:
+                    if s in data:
+                        self._full[s] = (now, start, data[s])
+                    else:
+                        self._miss[s] = now
+        meta = self.meta(symbols)
+        out = {}
+        for s in symbols:
+            hit = self._full.get(s)
+            if not hit:
+                continue
+            parts = [hit[2]] + ([self._recent[s][1]] if s in self._recent else [])
+            ser = pd.concat(parts)
+            ser = ser[~ser.index.duplicated(keep="last")].sort_index()
+            _, div = normalize_currency((meta.get(s) or {}).get("currency"))
+            out[s] = ser / div
+        return out
+
+    def funds(self, symbols: list[str], ttl: float = 7 * 86400) -> dict[str, dict]:
+        """Fund composition (cached a week in SQLite)."""
+        symbols = list(dict.fromkeys(symbols))
+        keys = {s: f"fund:{s}" for s in symbols}
+        have_raw = self.db.get_meta(list(keys.values()), ttl)
+        have = {s: have_raw[k] for s, k in keys.items() if k in have_raw}
+        now = time.time()
+        missing = [s for s in symbols if s not in have and now - self._meta_miss.get(keys[s], 0) > self.meta_retry]
+        if missing and hasattr(self.p, "fund"):
+            def fetch(s):
+                try:
+                    return s, self.p.fund(s)
+                except Exception as e:  # noqa: BLE001
+                    log.info("fund %s failed: %s", s, e)
+                    return s, None
+            with ThreadPoolExecutor(max_workers=min(self.workers, 4)) as ex:
+                for s, f in ex.map(fetch, missing):
+                    if f:
+                        self.db.put_meta(keys[s], f)
+                        have[s] = f
+                    else:
+                        self._meta_miss[keys[s]] = time.time()
+        stale = [s for s in symbols if s not in have]
+        if stale:
+            old = self.db.get_meta([keys[s] for s in stale], max_age=10 * 365 * 86400)
+            have.update({s: old[keys[s]] for s in stale if keys[s] in old})
+        return have
+
     # ---- metadata ----
     def meta(self, symbols: list[str]) -> dict[str, dict]:
         symbols = list(dict.fromkeys(symbols))
         have = self.db.get_meta(symbols, self.meta_ttl)
+        # entries cached by an older version (no "country"/"ter" fields) are refreshed once
+        have = {s: m for s, m in have.items() if "country" in m}
         now = time.time()
         missing = [s for s in symbols if s not in have
                    and now - self._meta_miss.get(s, 0) > self.meta_retry]

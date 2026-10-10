@@ -40,11 +40,27 @@ CREATE TABLE IF NOT EXISTS positions (
     manual_price REAL,
     notes TEXT,
     bought_at TEXT,
+    fees REAL,
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL CHECK (type IN ('SELL', 'DIVIDEND')),
+    symbol TEXT NOT NULL,
+    account TEXT,
+    date TEXT NOT NULL,
+    quantity REAL,          -- SELL: units sold
+    price REAL,             -- SELL: price per unit
+    amount REAL,            -- DIVIDEND: gross amount received
+    withholding REAL,       -- DIVIDEND: tax withheld at source
+    currency TEXT NOT NULL,
+    fees REAL,
+    notes TEXT,
+    created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS meta_cache (
     symbol TEXT PRIMARY KEY,
@@ -55,10 +71,12 @@ CREATE TABLE IF NOT EXISTS meta_cache (
 
 BOARD_ITEM_FIELDS = ("symbol", "label", "group_name", "weight", "position")
 POSITION_FIELDS = ("symbol", "name", "quantity", "avg_cost", "currency", "account",
-                   "group_name", "manual_price", "notes", "bought_at")
+                   "group_name", "manual_price", "notes", "bought_at", "fees")
+TX_FIELDS = ("type", "symbol", "account", "date", "quantity", "price", "amount", "withholding",
+             "currency", "fees", "notes")
 
 # columns added after the first release: (table, column, type)
-MIGRATIONS = [("positions", "bought_at", "TEXT")]
+MIGRATIONS = [("positions", "bought_at", "TEXT"), ("positions", "fees", "REAL")]
 
 
 class DB:
@@ -222,6 +240,51 @@ class DB:
         with self.tx() as c:
             c.execute("DELETE FROM positions WHERE id = ?", (pos_id,))
 
+    # ---------- transactions (sells, dividends) ----------
+    def list_transactions(self) -> list[dict]:
+        return self.q("SELECT * FROM transactions ORDER BY date, id")
+
+    def get_transaction(self, tx_id: int) -> dict | None:
+        rows = self.q("SELECT * FROM transactions WHERE id = ?", (tx_id,))
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _clean_tx(data: dict) -> dict:
+        out = {}
+        for k in TX_FIELDS:
+            if k in data:
+                v = data[k]
+                if k in ("symbol", "currency", "type") and v:
+                    v = str(v).strip().upper()
+                if k == "date" and v is not None:
+                    v = str(v)
+                out[k] = v
+        return out
+
+    def create_transaction(self, data: dict) -> int:
+        vals = self._clean_tx({k: data.get(k) for k in TX_FIELDS})
+        with self.tx() as c:
+            cur = c.execute(f"INSERT INTO transactions({', '.join(TX_FIELDS)}, created_at) "
+                            f"VALUES ({', '.join('?' * len(TX_FIELDS))}, ?)", (*vals.values(), time.time()))
+            return cur.lastrowid
+
+    def update_transaction(self, tx_id: int, data: dict) -> None:
+        vals = self._clean_tx(data)
+        vals.pop("type", None)
+        if not vals:
+            return
+        with self.tx() as c:
+            c.execute(f"UPDATE transactions SET {', '.join(f'{k} = ?' for k in vals)} WHERE id = ?",
+                      (*vals.values(), tx_id))
+
+    def delete_transaction(self, tx_id: int) -> None:
+        with self.tx() as c:
+            c.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+
+    def get_position(self, pos_id: int) -> dict | None:
+        rows = self.q("SELECT * FROM positions WHERE id = ?", (pos_id,))
+        return rows[0] if rows else None
+
     # ---------- settings ----------
     def get_settings(self) -> dict[str, Any]:
         out = dict(seeds.DEFAULT_SETTINGS)
@@ -258,7 +321,9 @@ class DB:
             b.pop("id", None)
             b["items"] = [{k: it[k] for k in ("symbol", "label", "group_name", "weight")} for it in b["items"]]
         positions = [{k: p[k] for k in POSITION_FIELDS} for p in self.list_positions()]
-        return {"version": 1, "boards": boards, "positions": positions, "settings": self.get_settings()}
+        txs = [{k: t[k] for k in TX_FIELDS} for t in self.list_transactions()]
+        return {"version": 2, "boards": boards, "positions": positions, "transactions": txs,
+                "settings": self.get_settings()}
 
     def import_all(self, data: dict, replace: bool = True) -> None:
         with self.tx() as c:
@@ -268,6 +333,8 @@ class DB:
                     c.execute("DELETE FROM boards")
                 if "positions" in data:
                     c.execute("DELETE FROM positions")
+                if "positions" in data or "transactions" in data:
+                    c.execute("DELETE FROM transactions")
         for i, b in enumerate(data.get("boards", [])):
             bid = self.create_board(b["name"], b.get("config") or {}, position=b.get("position", i))
             for j, it in enumerate(b.get("items", [])):
@@ -276,3 +343,5 @@ class DB:
             self.create_position(p)
         if data.get("settings"):
             self.update_settings(data["settings"])
+        for t in data.get("transactions", []):
+            self.create_transaction(t)

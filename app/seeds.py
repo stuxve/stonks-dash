@@ -144,4 +144,11 @@ DEFAULT_SETTINGS = {
     "period": "1D",
     "refresh_seconds": 60,
     "tile_label": "symbol",      # symbol | name
+    "benchmark": "IWDA.AS",      # shadow-portfolio benchmark (iShares Core MSCI World, EUR)
+    "alloc": {"dim": "group_name", "targets": {}},
+    "account_fees": {},          # {account: {"fixed": 1.0, "pct": 0.0, "min": null}}
+    "fund_profiles": {},
+    "fund_ter": {},              # {fund symbol: TER in %} when Yahoo doesn't publish it         # {fund symbol: exposure profile key} overrides for look-through
+    "tax_prior_losses": {},      # {year: loss amount in EUR} from before you used the app
+    "tax_brackets": [[6000, 0.19], [50000, 0.21], [200000, 0.23], [300000, 0.27], [None, 0.30]],
 }

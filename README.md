@@ -66,6 +66,49 @@ The size and group choices are saved per board. Period, range and currency are g
 - **Account** and **Group**, used to group the treemap.
 - **Manual price**, for assets Yahoo doesn't cover (pension plans, some funds). Update it whenever you like.
 
+**Portfolio sub-tabs.**
+
+- **Holdings** is the heatmap and table. Each row has **Sell**, **Edit** and **Delete**. A **Vs index** column shows each position's return minus the benchmark's return over the same dates, in percentage points. It only appears for buys that have a purchase date.
+- **Performance vs index** compares your portfolio with a "shadow portfolio". Every euro you invested or took out on a date is treated as a buy or sell of the benchmark on that same date. It shows both gains, the difference, and the money-weighted annual return (XIRR) for you and for the index. The chart plots your portfolio value, the index value and the net amount invested. The default benchmark is IWDA.AS (MSCI World in EUR), and you can switch to VWCE, the S&P 500, the Nasdaq-100, emerging markets, the Stoxx 600 or any other ticker. Manual or unpriced assets are carried at cost.
+- **Allocation** lets you pick what to allocate by (my groups, asset type, account, sector or each asset) and set a target % for each bucket. It shows the current %, how far each bucket has drifted, and how much to buy or sell to reach the target. **Measure by** compares against market value or money invested.
+- **Next order** (in **Allocation**): you enter a goal for total money invested, your monthly contribution and the maximum number of orders per month (1–3), and it tells you what to buy this month. It works on the money you've invested in each bucket, buys only, and uses whole orders to keep fixed fees low.
+  - **How it picks:**
+    1. Each bucket's remaining need towards your target % of the goal is worked out by "water-filling". Buckets already above their share get no new money.
+    2. The money is cut into whole orders, so each bucket gets a whole number of them.
+    3. This month's order goes to the bucket furthest below its target.
+  - After you record the buy (the **Buy…** button pre-fills ticker, quantity and fee), the next order updates. It works for any horizon.
+- **Monthly plan** (below **Next order**, using the same inputs) shows the whole path to the goal:
+  - the month you reach it and the number of orders;
+  - estimated fees, compared with splitting every month across every asset;
+  - a month-by-month list (12 months at a time) and the final allocation against your targets.
+  - Plans longer than 100 years are only listed for their first 1,200 months.
+  - **Projection:** set an expected yearly return (default 6%) and a ± range (default 2%). You get a chart of projected value against money invested, with the range as a band, and a table by year: amount added, money invested, projected value, projected gain (€ and %) and the low–high range. It assumes steady compound growth, which real markets don't follow.
+  - **Projected allocation:** a stacked chart (as % or as money) of what you'll have invested in each asset, month by month, plus a table with each asset's share (and €) now, at the end of each year and at the goal, next to its target.
+- **Allocation targets for real assets:** in **Allocation**, "Add an asset you don't hold yet" searches real tickers on Yahoo, by name, ticker or ISIN.
+  - With "Allocate by: Each asset", the asset gets its own target.
+  - With "Asset type" or "Sector", it counts toward its type or sector bucket.
+  - With "My groups" or "Account", you can still type a label of your own. Picking a ticker there switches to "Each asset".
+  - In **Next order**, the **Buy…** button opens a buy pre-filled with the ticker, price, quantity and fee.
+- **Exposure** shows what you really own once your funds are broken down into their holdings, by company, sector, country or currency, split into "direct" and "through funds".
+  - It flags overlaps, for example a stock you hold directly that is also inside your S&P 500 ETF.
+  - Fund holdings come from Yahoo's published top holdings (usually the top 10); the rest of each fund is shown as "Other holdings of …".
+  - Countries and currencies for funds use approximate index weights, detected from the fund name, and you can change the profile per fund.
+  - Hedged share classes count as their hedge currency.
+- **Costs** shows the fees you've paid (total, this year, and as a share of traded volume), broken down by account and by year, plus your most expensive trades by fee %.
+  - It also shows the yearly running cost of your funds (TER).
+  - You can set a fee rule per account: a fixed €, a %, a minimum. The buy and sell dialogs then pre-fill the fee, and **Fill missing** applies the rule to past trades that have no fee.
+- **Taxes · ES** is an IRPF estimate for the base del ahorro, in EUR. It is not tax advice.
+  - It uses the 2025+ savings scale (19/21/23/27/30%) and FIFO cost at the FX rate of each date.
+  - It applies the **2-month rule** (losses deferred when the same security is bought 2 months before or after, and released when those shares are sold).
+  - It applies the 25% offset between gains/losses and dividends, and carries losses forward for 4 years. You can add losses from years before you used the app.
+  - Withholding on dividends is deducted up to the Spanish tax on them.
+  - For the current year it also shows "if you sold today" (extra tax per position), losses you could sell to offset gains, and the date until which you shouldn't buy back what you sold at a loss.
+- **Transactions** lists every buy, sale and dividend, with a yearly summary: gains, losses, net realized, gross dividends, tax withheld, net dividends and fees.
+  - Sales are matched to your oldest buys first (**FIFO**) per asset and account.
+  - Costs and proceeds are converted at the **FX rate of each date**. Buy fees are added to the cost and sale fees are subtracted from the proceeds.
+  - The app won't save a sale (or an edit or deletion of a buy) that would leave you selling more than you held on that date.
+  - Hacienda applies FIFO across all your brokers for the same security. If you hold the same ISIN in two accounts, check the result.
+
 **Market hours.** Each row shows the exchange's status (open, lunch break, pre-market or after-hours, closed or holiday), a live countdown, today's session times and its main index's 1D change. The timeline covers your day (or the next 24 hours), with a line marking the current time.
 
 - **Times** switches the session times between your time zone and the exchange's local time.
@@ -97,6 +140,13 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/search?q=` | Symbol search (ticker, name, ISIN) |
 | GET | `/api/quote/{symbol}` | One quote |
 | GET | `/api/quotes?symbols=a,b` | Several quotes |
+| GET/POST/PATCH/DELETE | `/api/transactions[/{id}]` | Sales (`SELL`: quantity, price, fees) and dividends (`DIVIDEND`: amount, withholding) |
+| GET | `/api/ledger?base=EUR` | Buys, sales (with FIFO lots and realized gain) and dividends, plus totals per year |
+| GET | `/api/performance?base=EUR` | Daily portfolio value, net invested and the benchmark shadow portfolio, plus XIRR |
+| GET | `/api/exposure?base=EUR` | Exposure by company, sector, country and currency, with funds broken down into their holdings |
+| GET | `/api/costs?base=EUR` | Fees by account and year, most expensive trades, fund running costs |
+| POST | `/api/costs/fill` | Apply an account's fee rule to its trades that have no fee |
+| GET | `/api/tax?year=2026` | Spanish IRPF estimate: per-year base and tax, 2-month rule, carry-forward, what-if and losses to harvest |
 | GET | `/api/sessions[?codes=XNYS,XMAD]` | Session schedule (UTC ms), holidays, early closes and the exchange catalog |
 | GET/PUT | `/api/settings` | UI settings |
 | GET/POST | `/api/export`, `/api/import` | JSON backup |
@@ -109,6 +159,7 @@ Interactive docs are at `/docs`.
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
+node tests/js/planner.test.js
 STONKS_PROVIDER=mock STONKS_DATA_DIR=./data uvicorn app.main:app --reload
 ```
 # stonks-dash
