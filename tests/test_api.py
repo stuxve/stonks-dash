@@ -208,3 +208,47 @@ def test_sell_targets(client):
     assert pk["peak"] >= q["price"] - 1e-9 and pk["low"] <= pk["peak"] and pk["peak_date"] >= "2025-06-02"
     # exits travel with export/import
     assert any(x.get("target_price") == 300 for x in client.get("/api/export").json()["positions"])
+
+
+def test_levels_math():
+    import numpy as np
+    from app import levels
+    idx = pd.bdate_range("2023-10-02", periods=700)
+    t = np.arange(700)
+    c = 100 + 10 * np.sin(t / 15) + np.random.default_rng(1).normal(0, 0.6, 700)
+    s = pd.Series(c, index=idx)
+    s.iloc[400] = 300                                   # bad tick
+    assert levels.clean(s).iloc[400] < 115
+    a = levels.analyze(s)
+    r, sup = a["resistance"][0], a["support"][0]
+    assert 108 < r["level"] < 113 and r["touches"] >= 5 and r["highs"] >= 5      # the 110 ceiling, many touches
+    assert 87 < sup["level"] < 92 and sup["touches"] >= 5
+    assert all(z["level"] > a["price"] for z in a["resistance"])
+    assert a["breakout"] is None
+    assert 0 < a["vol"]["atr_pct"] < 2 and 0.1 < a["vol"]["vol_y"] < 0.3
+    # range 95–105 for a long time, then a break above with 2 confirming closes
+    c2 = np.r_[100 + 5 * np.sin(np.arange(400) / 8), np.linspace(100, 112, 15), [112.5, 113, 113.4]]
+    b = levels.analyze(pd.Series(c2, index=pd.bdate_range("2024-01-01", periods=len(c2))))
+    assert b["breakout"] and 104 < b["breakout"]["level"] < 106
+    # touch probability: driftless reflection principle
+    assert levels.hit_probability(100, 100, 0.2, 1) == pytest.approx(1)
+    assert levels.hit_probability(100, 110, 0.2, 1) == pytest.approx(0.634, abs=0.01)
+    assert levels.hit_probability(100, 300, 0.2, 1) < 0.001
+
+
+def test_levels_endpoint_and_atr_stop(client):
+    r = client.post("/api/positions", json={"symbol": "MSFT", "quantity": 2, "avg_cost": 100, "currency": "USD",
+                                            "bought_at": "2025-06-02", "atr_k": 3})
+    pid = r.json()["id"]
+    assert client.patch(f"/api/positions/{pid}", json={"atr_k": 25}).status_code == 422
+    d = client.get("/api/targets/levels").json()
+    m = d["symbols"]["MSFT"]
+    assert m["vol"]["atr"] > 0 and m["price"] > 0
+    assert all(z["level"] > m["price"] for z in m["resistance"])
+    assert all(z["level"] < m["price"] for z in m["support"])
+    assert m["analyst"] and m["analyst"]["mean"] > 0 and "upside" in m["analyst"]   # stocks get a consensus
+    assert d["lots"][str(pid)]["peak"] >= d["lots"][str(pid)]["low"]
+    etf = next((s for s in d["symbols"] if s in ("VWCE.DE", "IWDA.AS")), None)
+    if etf:
+        assert d["symbols"][etf]["analyst"] is None
+    assert next(p for p in client.get("/api/positions").json() if p["id"] == pid)["atr_k"] == 3

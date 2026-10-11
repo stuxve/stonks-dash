@@ -140,6 +140,27 @@ class YahooProvider:
             raise LookupError(f"no metadata for {symbol}")
         return meta
 
+    def analyst(self, symbol: str) -> dict:
+        """Analyst consensus price target (stocks). {} when Yahoo has none."""
+        t = self.yf.Ticker(symbol)
+        info: dict = {}
+        try:
+            info = t.get_info() or {}
+        except Exception as e:  # noqa: BLE001
+            log.info("analyst info failed for %s: %s", symbol, e)
+        out = {"mean": info.get("targetMeanPrice"), "median": info.get("targetMedianPrice"),
+               "low": info.get("targetLowPrice"), "high": info.get("targetHighPrice"),
+               "n": info.get("numberOfAnalystOpinions"), "rec": info.get("recommendationKey"),
+               "rec_mean": info.get("recommendationMean"), "fwd_eps": info.get("forwardEps"),
+               "fwd_pe": info.get("forwardPE"), "currency": info.get("currency")}
+        if not out["mean"]:
+            try:
+                apt = t.analyst_price_targets or {}
+                out.update(mean=apt.get("mean"), median=apt.get("median"), low=apt.get("low"), high=apt.get("high"))
+            except Exception:  # noqa: BLE001
+                pass
+        return out if out["mean"] else {}
+
     def fund(self, symbol: str) -> dict | None:
         """Top holdings, sector weights, asset classes and expense ratio of an ETF / mutual fund."""
         try:
@@ -321,6 +342,17 @@ class MockProvider:
             "country": self._country(symbol) if qt == "EQUITY" else None,
             "ter": round(float(r.uniform(0.0007, 0.0025)), 5) if qt in ("ETF", "MUTUALFUND") else None,
         }
+
+    def analyst(self, symbol: str) -> dict:
+        if self._quote_type(symbol) != "EQUITY":
+            return {}
+        r = np.random.default_rng(self._seed(symbol) + 13)
+        px = float(self._series(symbol, date.today() - timedelta(days=10)).iloc[-1])
+        mean = px * r.uniform(0.95, 1.30)
+        return {"mean": mean, "median": mean * r.uniform(0.97, 1.03), "low": mean * r.uniform(0.7, 0.9),
+                "high": mean * r.uniform(1.1, 1.4), "n": int(r.integers(4, 40)),
+                "rec": str(r.choice(["buy", "strong_buy", "hold"])), "rec_mean": round(float(r.uniform(1.5, 3)), 2),
+                "fwd_eps": None, "fwd_pe": None, "currency": self._currency(symbol)}
 
     def _country(self, sym: str) -> str:
         for suf, c in ((".DE", "Germany"), (".AS", "Netherlands"), (".PA", "France"), (".MC", "Spain"),
@@ -524,6 +556,37 @@ class QuoteEngine:
             old = self.db.get_meta([keys[s] for s in stale], max_age=10 * 365 * 86400)
             have.update({s: old[keys[s]] for s in stale if keys[s] in old})
         return have
+
+    def analyst(self, symbols: list[str], ttl: float = 86400) -> dict[str, dict]:
+        """Analyst consensus targets in major currency units (cached a day; 'none' answers are cached too)."""
+        symbols = list(dict.fromkeys(symbols))
+        keys = {s: f"analyst:{s}" for s in symbols}
+        raw = self.db.get_meta(list(keys.values()), ttl)
+        have = {s: raw[k] for s, k in keys.items() if k in raw}
+        now = time.time()
+        missing = [s for s in symbols if s not in have and now - self._meta_miss.get(keys[s], 0) > self.meta_retry]
+        if missing and hasattr(self.p, "analyst"):
+            def fetch(s):
+                try:
+                    return s, self.p.analyst(s)
+                except Exception as e:  # noqa: BLE001
+                    log.info("analyst %s failed: %s", s, e)
+                    return s, None
+            with ThreadPoolExecutor(max_workers=min(self.workers, 4)) as ex:
+                for s, a in ex.map(fetch, missing):
+                    if a is None:
+                        self._meta_miss[keys[s]] = time.time()
+                        continue
+                    self.db.put_meta(keys[s], a)
+                    have[s] = a
+        meta = self.meta(symbols)
+        out = {}
+        for s, a in have.items():
+            if not a or not a.get("mean"):
+                continue
+            _, div = normalize_currency(a.get("currency") or (meta.get(s) or {}).get("currency"))
+            out[s] = {k: (v / div if k in ("mean", "median", "low", "high") and v else v) for k, v in a.items()}
+        return out
 
     # ---- metadata ----
     def meta(self, symbols: list[str]) -> dict[str, dict]:

@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS positions (
     target_price REAL,      -- sell objective (take profit), in the quote currency
     stop_price REAL,        -- stop loss, in the quote currency
     trail_pct REAL,         -- trailing stop: % below the highest close since the buy
+    atr_k REAL,             -- chandelier stop: highest close since the buy − k × typical daily move
     created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS settings (
@@ -75,14 +76,14 @@ CREATE TABLE IF NOT EXISTS meta_cache (
 BOARD_ITEM_FIELDS = ("symbol", "label", "group_name", "weight", "position")
 POSITION_FIELDS = ("symbol", "name", "quantity", "avg_cost", "currency", "account",
                    "group_name", "manual_price", "notes", "bought_at", "fees",
-                   "target_price", "stop_price", "trail_pct")
+                   "target_price", "stop_price", "trail_pct", "atr_k")
 TX_FIELDS = ("type", "symbol", "account", "date", "quantity", "price", "amount", "withholding",
              "currency", "fees", "notes")
 
 # columns added after the first release: (table, column, type)
 MIGRATIONS = [("positions", "bought_at", "TEXT"), ("positions", "fees", "REAL"),
               ("positions", "target_price", "REAL"), ("positions", "stop_price", "REAL"),
-              ("positions", "trail_pct", "REAL")]
+              ("positions", "trail_pct", "REAL"), ("positions", "atr_k", "REAL")]
 
 
 class DB:

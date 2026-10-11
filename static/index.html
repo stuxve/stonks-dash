@@ -170,6 +170,9 @@
           <span class="seg" id="tg-filter"><button data-v="all">All buys</button><button data-v="set">With exits</button><button data-v="alert">Alerts</button></span>
         </label>
         <label class="ctl">"Near" when within <input id="tg-near" class="tgt" type="number" min="0.5" max="50" step="0.5"> %</label>
+        <label class="ctl" title="Horizon for the chance of the price touching a target, stop or zone">Chance within
+          <span class="seg" id="tg-horizon"><button data-v="3">3m</button><button data-v="6">6m</button><button data-v="12">1y</button></span>
+        </label>
       </div>
       <div class="callout warn" id="tg-error" hidden></div>
       <div class="table-wrap"><table class="grid" id="tg-table"><thead></thead><tbody></tbody></table></div>
@@ -177,14 +180,21 @@
         <span class="hint tg-fill-h">Fill buys that have no exit yet</span>
         <label class="field">Target — % above buy price<input id="tg-fill-tp" type="number" step="1" placeholder="e.g. 25"></label>
         <label class="field">Stop loss — % below buy price<input id="tg-fill-sl" type="number" step="1" min="0" max="99" placeholder="e.g. 10"></label>
-        <label class="field">Trailing stop — % below peak<input id="tg-fill-tr" type="number" step="1" min="0" max="99" placeholder="optional"></label>
+        <label class="field">Trailing stop<span class="row-in"><input id="tg-fill-tr" type="number" step="0.5" min="0" placeholder="optional">
+          <select id="tg-fill-mode"><option value="pct">% below peak</option><option value="atr">× ATR below peak</option></select></span></label>
         <button id="tg-fill-btn" class="btn ghost">Apply</button>
       </div>
-      <p class="hint tg-notes">Exits are saved on each buy, in the asset's own currency (the one its price is quoted in). A <b>trailing stop</b> follows the price up:
-        it sits the given % below the highest close since the buy, and the higher of it and your fixed stop is used.
-        <b>P/L at target</b> is after the account's sell fee (Costs tab) and before tax.
-        Nothing is sold automatically — this is a monitor; place the order at your broker and record it with <b>Sell</b>.
-        In Spain sales are matched oldest buy first (FIFO), so a later buy flagged <span class="pill warn">FIFO 2/3</span> can't be sold before the older ones.</p>
+      <div class="hint tg-notes">
+        <p>Your target, stop and trailing stop are always yours to type; everything else is a suggestion you can click. Exits are saved on each buy in the asset's own currency.</p>
+        <ul class="plain">
+          <li><b>Resistance / support chips</b> come from daily <i>closes</i> of the last 3 years (bad ticks removed): turning points found with 5-, 10- and 20-day look-backs, kept only if at least two agree, grouped into zones as wide as the asset's typical daily move and ranked by touches (recent ones count more). <b>3×</b> = touched three times. ★ = within 3% of the analyst consensus. A stop chip sits half a daily move under a support.</li>
+          <li><b>Analysts</b>: Yahoo's mean consensus target (stocks only). "likely to break" when it is more than 5% above the nearest resistance; "★ agrees" when a resistance is within 3% of it.</li>
+          <li><b>Trailing stop</b>: either a fixed % or <b>× ATR</b> (chandelier stop): highest close since the buy minus k × the typical daily move (22-day average of close-to-close changes), so volatile assets get room and calm ones a tight stop. 3 is a common k. The highest of your fixed stop and the trailing stop is used.</li>
+          <li><b>Chance</b>: probability of the price <i>touching</i> the level within the horizon, from the asset's own volatility, assuming no trend. Not a forecast — a way to compare how far a level really is.</li>
+          <li><b>Broke out</b>: the price closed above your target, or above a resistance it was under in the last 4 weeks, for 2 days by more than a daily move. <b>Raise stop</b> moves the stop just under that level and the target to the next resistance, instead of selling.</li>
+          <li><b>P/L at target</b> is after the account's sell fee (Costs tab) and before tax. Nothing is sold automatically. In Spain sales are matched oldest buy first (FIFO), so a buy flagged <span class="pill warn">FIFO 2/3</span> can't be sold before the older ones.</li>
+        </ul>
+      </div>
     </div>
 
     <!-- allocation targets -->

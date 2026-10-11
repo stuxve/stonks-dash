@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import exposure, ledger, tax
+from . import exposure, ledger, levels, tax
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -61,6 +61,7 @@ class PositionIn(BaseModel):
     target_price: float | None = Field(default=None, gt=0)
     stop_price: float | None = Field(default=None, gt=0)
     trail_pct: float | None = Field(default=None, gt=0, lt=100)
+    atr_k: float | None = Field(default=None, gt=0, le=20)   # chandelier stop: peak − k × typical daily move
 
 
 class TxIn(BaseModel):
@@ -623,35 +624,70 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         }
 
     # ------------------------------------------------------------------ sell targets
-    @app.get("/api/targets/peaks")
-    def target_peaks():
-        """Highest close since each open, dated buy (quote currency) — for trailing stops and drawdown."""
+    def _levels():
+        """Suggested levels, volatility, breakouts and analyst consensus per symbol; peak since each buy."""
         lots, _sells, _divs, fr = _context("EUR")
         open_lots = [x for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
-                     and x["symbol"] and x["manual_price"] is None and x.get("bought_at")]
+                     and x["symbol"] and x["manual_price"] is None]
         if not open_lots:
-            return {"peaks": {}}
-        start = min(ledger.lot_date(x) for x in open_lots)
-        hist = engine.history(sorted({x["symbol"] for x in open_lots}), start)
-        quotes = engine.quotes(sorted({x["symbol"] for x in open_lots}))
-        out = {}
-        for x in open_lots:
-            ser = hist.get(x["symbol"])
+            return {"symbols": {}, "lots": {}}
+        syms = sorted({x["symbol"] for x in open_lots})
+        start = min([date.today() - timedelta(days=levels.LOOKBACK_DAYS)]
+                    + [ledger.lot_date(x) for x in open_lots if x.get("bought_at")])
+        hist = engine.history(syms, start)
+        quotes = engine.quotes(syms)
+        meta = engine.meta(syms)
+        eq = [s_ for s_ in syms if (meta.get(s_) or {}).get("quote_type") == "EQUITY"
+              or (quotes.get(s_) and quotes[s_].quote_type == "EQUITY")]
+        try:
+            cons = engine.analyst(eq) if eq else {}
+        except Exception as e:  # noqa: BLE001 — consensus is optional
+            log.info("analyst consensus failed: %s", e)
+            cons = {}
+        out, series = {}, {}
+        for s_ in syms:
+            ser = hist.get(s_)
+            q = quotes.get(s_)
             if ser is None or ser.empty:
                 continue
-            d0 = ledger.lot_date(x)
-            ser = ser[ser.index >= pd.Timestamp(d0)].dropna()
+            a = levels.analyze(ser, q.price if q and q.ok else None)
+            if not a:
+                continue
+            series[s_] = a.pop("series")
+            c = dict(cons[s_]) if s_ in cons else None
+            if c and not (0.2 < c["mean"] / a["price"] < 5):     # different currency unit — don't trust it
+                c = None
+            if c:
+                c["upside"] = (c["mean"] / a["price"] - 1) * 100
+                for z in a["resistance"] + a["support"]:
+                    z["confluence"] = abs(z["level"] / c["mean"] - 1) <= 0.03
+                if a["resistance"]:
+                    near = a["resistance"][0]
+                    c["vs_resistance"] = (c["mean"] / near["level"] - 1) * 100
+                    c["likely_break"] = c["mean"] > near["hi"] * 1.05
+            a["analyst"] = c
+            out[s_] = a
+        lot_out = {}
+        for x in open_lots:
+            ser = series.get(x["symbol"])
+            if ser is None or not x.get("bought_at"):
+                continue
+            ser = ser[ser.index >= pd.Timestamp(ledger.lot_date(x))]
             if ser.empty:
                 continue
-            i = ser.idxmax()
-            peak, when = float(ser.loc[i]), i.date().isoformat()
-            q = quotes.get(x["symbol"])
-            if q and q.ok and q.price and q.price > peak:
-                peak, when = float(q.price), (q.last_date or date.today().isoformat())
-            low_i = ser.idxmin()
-            out[str(x["id"])] = {"peak": peak, "peak_date": str(when)[:10],
-                                 "low": float(ser.loc[low_i]), "low_date": low_i.date().isoformat()}
-        return {"peaks": out}
+            hi, lo = ser.idxmax(), ser.idxmin()
+            lot_out[str(x["id"])] = {"peak": float(ser.loc[hi]), "peak_date": hi.date().isoformat(),
+                                     "low": float(ser.loc[lo]), "low_date": lo.date().isoformat()}
+        return {"symbols": out, "lots": lot_out}
+
+    @app.get("/api/targets/levels")
+    def target_levels():
+        return _levels()
+
+    @app.get("/api/targets/peaks")
+    def target_peaks():
+        """Highest close since each open, dated buy (quote currency, bad ticks removed)."""
+        return {"peaks": _levels()["lots"]}
 
     # ------------------------------------------------------------------ look-through exposure
     @app.get("/api/exposure")
