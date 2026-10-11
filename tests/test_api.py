@@ -248,7 +248,21 @@ def test_levels_endpoint_and_atr_stop(client):
     assert all(z["level"] < m["price"] for z in m["support"])
     assert m["analyst"] and m["analyst"]["mean"] > 0 and "upside" in m["analyst"]   # stocks get a consensus
     assert d["lots"][str(pid)]["peak"] >= d["lots"][str(pid)]["low"]
-    etf = next((s for s in d["symbols"] if s in ("VWCE.DE", "IWDA.AS")), None)
-    if etf:
-        assert d["symbols"][etf]["analyst"] is None
     assert next(p for p in client.get("/api/positions").json() if p["id"] == pid)["atr_k"] == 3
+
+
+def test_etf_implied_target(client):
+    # IBCF.MU has no holdings data in the mock (like the real Munich listing): it borrows SPY's
+    client.post("/api/positions", json={"symbol": "IBCF.MU", "quantity": 1, "avg_cost": 150, "currency": "EUR",
+                                        "bought_at": "2026-08-27"})
+    d = client.get("/api/targets/levels").json()["symbols"]
+    a = d["IBCF.MU"]["analyst"]
+    assert a and a["implied"] and a["proxy"] == "SPY"
+    assert 0 < a["coverage"] <= 100 and a["n_holdings"] >= 1
+    tops = a["top"]
+    w = sum(t["weight"] for t in tops)
+    assert a["upside"] == pytest.approx(sum(t["weight"] * t["upside"] for t in tops) / w)
+    assert a["mean"] == pytest.approx(d["IBCF.MU"]["price"] * (1 + a["upside"] / 100))
+    etf = next(s for s in ("VWCE.DE", "IWDA.AS") if s in d)
+    assert d[etf]["analyst"]["implied"] and d[etf]["analyst"]["proxy"] is None
+    assert all(d[s]["analyst"] is None for s in d if s.endswith("-USD"))     # crypto: no coverage

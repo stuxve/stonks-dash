@@ -644,6 +644,13 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         except Exception as e:  # noqa: BLE001 — consensus is optional
             log.info("analyst consensus failed: %s", e)
             cons = {}
+        funds_syms = [s_ for s_ in syms if ((meta.get(s_) or {}).get("quote_type") in ("ETF", "MUTUALFUND"))
+                      or (quotes.get(s_) and quotes[s_].quote_type in ("ETF", "MUTUALFUND"))]
+        try:
+            implied = _implied_upside(funds_syms, open_lots, meta) if funds_syms else {}
+        except Exception as e:  # noqa: BLE001 — optional
+            log.info("implied fund targets failed: %s", e)
+            implied = {}
         out, series = {}, {}
         for s_ in syms:
             ser = hist.get(s_)
@@ -657,6 +664,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             c = dict(cons[s_]) if s_ in cons else None
             if c and not (0.2 < c["mean"] / a["price"] < 5):     # different currency unit — don't trust it
                 c = None
+            if c is None and s_ in implied:                       # ETF: weighted consensus of its holdings
+                im = implied[s_]
+                c = {**im, "implied": True, "mean": a["price"] * (1 + im["upside"] / 100)}
             if c:
                 c["upside"] = (c["mean"] / a["price"] - 1) * 100
                 for z in a["resistance"] + a["support"]:
@@ -679,6 +689,58 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             lot_out[str(x["id"])] = {"peak": float(ser.loc[hi]), "peak_date": hi.date().isoformat(),
                                      "low": float(ser.loc[lo]), "low_date": lo.date().isoformat()}
         return {"symbols": out, "lots": lot_out}
+
+    def _implied_upside(fund_syms: list[str], open_lots: list[dict], meta: dict) -> dict:
+        """ETF implied upside: analyst consensus upside of each top holding, weighted by its share of the fund.
+
+        Funds Yahoo has no holdings for borrow them from the proxy ETF of their index (as in Exposure). The part of
+        the fund not covered is assumed to have the same average upside; `coverage` says how much was covered."""
+        fd = engine.funds(fund_syms)
+        overrides = db.get_settings().get("fund_profiles") or {}
+        src = {}
+        for f in fund_syms:
+            fund = fd.get(f)
+            if fund and fund.get("holdings"):
+                src[f] = (fund["holdings"], None)
+                continue
+            row = next((x for x in open_lots if x["symbol"] == f), {})
+            _, prof = exposure.fund_profile(f, row, meta.get(f) or {}, fund or {}, overrides)
+            px = exposure.PROFILES.get(prof, {}).get("proxy")
+            if px:
+                src[f] = (None, px)
+        pxs = sorted({px for _, px in src.values() if px})
+        pfd = engine.funds(pxs) if pxs else {}
+        hold = {}
+        for f, (h, px) in src.items():
+            h = h if h is not None else (pfd.get(px) or {}).get("holdings") or []
+            h = [x for x in h if x.get("symbol") and (x.get("weight") or 0) > 0]
+            if h:
+                hold[f] = (h, px)
+        all_h = sorted({x["symbol"] for h, _ in hold.values() for x in h})
+        if not all_h:
+            return {}
+        cons = engine.analyst(all_h)
+        qts = engine.quotes(all_h)
+        out = {}
+        for f, (h, px) in hold.items():
+            used = []
+            for x in h:
+                c, q = cons.get(x["symbol"]), qts.get(x["symbol"])
+                if not (c and q and q.ok and q.price and c.get("mean")):
+                    continue
+                r = c["mean"] / q.price
+                if not 0.2 < r < 5:
+                    continue
+                used.append({"symbol": x["symbol"], "name": x.get("name") or x["symbol"], "weight": x["weight"] * 100,
+                             "upside": (r - 1) * 100, "n": c.get("n")})
+            cov = sum(u["weight"] for u in used)
+            if cov <= 0:
+                continue
+            out[f] = {"upside": sum(u["weight"] * u["upside"] for u in used) / cov, "coverage": cov,
+                      "n_holdings": len(used), "n_top": len(h), "proxy": px,
+                      "n": sum(u["n"] or 0 for u in used) or None,
+                      "top": sorted(used, key=lambda u: -u["weight"])[:10]}
+        return out
 
     @app.get("/api/targets/levels")
     def target_levels():

@@ -204,9 +204,20 @@ window.StonksTargets = function (ctx) {
     const a = r.L?.analyst;
     if (!a) {
       const qt = r.p.quote_type;
-      return `<span class="muted-t">—</span><div class="sub">${qt && qt !== "EQUITY" ? "stocks only" : r.L ? "no coverage" : ""}</div>`;
+      return `<span class="muted-t">—</span><div class="sub">${qt === "CRYPTOCURRENCY" ? "no analysts for crypto" : qt && qt !== "EQUITY" ? "no holdings data" : r.L ? "no coverage" : ""}</div>`;
     }
     const tags = [];
+    if (a.implied) {
+      const top = (a.top || []).map((t) => `${t.symbol} ${t.weight.toFixed(1)}% → ${pctTxt(t.upside)}`).join("\n");
+      const tip = `Implied target: the analyst consensus upside of the fund's top holdings, weighted by their share of the fund`
+        + `${a.proxy ? ` (holdings of ${a.proxy}, an ETF on the same index — Yahoo has none for this listing)` : ""}.`
+        + ` They cover ${a.coverage.toFixed(0)}% of the fund; the rest is assumed to move like them. Prices in the holdings' own currency, so FX moves are not included unless the fund is hedged.\n\n${top}`;
+      if (a.likely_break) tags.push(`<span class="pill ext" title="The implied target is ${pctTxt(a.vs_resistance)} above the nearest resistance">likely to break</span>`);
+      if ((r.L.resistance || []).some((z) => z.confluence)) tags.push(`<span class="pill ok" title="A resistance zone sits within 3% of the implied target">★ agrees</span>`);
+      return `<button class="lvc a imp" data-set="target_price" data-v="${round(a.mean)}" title="${esc(tip)}\n\nClick to use as target">≈${fmtPrice(a.mean, r.pccy)}</button>
+        <div class="sub ${cls(a.upside)}">${pctTxt(a.upside)} implied</div>
+        <div class="sub" title="${esc(tip)}">top ${a.n_holdings} = ${a.coverage.toFixed(0)}% of fund${a.proxy ? ` · via ${esc(a.proxy)}` : ""}</div>${tags.join("")}`;
+    }
     if (a.likely_break) tags.push(`<span class="pill ext" title="The consensus is ${pctTxt(a.vs_resistance)} above the nearest resistance: that level is more likely to give way">likely to break</span>`);
     if ((r.L.resistance || []).some((z) => z.confluence)) tags.push(`<span class="pill ok" title="A resistance zone sits within 3% of the consensus: two independent methods agree">★ agrees</span>`);
     const tip = `${a.n || "?"} analysts · low ${fmtPrice(a.low, r.pccy)} · median ${fmtPrice(a.median, r.pccy)} · high ${fmtPrice(a.high, r.pccy)}${a.rec ? ` · ${a.rec.replace("_", " ")}` : ""}`;
@@ -257,7 +268,7 @@ window.StonksTargets = function (ctx) {
       <th class="num">Stop loss <span class="sub">${u} · ▾ supports</span></th>
       <th class="num" title="Follows the price up from the highest close since the buy">Trailing stop <span class="sub">% or ×ATR off peak</span></th>
       <th class="num">Target <span class="sub">${u} · ▾ resistances</span></th>
-      <th class="num" title="Analyst consensus price target (stocks)">Analysts <span class="sub">mean target</span></th>
+      <th class="num" title="Analyst consensus price target. ETFs: implied from the consensus of their top holdings">Analysts <span class="sub">mean / implied target</span></th>
       <th class="rbcol">Stop · buy · now · target</th>
       <th class="num">To target <span class="sub">chance in ${hz()}</span></th>
       <th class="num" title="Profit or loss if sold at the target, after the account's sell fee">P/L at target</th><th>Status</th><th></th></tr>`;

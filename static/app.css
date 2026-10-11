@@ -445,6 +445,7 @@ tr.st-row-sl td:first-child { box-shadow: inset 3px 0 0 var(--down); }
 .lvc.star { border-color: rgba(245, 197, 81, .6); }
 .lvc.on { background: rgba(48, 204, 90, .14); }
 .lvc.a { font-size: 13px; padding: 2px 6px; }
+.lvc.a.imp { border-style: dashed; }
 .lv-none { margin-top: 4px; font-size: 10px; color: var(--muted); }
 .trail { display: inline-flex; gap: 3px; align-items: center; }
 .tmode { border: 1px solid var(--border); background: var(--panel); color: var(--muted); border-radius: 5px; font-size: 10px; padding: 3px 5px; cursor: pointer; min-width: 38px; }
