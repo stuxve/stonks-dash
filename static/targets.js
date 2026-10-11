@@ -174,11 +174,17 @@ window.StonksTargets = function (ctx) {
   }
   function stopChips(r) {
     if (!r.L || r.price == null || !r.atr) return "";
-    const zs = (r.L.support || []).slice(0, 2);
-    return zs.length ? `<div class="lv">${zs.map((z) => {
+    // a resistance the price just broke is now the nearest support: always offer it first
+    const bk = r.L.breakout && r.price > r.L.breakout.hi ? r.L.breakout : null;
+    const zs = (r.L.support || []).filter((z) => !bk || Math.abs(z.level - bk.level) > 1e-9).slice(0, bk ? 1 : 2);
+    const chip = (z, flip) => {
       const v = round(z.lo - 0.5 * r.atr);
-      return `<button class="lvc s" data-set="stop_price" data-v="${v}" title="${esc(`Half a typical daily move below the support. ${zoneTitle(r, z, "Support")}`)}">${fmtPrice(v, r.pccy)}<span>${z.touches}×</span></button>`;
-    }).join("")}</div>` : "";
+      const why = flip ? `Old resistance broken${z.since ? ` on ${fmtDate(z.since)}` : ""} — now acting as support. Half a typical daily move below it. `
+        : "Half a typical daily move below the support. ";
+      return `<button class="lvc s ${flip ? "flip" : ""}" data-set="stop_price" data-v="${v}" title="${esc(why + zoneTitle(r, z, flip ? "Broken resistance" : "Support"))}">${fmtPrice(v, r.pccy)}<span>${flip ? "↑ broke" : `${z.touches}×`}</span></button>`;
+    };
+    const html = (bk ? [chip(bk, true)] : []).concat(zs.map((z) => chip(z, false)));
+    return html.length ? `<div class="lv">${html.join("")}</div>` : "";
   }
 
   function trailCell(r) {
@@ -215,7 +221,7 @@ window.StonksTargets = function (ctx) {
     const pad = (hi - lo) * 0.08 || hi * 0.05;
     lo -= pad; hi += pad;
     const x = (v) => ((v - lo) / (hi - lo) * 100).toFixed(2);
-    const zs = [...(r.L?.resistance || []), ...(r.L?.support || [])].filter((z) => z.hi > lo && z.lo < hi);
+    const zs = [...(r.L?.resistance || []), ...(r.L?.support || []), ...(r.L?.breakout ? [r.L.breakout] : [])].filter((z) => z.hi > lo && z.lo < hi);
     const fill = r.price != null ? `<i class="fill ${r.price >= r.buy ? "up" : "down"}" style="left:${x(Math.min(r.buy, r.price))}%;width:${(x(Math.max(r.buy, r.price)) - x(Math.min(r.buy, r.price))).toFixed(2)}%"></i>` : "";
     return `<div class="rb" data-id="${r.p.id}">${zs.map((z) => `<i class="zone" style="left:${x(Math.max(z.lo, lo))}%;width:${Math.max(0.8, x(Math.min(z.hi, hi)) - x(Math.max(z.lo, lo))).toFixed(2)}%"></i>`).join("")}${fill}
       ${r.stop != null ? `<i class="m stop ${r.stopSrc}" style="left:${x(r.stop)}%"></i>` : ""}
