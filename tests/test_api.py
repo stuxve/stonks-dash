@@ -179,3 +179,32 @@ def test_purchase_date_and_migration(client, tmp_path):
     c.commit(); c.close()
     db = DB(str(old))
     assert db.list_positions()[0]["bought_at"] is None
+
+
+def test_sell_targets(client):
+    r = client.post("/api/positions", json={"symbol": "AAPL", "quantity": 2, "avg_cost": 100, "currency": "USD",
+                                            "bought_at": "2025-06-02", "target_price": 300, "stop_price": 80})
+    assert r.status_code == 201
+    pid = r.json()["id"]
+    row = next(p for p in client.get("/api/portfolio").json()["positions"] if p["id"] == pid)
+    assert row["target_price"] == 300 and row["stop_price"] == 80 and row["trail_pct"] is None
+    # partial updates keep the other exits; clearing with null works
+    assert client.patch(f"/api/positions/{pid}", json={"trail_pct": 12.5}).status_code == 200
+    assert client.patch(f"/api/positions/{pid}", json={"stop_price": None}).status_code == 200
+    p = next(p for p in client.get("/api/positions").json() if p["id"] == pid)
+    assert (p["target_price"], p["stop_price"], p["trail_pct"]) == (300, None, 12.5)
+    # stop must stay below the target; trailing % in (0, 100)
+    assert client.patch(f"/api/positions/{pid}", json={"stop_price": 310}).status_code == 400
+    assert client.patch(f"/api/positions/{pid}", json={"trail_pct": 150}).status_code == 422
+    assert client.post("/api/positions", json={"symbol": "MSFT", "quantity": 1, "avg_cost": 1,
+                                               "target_price": 5, "stop_price": 6}).status_code == 400
+    # editing the buy elsewhere doesn't wipe the exits
+    client.patch(f"/api/positions/{pid}", json={"quantity": 3, "avg_cost": 100, "notes": "x"})
+    p = next(p for p in client.get("/api/positions").json() if p["id"] == pid)
+    assert p["target_price"] == 300 and p["trail_pct"] == 12.5
+    # highest close since the buy, never below today's price
+    pk = client.get("/api/targets/peaks").json()["peaks"][str(pid)]
+    q = client.get("/api/quote/AAPL").json()
+    assert pk["peak"] >= q["price"] - 1e-9 and pk["low"] <= pk["peak"] and pk["peak_date"] >= "2025-06-02"
+    # exits travel with export/import
+    assert any(x.get("target_price") == 300 for x in client.get("/api/export").json()["positions"])

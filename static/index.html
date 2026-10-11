@@ -73,6 +73,7 @@
     <div class="kpis" id="kpis"></div>
     <div class="subnav" id="p-subnav" role="tablist">
       <button data-sub="holdings" class="active">Holdings</button>
+      <button data-sub="targets">Sell targets <span class="nb" id="tg-badge" hidden></span></button>
       <button data-sub="performance">Performance vs index</button>
       <button data-sub="allocation">Allocation</button>
       <button data-sub="exposure">Exposure</button>
@@ -156,6 +157,34 @@
         Annual return is money-weighted (XIRR), so it accounts for when you added money.</p>
       <h3 class="sub-h">Each position vs the index over the same dates</h3>
       <div class="table-wrap"><table class="grid" id="perf-table"><thead></thead><tbody></tbody></table></div>
+    </div>
+
+    <!-- sell targets per buy -->
+    <div id="p-sub-targets" class="psub" hidden>
+      <div class="kpis small" id="tg-kpis"></div>
+      <div class="toolbar">
+        <label class="ctl">Type stop &amp; target as
+          <span class="seg" id="tg-mode"><button data-v="price">Price</button><button data-v="pct">% vs buy price</button></span>
+        </label>
+        <label class="ctl">Show
+          <span class="seg" id="tg-filter"><button data-v="all">All buys</button><button data-v="set">With exits</button><button data-v="alert">Alerts</button></span>
+        </label>
+        <label class="ctl">"Near" when within <input id="tg-near" class="tgt" type="number" min="0.5" max="50" step="0.5"> %</label>
+      </div>
+      <div class="callout warn" id="tg-error" hidden></div>
+      <div class="table-wrap"><table class="grid" id="tg-table"><thead></thead><tbody></tbody></table></div>
+      <div class="addrow tg-fill">
+        <span class="hint tg-fill-h">Fill buys that have no exit yet</span>
+        <label class="field">Target — % above buy price<input id="tg-fill-tp" type="number" step="1" placeholder="e.g. 25"></label>
+        <label class="field">Stop loss — % below buy price<input id="tg-fill-sl" type="number" step="1" min="0" max="99" placeholder="e.g. 10"></label>
+        <label class="field">Trailing stop — % below peak<input id="tg-fill-tr" type="number" step="1" min="0" max="99" placeholder="optional"></label>
+        <button id="tg-fill-btn" class="btn ghost">Apply</button>
+      </div>
+      <p class="hint tg-notes">Exits are saved on each buy, in the asset's own currency (the one its price is quoted in). A <b>trailing stop</b> follows the price up:
+        it sits the given % below the highest close since the buy, and the higher of it and your fixed stop is used.
+        <b>P/L at target</b> is after the account's sell fee (Costs tab) and before tax.
+        Nothing is sold automatically — this is a monitor; place the order at your broker and record it with <b>Sell</b>.
+        In Spain sales are matched oldest buy first (FIFO), so a later buy flagged <span class="pill warn">FIFO 2/3</span> can't be sold before the older ones.</p>
     </div>
 
     <!-- allocation targets -->
@@ -477,6 +506,7 @@
 <script src="/static/hours.js"></script>
 <script src="/static/planner.js"></script>
 <script src="/static/insights.js"></script>
+<script src="/static/targets.js"></script>
 <script src="/static/portfolio.js"></script>
 <script src="/static/app.js"></script>
 </body>

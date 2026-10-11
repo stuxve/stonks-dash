@@ -57,6 +57,10 @@ class PositionIn(BaseModel):
     notes: str | None = None
     bought_at: date | None = None   # purchase date (YYYY-MM-DD)
     fees: float | None = Field(default=None, ge=0)
+    # sell objectives for this buy, in the quote currency
+    target_price: float | None = Field(default=None, gt=0)
+    stop_price: float | None = Field(default=None, gt=0)
+    trail_pct: float | None = Field(default=None, gt=0, lt=100)
 
 
 class TxIn(BaseModel):
@@ -247,6 +251,12 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         if p.get("bought_at") and p["bought_at"] > date.today() + timedelta(days=1):
             raise HTTPException(400, "purchase date is in the future")
 
+    def _check_exits(cur: dict, d: dict):
+        tp = d["target_price"] if "target_price" in d else cur.get("target_price")
+        sl = d["stop_price"] if "stop_price" in d else cur.get("stop_price")
+        if tp is not None and sl is not None and sl >= tp:
+            raise HTTPException(400, "The stop loss must be below the target price.")
+
     def _check_fifo(lots: list[dict], sells: list[dict], editing_buy: bool = False):
         """Refuse any change that leaves a sale selling more than was held at its date."""
         short = ledger.fifo(lots, sells).shortfalls
@@ -271,12 +281,17 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     def create_position(p: PositionIn):
         d = p.model_dump()
         _validate_position(d, partial=False)
+        _check_exits({}, d)
         return {"id": db.create_position(d)}
 
     @app.patch("/api/positions/{pos_id}")
     def update_position(pos_id: int, p: PositionIn):
         d = p.model_dump(exclude_unset=True)
         _validate_position(d, partial=True)
+        cur = next((x for x in db.list_positions() if x["id"] == pos_id), None)
+        if cur is None:
+            raise HTTPException(404, "position not found")
+        _check_exits(cur, d)
         lots = [({**x, **{k: (str(v) if k == "bought_at" and v else v) for k, v in d.items()}} if x["id"] == pos_id else x)
                 for x in db.list_positions()]
         _check_fifo(lots, _sells(), editing_buy=True)
@@ -607,6 +622,37 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             "harvest": harvest, "warnings": warnings, "fx_approx": sorted(fx.approx),
         }
 
+    # ------------------------------------------------------------------ sell targets
+    @app.get("/api/targets/peaks")
+    def target_peaks():
+        """Highest close since each open, dated buy (quote currency) — for trailing stops and drawdown."""
+        lots, _sells, _divs, fr = _context("EUR")
+        open_lots = [x for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
+                     and x["symbol"] and x["manual_price"] is None and x.get("bought_at")]
+        if not open_lots:
+            return {"peaks": {}}
+        start = min(ledger.lot_date(x) for x in open_lots)
+        hist = engine.history(sorted({x["symbol"] for x in open_lots}), start)
+        quotes = engine.quotes(sorted({x["symbol"] for x in open_lots}))
+        out = {}
+        for x in open_lots:
+            ser = hist.get(x["symbol"])
+            if ser is None or ser.empty:
+                continue
+            d0 = ledger.lot_date(x)
+            ser = ser[ser.index >= pd.Timestamp(d0)].dropna()
+            if ser.empty:
+                continue
+            i = ser.idxmax()
+            peak, when = float(ser.loc[i]), i.date().isoformat()
+            q = quotes.get(x["symbol"])
+            if q and q.ok and q.price and q.price > peak:
+                peak, when = float(q.price), (q.last_date or date.today().isoformat())
+            low_i = ser.idxmin()
+            out[str(x["id"])] = {"peak": peak, "peak_date": str(when)[:10],
+                                 "low": float(ser.loc[low_i]), "low_date": low_i.date().isoformat()}
+        return {"peaks": out}
+
     # ------------------------------------------------------------------ look-through exposure
     @app.get("/api/exposure")
     def exposure_view(base: str | None = None):
@@ -774,7 +820,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

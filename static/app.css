@@ -408,3 +408,28 @@ table.grid .exp { background: none; border: 0; color: var(--muted); cursor: poin
   .hrow.hhead .htrack { border-top: 0; height: 26px; }
   .hrow.hhead { top: 0; position: static; }
 }
+
+/* ---- sell targets ---- */
+.subnav .nb { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px; border-radius: 99px; background: #f5a524; color: #111; font-size: 10px; font-weight: 700; line-height: 16px; text-align: center; vertical-align: 1px; }
+#tg-table th .sub { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
+#tg-table input.tgt { width: 72px; }
+#tg-table input.tgt.px { width: 92px; }
+#tg-table td { vertical-align: top; }
+th.rbcol, td.rbcol { width: 170px; min-width: 140px; }
+.rb { position: relative; height: 8px; margin: 10px 4px 0; background: var(--panel-2); border-radius: 4px; }
+.rb.empty { opacity: .35; }
+.rb .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; opacity: .55; }
+.rb .fill.up { background: var(--up); } .rb .fill.down { background: var(--down); }
+.rb .m { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; border-radius: 1px; }
+.rb .m.buy { background: var(--muted); }
+.rb .m.tp { background: var(--up); width: 3px; }
+.rb .m.stop { background: var(--down); width: 3px; }
+.rb .m.stop.trail { background: repeating-linear-gradient(180deg, var(--down) 0 3px, transparent 3px 5px); }
+.rb .dot { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--text-strong); box-shadow: 0 0 0 2px var(--bg); }
+.st-down { color: var(--down); border-color: rgba(246, 53, 56, .35); background: rgba(246, 53, 56, .08); }
+.st-none { color: var(--muted); opacity: .7; } .st-none::before { background: transparent; border: 1px solid currentColor; }
+tr.st-row-tp td:first-child { box-shadow: inset 3px 0 0 var(--up); }
+tr.st-row-sl td:first-child { box-shadow: inset 3px 0 0 var(--down); }
+.tg-fill { margin-top: 12px; }
+.tg-fill-h { align-self: center; color: var(--text); }
+.tg-notes { margin-top: 10px; max-width: 1100px; }

@@ -1,12 +1,13 @@
-/* stonks-dash — portfolio sub-tabs: performance vs index, allocation targets, transactions ledger, sell/dividend dialog. */
+/* stonks-dash — portfolio sub-tabs: sell targets (static/targets.js), performance vs index, allocation targets, transactions ledger, sell/dividend dialog. */
 window.StonksPortfolio = function (ctx) {
   "use strict";
   const { api, esc, state, saveSettings, base, fmtPct, fmtPP, fmtMoney, fmtSigned, fmtNum, fmtPrice, fmtDate, fmtHeld, cls,
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$ } = ctx;
 
-  const SUBS = ["holdings", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
+  const SUBS = ["holdings", "targets", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
   const ins = window.StonksInsights(ctx);
+  const tgt = window.StonksTargets({ ...ctx, feeFor: ins.feeFor, openTx });
   let sub = "holdings";
   try { sub = localStorage.getItem("stonks.psub") || "holdings"; } catch {}
   if (!SUBS.includes(sub)) sub = "holdings";
@@ -30,6 +31,7 @@ window.StonksPortfolio = function (ctx) {
     if (sub === "performance") loadPerf(silent);
     else if (sub === "allocation") drawAlloc();
     else if (sub === "ledger") loadLedger(silent);
+    else if (sub === "targets") tgt.refresh(silent);
     else ins.refresh(sub, silent);
   }
   // called by app.js after every portfolio reload (buy/sell saved, currency switch, auto-refresh)
@@ -37,6 +39,7 @@ window.StonksPortfolio = function (ctx) {
     perf = sub === "performance" ? perf : null;
     ledgerData = sub === "ledger" ? ledgerData : null;
     refresh(true);
+    tgt.badge();
   }
 
   // ================================================================== PERFORMANCE
