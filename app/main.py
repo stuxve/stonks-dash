@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import exposure, ledger, levels, risk, tax
+from . import exposure, ideas, ledger, levels, risk, seeds, tax
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -1101,6 +1101,112 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 "missing": [k for k in wts if k not in used], "coverage": float(sum(wts[k] for k in used) / sum(wts.values())),
                 "per": {k: risk.ann_vol(R[k]) for k in used}}
 
+    # ------------------------------------------------------------------ ideas (screener)
+    def _mix_returns(base: str, start: date):
+        """Daily returns of today's holdings (base currency, proxies for short histories)."""
+        lots, _sells, _divs, fr = _context(base)
+        rows, _, _ = _open_rows(base, lots, fr)
+        vals, info = {}, {}
+        for r in rows:
+            if r["ok"] and r["symbol"] and r["manual_price"] is None:
+                vals[r["symbol"]] = vals.get(r["symbol"], 0.0) + r["value"]
+                info[r["symbol"]] = r
+        if not vals:
+            return None
+        px, meta = _base_prices(base, list(vals), start - timedelta(days=10))
+        _splice_proxies(base, px, list(vals), meta, info, start)
+        R = risk.business_returns({k: px[k] for k in vals if k in px}, start)
+        if R.empty:
+            return None
+        w = pd.Series({k: vals[k] for k in R.columns})
+        return risk.portfolio_returns(R, w / w.sum())
+
+    _ideas_cache: dict = {}
+
+    @app.get("/api/ideas")
+    def ideas_view(universe: str = Query("spain", pattern="^(spain|world)$"), base: str | None = None):
+        base = base_or_default(base)
+        ck = (universe, base)
+        hit = _ideas_cache.get(ck)
+        if hit and time.time() - hit[0] < 300 and not hit[1]["progress"]["pending"]:
+            return hit[1]
+        st = db.get_settings()
+        custom = [x.upper() for x in (((st.get("ideas") or {}).get("custom") or {}).get(universe) or [])]
+        if universe == "spain":
+            syms = list(seeds.IBEX35)
+        else:
+            syms = [x for x in seeds.US_MEGACAPS + seeds.EUROPE_LEADERS if not x.endswith(".MC")] + ideas.WORLD_EXTRA
+        syms = list(dict.fromkeys([x.upper() for x in syms] + custom))
+        fund, prog = engine.fundamentals(syms)
+        today = date.today()
+        hist = engine.history(syms, today - timedelta(days=400))
+        # base-currency returns for the correlation with your portfolio
+        ccy = {x: normalize_currency((fund.get(x) or {}).get("currency"))[0] for x in syms if fund.get(x)}
+        fx = _fxbook(base, {c for c in ccy.values() if c}, today - timedelta(days=400))
+        start = today - timedelta(days=365)
+        bpx = {x: hist[x] * fx.on_index(ccy[x], hist[x].index) for x in syms if x in hist and x in ccy}
+        CR = risk.business_returns(bpx, start) if bpx else pd.DataFrame()
+        try:
+            rp = _mix_returns(base, start)
+        except Exception as e:  # noqa: BLE001
+            log.info("portfolio returns for ideas failed: %s", e)
+            rp = None
+        # your look-through exposure: sectors, regions, and what you already own of each company
+        my_sec, my_reg, held_sym, held_name = {}, {}, {}, {}
+        try:
+            ex = exposure_view(base)
+            for r_ in ex.get("sectors", []):
+                my_sec[r_["key"]] = r_["pct"]
+            for r_ in ex.get("countries", []):
+                if r_["key"] in ("Crypto (no country)", "Commodity (no country)", "Unclassified", "Unknown", "Other"):
+                    continue
+                reg = ideas.region_of(r_["key"])
+                my_reg[reg] = my_reg.get(reg, 0.0) + r_["pct"]
+            for c in ex.get("companies", []):
+                if c.get("rest"):
+                    continue
+                if c.get("symbol"):
+                    k_ = c["symbol"].upper()
+                    held_sym[k_] = held_sym.get(k_, 0.0) + c["pct"]
+                held_name[c["key"]] = held_name.get(c["key"], 0.0) + c["pct"]
+        except Exception as e:  # noqa: BLE001
+            log.info("exposure for ideas failed: %s", e)
+        cands = []
+        for x in syms:
+            f = fund.get(x)
+            if not f or (f.get("quote_type") and f["quote_type"] != "EQUITY"):
+                continue
+            h = hist.get(x)
+            mom = from_high = vol = corr = None
+            if h is not None and len(h) > 200:
+                h = h.dropna()
+                p_now, p_1m = float(h.iloc[-1]), float(h.iloc[-22])
+                p_12m = h[h.index <= h.index[-1] - pd.Timedelta(days=365)]
+                if len(p_12m):
+                    mom = p_1m / float(p_12m.iloc[-1]) - 1
+                hi = float(h[h.index >= h.index[-1] - pd.Timedelta(days=365)].max())
+                from_high = p_now / hi - 1 if hi else None
+                vol = risk.ann_vol(h.pct_change().iloc[-252:])
+            if rp is not None and x in CR:
+                _, corr = risk.beta_corr(CR[x], rp)
+            meta_c = {"country": f.get("country")}
+            country = exposure.country_of(x, meta_c)
+            held = max(held_sym.get(x, 0.0), held_sym.get(x.split(".")[0], 0.0),
+                       held_name.get(exposure.norm_name(f.get("name")), 0.0))
+            cands.append({**f, "symbol": x, "country": country, "mom": mom, "from_high": from_high, "vol": vol,
+                          "corr": corr, "held_pct": held})
+        rows_ = ideas.score(cands, my_sec, my_reg, world=universe == "world")
+        eq_tot = sum(v for k_, v in my_sec.items() if k_ in ideas.EQUITY_SECTORS)
+        rg_tot = sum(my_reg.values())
+        wsum = sum(ideas.WORLD_SECTORS.values())
+        out = {"universe": universe, "base": base, "rows": rows_, "progress": prog,
+               "my_sectors": {k_: my_sec.get(k_, 0.0) / eq_tot * 100 if eq_tot else 0.0 for k_ in ideas.WORLD_SECTORS},
+               "ref_sectors": {k_: v / wsum * 100 for k_, v in ideas.WORLD_SECTORS.items()},
+               "my_regions": {k_: my_reg.get(k_, 0.0) / rg_tot * 100 if rg_tot else 0.0 for k_ in ideas.WORLD_REGIONS},
+               "ref_regions": ideas.WORLD_REGIONS, "has_portfolio": rp is not None, "as_of": time.time()}
+        _ideas_cache[ck] = (time.time(), out)
+        return out
+
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():
@@ -1317,7 +1423,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "risk.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "risk.js", "ideas.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

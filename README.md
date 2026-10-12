@@ -86,6 +86,17 @@ The size and group choices are saved per board. Period, range and currency are g
   - A **stress test**: choose the moves for stocks, crypto, bonds, gold and foreign currencies, or a preset. Each stock or equity fund moves by its beta.
   - **Past crises** (COVID 2020, 2022 bear, crypto winter, Aug 2024, 2025 tariffs) replayed on today's portfolio. Holdings bought or listed later are estimated from beta × index (BTC for crypto).
   - An **earnings calendar** for your stocks: the next report date, expected EPS, the last 4 surprises, the typical price move after a report, and how far your stop is. The Risk tab shows a count when a report is within the warning window (7 days by default), and Sell targets rows show an *earnings* pill in the 14 days before. The pill turns amber when the stop sits inside the typical earnings move.
+- **Ideas** is a stock screener that changes with your portfolio. It is a screen, not advice. There are two lists: **Spain** (the IBEX 35) and **World** (about 100 large caps from the US, Europe, Japan, Asia, Canada and Australia). You can add your own tickers to either list. Each stock gets eight 0–100 factor scores, each a percentile within its list:
+  - **Fit**: sectors and regions where your stocks (with funds looked through) are below a global index; low correlation with your current holdings; a penalty for companies you already own, directly or through funds.
+  - **Value**: P/E, P/B and EV/EBITDA, each compared with the same sector.
+  - **Quality**: ROE, operating margin and debt.
+  - **Growth**: sales and earnings growth.
+  - **Momentum**: 12-month return excluding the last month, and distance from the 52-week high.
+  - **Analysts**: consensus upside and recommendation.
+  - **Income**: dividend yield **net of the foreign withholding a Spanish resident can't credit**, which is the part above the usual 15% treaty rate. Spanish dividends lose nothing.
+  - **Low risk**: low volatility.
+
+  Presets (Balanced, Diversify me, Value, Quality, Growth, Dividends) or Custom sliders weight the factors, and the ranking updates instantly. Each row explains why it ranks there and flags problems: high debt, payout above 100%, falling earnings, a sector you're already heavy in, or a stock you already hold. Company data comes from Yahoo and is fetched in the background the first time each day (about 100 calls for World); prices, momentum and fit update with the page.
 - **Performance vs index** compares your portfolio with a "shadow portfolio". Every euro you invested or took out on a date is treated as a buy or sell of the benchmark on that same date. It shows both gains, the difference, and the money-weighted annual return (XIRR) for you and for the index. The chart plots your portfolio value, the index value and the net amount invested. The default benchmark is IWDA.AS (MSCI World in EUR), and you can switch to VWCE, the S&P 500, the Nasdaq-100, emerging markets, the Stoxx 600 or any other ticker. Manual or unpriced assets are carried at cost.
 - **Allocation** lets you pick what to allocate by (my groups, asset type, account, sector or each asset) and set a target % for each bucket. It shows the current %, how far each bucket has drifted, and how much to buy or sell to reach the target. **Measure by** compares against market value or money invested.
 - **Next order** (in **Allocation**): you enter a goal for total money invested, your monthly contribution and the maximum number of orders per month (1–3), and it tells you what to buy this month. It works on the money you've invested in each bucket, buys only, and uses whole orders to keep fixed fees low.
@@ -155,6 +166,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET/POST/PATCH/DELETE | `/api/positions[/{id}]` | Portfolio CRUD |
 | GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
+| GET | `/api/ideas?universe=spain\|world` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |
 | GET | `/api/targets/peaks` | Peak and low close since each open, dated buy |

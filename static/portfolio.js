@@ -5,10 +5,11 @@ window.StonksPortfolio = function (ctx) {
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$ } = ctx;
 
-  const SUBS = ["holdings", "targets", "risk", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
+  const SUBS = ["holdings", "targets", "risk", "ideas", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
   const ins = window.StonksInsights(ctx);
   const tgt = window.StonksTargets({ ...ctx, feeFor: ins.feeFor, openTx });
   const rk = window.StonksRisk({ ...ctx, targets: tgt });
+  const idea = window.StonksIdeas(ctx);
   let sub = "holdings";
   try { sub = localStorage.getItem("stonks.psub") || "holdings"; } catch {}
   if (!SUBS.includes(sub)) sub = "holdings";
@@ -34,6 +35,7 @@ window.StonksPortfolio = function (ctx) {
     else if (sub === "ledger") loadLedger(silent);
     else if (sub === "targets") tgt.refresh(silent);
     else if (sub === "risk") rk.refresh(silent);
+    else if (sub === "ideas") idea.refresh(silent);
     else ins.refresh(sub, silent);
   }
   // called by app.js after every portfolio reload (buy/sell saved, currency switch, auto-refresh)

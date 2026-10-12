@@ -356,3 +356,32 @@ def test_diversified_start_skips_single_stock_period(client):
         client.post("/api/positions", json={"symbol": s, "quantity": 10, "avg_cost": 100, "currency": "USD", "bought_at": d})
     a = client.get("/api/risk?years=3").json()["actual"]
     assert a["diversified"] and a["since"] == "2024-03-01" and a["first"]["top"] == "TSLA"
+
+
+def test_ideas_screener(client):
+    import time as _t
+    for _ in range(40):                       # fundamentals load in the background
+        d = client.get("/api/ideas?universe=spain").json()
+        if not d["progress"]["pending"] and d["rows"]:
+            break
+        _t.sleep(0.25)
+    assert d["rows"] and all(r["symbol"].endswith(".MC") for r in d["rows"])
+    r = d["rows"][0]
+    assert set(r["f"]) == {"value", "quality", "growth", "momentum", "analysts", "income", "risk", "fit"}
+    assert all(v is None or 0 <= v <= 100 for x in d["rows"] for v in x["f"].values())
+    assert all(x["f"]["income"] == 0 for x in d["rows"] if not x["div_yield"])
+    held = [x for x in d["rows"] if x["symbol"] == "SAN.MC"]       # the demo portfolio holds SAN.MC
+    assert held and held[0]["held_pct"] > 0 and any("already hold" in f for f in held[0]["flags"])
+    assert abs(sum(d["ref_sectors"].values()) - 100) < 0.01
+    w = client.get("/api/ideas?universe=world").json()
+    assert w["universe"] == "world" and not any(x["symbol"].endswith(".MC") for x in w["rows"])
+
+
+def test_ideas_withholding_and_ranks():
+    from app import ideas
+    assert ideas.lost_withholding("Spain") == 0 and ideas.lost_withholding("United States") == 0
+    assert ideas.lost_withholding("Switzerland") == 20 and ideas.lost_withholding("Germany") == pytest.approx(11.375)
+    r = ideas._rank({"a": 1, "b": 2, "c": 3, "d": None})
+    assert r == {"a": 0.0, "b": 50.0, "c": 100.0}
+    assert ideas._rank({"a": 1, "b": 2}, higher_better=False) == {"a": 100.0, "b": 0.0}
+    assert ideas.region_of("Japan") == "Japan" and ideas.region_of("Taiwan") == "Emerging markets"

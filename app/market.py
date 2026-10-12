@@ -161,6 +161,32 @@ class YahooProvider:
                 pass
         return out if out["mean"] else {}
 
+    FUND_KEYS = {"name": ("shortName", "longName"), "sector": ("sector", "sectorDisp"), "industry": ("industry",),
+                 "country": ("country",), "currency": ("currency",), "quote_type": ("quoteType",),
+                 "price": ("currentPrice", "regularMarketPrice"), "market_cap": ("marketCap",),
+                 "pe": ("trailingPE",), "fpe": ("forwardPE",), "pb": ("priceToBook",), "ev_ebitda": ("enterpriseToEbitda",),
+                 "roe": ("returnOnEquity",), "op_margin": ("operatingMargins",), "profit_margin": ("profitMargins",),
+                 "de": ("debtToEquity",), "rev_g": ("revenueGrowth",), "eps_g": ("earningsGrowth",),
+                 "div_rate": ("dividendRate",), "trail_yield": ("trailingAnnualDividendYield",), "payout": ("payoutRatio",),
+                 "beta": ("beta",), "target": ("targetMeanPrice",), "n": ("numberOfAnalystOpinions",),
+                 "rec": ("recommendationMean",), "rec_key": ("recommendationKey",), "hi52": ("fiftyTwoWeekHigh",)}
+
+    def fundamentals(self, symbol: str) -> dict:
+        """Valuation, quality, growth, dividend and analyst fields of a stock (for the Ideas screener)."""
+        info = self.yf.Ticker(symbol).get_info() or {}
+        if not info or not (info.get("quoteType") or info.get("shortName")):
+            raise LookupError(f"no info for {symbol}")
+        out = {}
+        for k, srcs in self.FUND_KEYS.items():
+            v = next((info.get(x) for x in srcs if info.get(x) not in (None, "", "Infinity")), None)
+            out[k] = v
+        # yield from the forward dividend rate when there is one (both in the quote currency), else the trailing one
+        px = out.get("price")
+        out["div_yield"] = (out["div_rate"] / px) if out.get("div_rate") and px else (out.get("trail_yield") or 0.0)
+        if out["div_yield"] and out["div_yield"] > 0.3:      # bad data (e.g. a percent where a fraction is expected)
+            out["div_yield"] = None
+        return out
+
     def earnings(self, symbol: str) -> dict:
         """Next earnings date(s), estimates, recent reports and dividend dates. {} when Yahoo has none."""
         t = self.yf.Ticker(symbol)
@@ -404,6 +430,25 @@ class MockProvider:
                 "high": mean * r.uniform(1.1, 1.4), "n": int(r.integers(4, 40)),
                 "rec": str(r.choice(["buy", "strong_buy", "hold"])), "rec_mean": round(float(r.uniform(1.5, 3)), 2),
                 "fwd_eps": None, "fwd_pe": None, "currency": self._currency(symbol)}
+
+    def fundamentals(self, symbol: str) -> dict:
+        r = np.random.default_rng(self._seed(symbol) + 23)
+        px = float(self._series(symbol, date.today() - timedelta(days=10)).iloc[-1])
+        sec = self._sector.get(symbol) or str(r.choice(["Technology", "Financial Services", "Healthcare", "Industrials",
+                                                        "Consumer Cyclical", "Utilities", "Energy"]))
+        fin = sec == "Financial Services"
+        y = float(r.choice([0, 0, r.uniform(0.005, 0.07)]))
+        return {"name": symbol.split(".")[0] + " Corp", "sector": sec, "industry": None, "country": self._country(symbol),
+                "currency": self._currency(symbol), "quote_type": "EQUITY", "price": px,
+                "market_cap": float(np.exp(r.uniform(np.log(5e9), np.log(3e12)))),
+                "pe": float(r.uniform(6, 45)), "fpe": float(r.uniform(5, 38)), "pb": float(r.uniform(0.6, 12)),
+                "ev_ebitda": None if fin else float(r.uniform(4, 30)), "roe": float(r.uniform(-0.05, 0.45)),
+                "op_margin": float(r.uniform(0.02, 0.45)), "profit_margin": float(r.uniform(0.01, 0.35)),
+                "de": None if fin else float(r.uniform(0, 280)), "rev_g": float(r.uniform(-0.1, 0.35)),
+                "eps_g": float(r.uniform(-0.4, 0.6)), "div_rate": px * y if y else None, "trail_yield": y,
+                "div_yield": y, "payout": float(r.uniform(0.1, 1.2)) if y else None, "beta": float(r.uniform(0.4, 1.8)),
+                "target": px * float(r.uniform(0.9, 1.4)), "n": int(r.integers(0, 40)), "rec": float(r.uniform(1.3, 3.2)),
+                "rec_key": str(r.choice(["buy", "hold", "strong_buy"])), "hi52": px * float(r.uniform(1.0, 1.4))}
 
     def earnings(self, symbol: str) -> dict:
         if self._quote_type(symbol) != "EQUITY":
@@ -655,6 +700,46 @@ class QuoteEngine:
             _, div = normalize_currency(a.get("currency") or (meta.get(s) or {}).get("currency"))
             out[s] = {k: (v / div if k in ("mean", "median", "low", "high") and v else v) for k, v in a.items()}
         return out
+
+    def fundamentals(self, symbols: list[str], ttl: float = 86400) -> tuple[dict[str, dict], dict]:
+        """Cached fundamentals; missing ones are fetched in the background (a universe is ~100 Yahoo calls).
+        Returns (data, progress)."""
+        symbols = list(dict.fromkeys(symbols))
+        keys = {s: f"fund2:{s}" for s in symbols}
+        raw = self.db.get_meta(list(keys.values()), ttl)
+        have = {s: raw[k] for s, k in keys.items() if k in raw}
+        now = time.time()
+        missing = [s for s in symbols if s not in have and now - self._meta_miss.get(keys[s], 0) > self.meta_retry]
+        stale = [s for s in symbols if s not in have]
+        if stale:      # an older copy beats nothing while the refresh runs
+            old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
+            have.update({s: old[keys[s]] for s in stale if keys[s] in old})
+        if missing and hasattr(self.p, "fundamentals"):
+            with self._lock:
+                running = getattr(self, "_fund_job", None)
+                todo = [s for s in missing if s not in (running or set())]
+                if todo:
+                    job = set(todo) | (running or set())
+                    self._fund_job = job
+
+                    def work(batch):
+                        def fetch(s):
+                            try:
+                                return s, self.p.fundamentals(s)
+                            except Exception as e:  # noqa: BLE001
+                                log.info("fundamentals %s failed: %s", s, e)
+                                return s, None
+                        with ThreadPoolExecutor(max_workers=min(self.workers, 3)) as ex:
+                            for s, f in ex.map(fetch, batch):
+                                if f:
+                                    self.db.put_meta(f"fund2:{s}", f)
+                                else:
+                                    self._meta_miss[f"fund2:{s}"] = time.time()
+                                with self._lock:
+                                    self._fund_job.discard(s)
+                    threading.Thread(target=work, args=(todo,), daemon=True).start()
+        pending = len(getattr(self, "_fund_job", set()) & set(symbols))
+        return have, {"have": len(have), "total": len(symbols), "pending": pending}
 
     def earnings(self, symbols: list[str], ttl: float = 12 * 3600) -> dict[str, dict]:
         """Earnings calendar per stock (cached 12 h; empty answers too)."""

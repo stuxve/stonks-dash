@@ -75,6 +75,7 @@
       <button data-sub="holdings" class="active">Holdings</button>
       <button data-sub="targets">Sell targets <span class="nb" id="tg-badge" hidden></span></button>
       <button data-sub="risk">Risk <span class="nb" id="rk-badge" hidden></span></button>
+      <button data-sub="ideas">Ideas</button>
       <button data-sub="performance">Performance vs index</button>
       <button data-sub="allocation">Allocation</button>
       <button data-sub="exposure">Exposure</button>
@@ -233,6 +234,35 @@
       <p class="hint tg-notes">Risk figures replay <b>today's holdings and weights</b> over past prices (in your base currency), so they describe the portfolio you have now.
         Volatility and drawdowns of the past don't cap future ones. Holdings with a short price history (e.g. a listing Yahoo barely covers) borrow the earlier part from a proxy: another listing of the same fund, an ETF on the same index, or a ticker you choose. Stocks listed after a crisis are estimated from their beta × the index (crypto: BTC).
         Earnings dates come from Yahoo; an estimated window means the company hasn't confirmed the day. A stock often moves several % the session after it reports — a stop inside that range can be triggered by the report alone.</p>
+    </div>
+
+    <!-- ideas: stock screener with portfolio fit -->
+    <div id="p-sub-ideas" class="psub" hidden>
+      <div class="toolbar">
+        <span class="seg" id="id-uni"><button data-v="spain">Spain · IBEX 35</button><button data-v="world">World · large caps</button></span>
+        <span class="ctl">Focus <span class="seg" id="id-preset"></span></span>
+        <select id="id-sector"></select>
+        <label class="ctl"><input type="checkbox" id="id-hide-held"> hide stocks I already hold</label>
+        <span class="hint grow" id="id-note"></span>
+      </div>
+      <div class="row id-weights" id="id-weights" hidden></div>
+      <div id="id-progress" class="id-progress"></div>
+      <p class="callout">A screen, not a recommendation: it ranks stocks on today's data and on how they fit your portfolio. It can't see the future, news or anything that isn't in the numbers.
+        Use it to find names worth researching, then read the company's reports before buying.</p>
+      <div class="id-exposure" id="id-exposure"></div>
+      <div class="table-wrap"><table class="grid" id="id-table"></table></div>
+      <div class="row plan-more" id="id-more"></div>
+      <div class="addrow id-custom-row">
+        <label class="field grow"><span id="id-custom-l">Extra tickers</span><input id="id-custom" type="text" placeholder="Yahoo tickers, comma separated — e.g. LOG.MC, CIE.MC, NVO"></label>
+      </div>
+      <div class="hint tg-notes">
+        <p>Each factor is a 0–100 percentile inside the list (valuation is compared within the same sector when there are 4+ peers). The score is the weighted average of the factors you choose. Stocks with missing data are scored only on the factors they have, with a small penalty.</p>
+        <ul class="plain">
+          <li><b>Fit</b> is the personal part: it rises for sectors and regions where your stocks are below a global index, for low correlation with your current holdings (last year of daily returns, in your base currency), and falls for companies you already own, directly or through your funds.</li>
+          <li><b>Income</b> uses the yield after the dividend withholding you can't credit in your Spanish tax return (the part above the usual 15% treaty rate: e.g. Germany 26.4%, Switzerland 35%, France 25%). Spanish dividends have no foreign withholding. Some excess can be reclaimed from the other country with paperwork.</li>
+          <li>Company data (Yahoo: valuation, margins, growth, dividends, analyst consensus) is refreshed daily; prices, momentum and fit update with the page.</li>
+        </ul>
+      </div>
     </div>
 
     <!-- allocation targets -->
@@ -557,6 +587,7 @@
 <script src="/static/insights.js"></script>
 <script src="/static/targets.js"></script>
 <script src="/static/risk.js"></script>
+<script src="/static/ideas.js"></script>
 <script src="/static/portfolio.js"></script>
 <script src="/static/app.js"></script>
 </body>
