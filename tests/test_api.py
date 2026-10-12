@@ -266,3 +266,60 @@ def test_etf_implied_target(client):
     etf = next(s for s in ("VWCE.DE", "IWDA.AS") if s in d)
     assert d[etf]["analyst"]["implied"] and d[etf]["analyst"]["proxy"] is None
     assert all(d[s]["analyst"] is None for s in d if s.endswith("-USD"))     # crypto: no coverage
+
+
+def test_risk_math():
+    import numpy as np
+    from app import risk
+    idx = pd.bdate_range("2023-01-02", periods=500)
+    rng = np.random.default_rng(3)
+    m = rng.normal(0.0003, 0.01, 500)
+    a = 1.5 * m + rng.normal(0, 0.005, 500)          # beta 1.5
+    b = rng.normal(0.0002, 0.01, 500)                 # unrelated
+    px = {k: pd.Series(100 * np.cumprod(1 + r), index=idx) for k, r in (("M", m), ("A", a), ("B", b))}
+    R = risk.business_returns(px)
+    beta, corr = risk.beta_corr(R["A"], R["M"])
+    assert beta == pytest.approx(1.5, abs=0.15) and corr > 0.9
+    _, c0 = risk.beta_corr(R["B"], R["M"])
+    assert abs(c0) < 0.15
+    w = pd.Series({"A": 0.5, "B": 0.5})
+    rc = risk.risk_contributions(R[["A", "B"]], w)
+    assert sum(rc.values()) == pytest.approx(1) and rc["A"] > rc["B"]           # the volatile one carries more risk
+    # drawdown: up 10%, down to −30% from the peak, back above the peak
+    s = pd.Series([100, 110, 99, 77, 90, 111, 112.0], index=pd.bdate_range("2024-01-01", periods=7))
+    dd = risk.drawdown(s.pct_change().dropna())
+    assert dd["max"] == pytest.approx(-0.3) and dd["peak"] == "2024-01-02" and dd["trough"] == "2024-01-04"
+    assert dd["recovered"] == "2024-01-08" and dd["current"] == pytest.approx(0)
+    c = risk.concentration({"x": 90, "y": 10})
+    assert c["top1"] == pytest.approx(90) and c["effective_n"] == pytest.approx(1 / 0.82)
+    # crypto on weekends lands on Monday; missing early data → weight spread over the rest
+    sat = pd.Series([1.0, 2.0, 2.0, 3.0], index=pd.to_datetime(["2024-01-05", "2024-01-06", "2024-01-07", "2024-01-08"]))
+    r = risk.business_returns({"C": sat})
+    assert list(r.index.dayofweek) == [0] and r["C"].iloc[0] == pytest.approx(2.0)
+    late = R[["A", "B"]].copy()
+    late.loc[late.index[:100], "B"] = np.nan
+    rp = risk.portfolio_returns(late, w)
+    assert rp.iloc[50] == pytest.approx(late["A"].iloc[50])
+    assert risk.window_return(px["M"], "2023-02-01", "2023-06-01") is not None
+    assert risk.window_return(px["M"], "2020-02-19", "2020-03-23") is None       # before the data starts
+
+
+def test_risk_mix_earnings_endpoints(client):
+    client.post("/api/positions", json={"symbol": "BTC-USD", "quantity": 0.1, "avg_cost": 30000, "currency": "USD",
+                                        "bought_at": "2025-01-02"})
+    d = client.get("/api/risk?base=EUR&years=3").json()
+    assert d["mix"]["vol"] > 0 and d["mix"]["dd"]["max"] < 0 and d["bench"]["vol"] > 0
+    assert sum(h["weight"] for h in d["holdings"]) == pytest.approx(100)
+    assert sum(h["risk_share"] for h in d["holdings"]) == pytest.approx(100, abs=0.5)
+    btc = next(h for h in d["holdings"] if h["symbol"] == "BTC-USD")
+    assert btc["class"] == "crypto" and btc["fx_share"] == 1.0 and btc["vol"] > 0.3
+    assert {s["key"] for s in d["scenarios"]} >= {"covid", "bear2022"}
+    assert d["corr"]["keys"] and len(d["corr"]["m"]) == len(d["corr"]["keys"])
+    assert 0 < d["concentration"]["top5"] <= 100
+    mx = client.post("/api/risk/mix", json={"weights": {"MSFT": 50, "BTC-USD": 50}}).json()
+    assert mx["vol"] > 0.2 and set(mx["used"]) == {"MSFT", "BTC-USD"}
+    assert client.post("/api/risk/mix", json={"weights": {}}).status_code == 400
+    e = client.get("/api/earnings").json()["items"]
+    assert e and all(x["symbol"] != "BTC-USD" for x in e)          # stocks only
+    x = e[0]
+    assert x["next"] and x["days"] >= 0 and len(x["history"]) <= 4 and x["typical_move"] is not None

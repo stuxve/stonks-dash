@@ -47,3 +47,25 @@ assert.ok(Math.abs(flat.at(-1).value - 1000 * 1.06 ** 2) < 1e-6);
 const pr = project({ months: Array.from({ length: 12 }, () => ({ amount: 100 })), startValue: 0, startInvested: 0, annual: 0.05, band: 0.02 });
 assert.ok(Math.abs(pr.at(-1).invested - 1200) < 1e-9 && pr.at(-1).low < pr.at(-1).value && pr.at(-1).value < pr.at(-1).high);
 console.log("planner ok");
+
+// ---- Monte Carlo
+{
+  const P2 = require("../../static/planner.js");
+  const months = Array.from({ length: 120 }, () => ({ amount: 100 }));
+  const mc = P2.monteCarlo({ months, startValue: 1000, startInvested: 1000, annual: 0.06, vol: 0.15, sims: 4000 });
+  const end = mc.pts.at(-1);
+  // deterministic expected value of the plan at 6%/yr
+  const det = P2.project({ months, startValue: 1000, startInvested: 1000, annual: 0.06 }).at(-1).value;
+  const mean = mc.finals.reduce((a, b) => a + b, 0) / mc.finals.length;
+  if (Math.abs(mean / det - 1) > 0.03) throw new Error(`MC mean ${mean} vs ${det}`);
+  if (!(end.p10 < end.p25 && end.p25 < end.value && end.value < end.p75 && end.p75 < end.p90)) throw new Error("quantiles");
+  if (end.value >= mean) throw new Error("median should be below the mean (log-normal skew)");
+  const c = mc.chanceAbove(end.invested);
+  if (!(c > 0.7 && c < 0.99)) throw new Error(`chance above invested ${c}`);
+  if (Math.abs(mc.chanceAbove(end.value) - 0.5) > 0.02) throw new Error("median chance");
+  const again = P2.monteCarlo({ months, startValue: 1000, startInvested: 1000, annual: 0.06, vol: 0.15, sims: 4000 });
+  if (again.pts.at(-1).value !== end.value) throw new Error("not deterministic");
+  const zero = P2.monteCarlo({ months, startValue: 1000, startInvested: 1000, annual: 0.06, vol: 0.0001, sims: 200 });
+  if (Math.abs(zero.pts.at(-1).value / det - 1) > 0.01) throw new Error("vol→0 should match the deterministic path");
+  console.log(`monte carlo ok: median ${end.value.toFixed(0)}, mean ${mean.toFixed(0)}, det ${det.toFixed(0)}, P(>invested) ${(c * 100).toFixed(1)}%`);
+}

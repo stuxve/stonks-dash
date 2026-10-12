@@ -150,7 +150,50 @@
     return pts;
   }
 
-  const api = { plan, nextOrders, waterFill, project };
+  /**
+   * Monte Carlo of the plan: `sims` paths of monthly returns with the given expected yearly return and volatility.
+   * Returns are fat-tailed (Student-t, 5 degrees of freedom, scaled to the same volatility), so big months happen
+   * about as often as in real markets. Deterministic for a given seed.
+   * Each point has quantiles p10/p25/p50/p75/p90 of the value; `finals` are the sorted end values.
+   */
+  function monteCarlo({ months, startValue, startInvested, annual, vol, sims = 2000, seed = 7, start = new Date(), df = 5, target = null }) {
+    let a = seed >>> 0;
+    const rand = () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    const gauss = () => { let u = 0; while (!u) u = rand(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rand()); };
+    const chi2 = () => { let x = 0; for (let i = 0; i < df; i++) { const z = gauss(); x += z * z; } return x; };
+    const sm = vol / Math.sqrt(12);
+    const tScale = Math.sqrt((df - 2) / df);                 // unit variance
+    const mu = Math.log(1 + annual) / 12 - (sm * sm) / 2;    // log drift so the mean grows at `annual`
+    const n = months.length;
+    const vals = Array.from({ length: n + 1 }, () => new Float64Array(sims));
+    for (let s = 0; s < sims; s++) {
+      let v = startValue;
+      vals[0][s] = v;
+      for (let i = 0; i < n; i++) {
+        const z = gauss() / Math.sqrt(chi2() / df) * tScale;
+        v = (v + months[i].amount) * Math.exp(mu + sm * z);
+        vals[i + 1][s] = v;
+      }
+    }
+    const q = (arr, p) => arr[Math.min(arr.length - 1, Math.max(0, Math.round(p * (arr.length - 1))))];
+    let inv = startInvested;
+    const pts = vals.map((col, i) => {
+      if (i > 0) inv += months[i - 1].amount;
+      const srt = Float64Array.from(col).sort();
+      let below = 0, belowT = 0;
+      for (const x of srt) { if (x < inv) below++; else break; }
+      if (target != null) for (const x of srt) { if (x < target) belowT++; else break; }
+      return { i, date: new Date(start.getFullYear(), start.getMonth() + i, 1), invested: inv, contributed: i ? months[i - 1].amount : 0,
+        p10: q(srt, 0.1), p25: q(srt, 0.25), value: q(srt, 0.5), p75: q(srt, 0.75), p90: q(srt, 0.9),
+        low: q(srt, 0.1), high: q(srt, 0.9), pLoss: below / srt.length,
+        pGoal: target != null ? 1 - belowT / srt.length : null };
+    });
+    const finals = Float64Array.from(vals[n]).sort();
+    const chanceAbove = (x) => { let lo = 0, hi = finals.length; while (lo < hi) { const m = (lo + hi) >> 1; if (finals[m] < x) lo = m + 1; else hi = m; } return (finals.length - lo) / finals.length; };
+    return { pts, finals, chanceAbove, sims };
+  }
+
+  const api = { plan, nextOrders, waterFill, project, monteCarlo };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.StonksPlanner = api;
 })(typeof window !== "undefined" ? window : globalThis);

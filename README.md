@@ -77,6 +77,15 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Broke out**: the price closed for 2 days more than one daily move above your target, or above a resistance it was under in the last 4 weeks. **Raise stop** moves the stop half a daily move under that level and the target to the next resistance, instead of selling.
   - Each row also shows the peak since the buy, a stop · buy · now · target bar with the zones shaded, the distance to the target and the stop, the P/L at the target after the account's sell fee, and a status: *Broke out*, *Target hit*, *Stop hit*, *Near target*, *Near stop*, *Watching* or *No exit set*. Alerts show as a count on the tab.
   - **Sell** opens the sale dialog prefilled. **All buys** copies a lot's exits to every buy of the same asset. **Fill buys that have no exit yet** sets default exits in one go. Nothing is sold automatically. Later buys of an asset are flagged **FIFO n/m**, because a sale always uses the oldest buy first.
+- **Risk** replays today's holdings and weights over the last 1, 3 or 5 years of prices, in your base currency:
+  - Volatility, max drawdown (peak, trough, recovery and how long it lasted), distance from the last peak, worst month and beta/correlation vs the benchmark, next to the same figures for the benchmark. There's also the max drawdown of the portfolio you actually held, time-weighted so contributions don't count.
+  - A drawdown chart, your mix against the benchmark.
+  - Per holding: weight vs **share of the risk** (variance contribution), volatility, beta, correlation with the index and with the rest of the portfolio, max drawdown, distance from its peak, and foreign-currency exposure.
+  - A correlation heatmap.
+  - **Concentration**: top 5 holdings, effective number of holdings, and the top companies once funds are looked through.
+  - A **stress test**: choose the moves for stocks, crypto, bonds, gold and foreign currencies, or a preset. Each stock or equity fund moves by its beta.
+  - **Past crises** (COVID 2020, 2022 bear, crypto winter, Aug 2024, 2025 tariffs) replayed on today's portfolio. Holdings bought or listed later are estimated from beta × index (BTC for crypto).
+  - An **earnings calendar** for your stocks: the next report date, expected EPS, the last 4 surprises, the typical price move after a report, and how far your stop is. The Risk tab shows a count when a report is within the warning window (7 days by default), and Sell targets rows show an *earnings* pill in the 14 days before. The pill turns amber when the stop sits inside the typical earnings move.
 - **Performance vs index** compares your portfolio with a "shadow portfolio". Every euro you invested or took out on a date is treated as a buy or sell of the benchmark on that same date. It shows both gains, the difference, and the money-weighted annual return (XIRR) for you and for the index. The chart plots your portfolio value, the index value and the net amount invested. The default benchmark is IWDA.AS (MSCI World in EUR), and you can switch to VWCE, the S&P 500, the Nasdaq-100, emerging markets, the Stoxx 600 or any other ticker. Manual or unpriced assets are carried at cost.
 - **Allocation** lets you pick what to allocate by (my groups, asset type, account, sector or each asset) and set a target % for each bucket. It shows the current %, how far each bucket has drifted, and how much to buy or sell to reach the target. **Measure by** compares against market value or money invested.
 - **Next order** (in **Allocation**): you enter a goal for total money invested, your monthly contribution and the maximum number of orders per month (1–3), and it tells you what to buy this month. It works on the money you've invested in each bucket, buys only, and uses whole orders to keep fixed fees low.
@@ -90,7 +99,7 @@ The size and group choices are saved per board. Period, range and currency are g
   - estimated fees, compared with splitting every month across every asset;
   - a month-by-month list (12 months at a time) and the final allocation against your targets.
   - Plans longer than 100 years are only listed for their first 1,200 months.
-  - **Projection:** set an expected yearly return (default 6%) and a ± range (default 2%). You get a chart of projected value against money invested, with the range as a band, and a table by year: amount added, money invested, projected value, projected gain (€ and %) and the low–high range. It assumes steady compound growth, which real markets don't follow.
+  - **Projection (Monte Carlo):** 2,000 simulated futures, month by month, using your expected yearly return (default 6%) and the volatility of the mix. That volatility comes from 3 years of prices of your target mix when you allocate by asset, or of today's portfolio otherwise; you can also type your own. Monthly returns are fat-tailed (Student-t, 5 degrees of freedom). You get the median path with bands for half and 80% of the paths, the **chance of reaching a value you choose** by the goal date (default: the goal), the chance of ending below the money invested, and the same figures per year in the table.
   - **Projected allocation:** a stacked chart (as % or as money) of what you'll have invested in each asset, month by month, plus a table with each asset's share (and €) now, at the end of each year and at the goal, next to its target.
 - **Allocation targets for real assets:** in **Allocation**, "Add an asset you don't hold yet" searches real tickers on Yahoo, by name, ticker or ISIN.
   - With "Allocate by: Each asset", the asset gets its own target.
@@ -144,6 +153,9 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | PATCH/DELETE | `/api/items/{id}` | Edit or remove a symbol |
 | GET | `/api/boards/{id}/heatmap?base=EUR` | Tiles with price, changes and market cap in the base currency |
 | GET/POST/PATCH/DELETE | `/api/positions[/{id}]` | Portfolio CRUD |
+| GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
+| POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
+| GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |
 | GET | `/api/targets/peaks` | Peak and low close since each open, dated buy |
 | GET | `/api/portfolio?base=USD` | Positions with value, cost, P&L, day P&L and totals |

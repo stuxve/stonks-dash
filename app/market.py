@@ -161,6 +161,43 @@ class YahooProvider:
                 pass
         return out if out["mean"] else {}
 
+    def earnings(self, symbol: str) -> dict:
+        """Next earnings date(s), estimates, recent reports and dividend dates. {} when Yahoo has none."""
+        t = self.yf.Ticker(symbol)
+        out: dict = {"next": [], "history": []}
+
+        def iso(d):
+            try:
+                return pd.Timestamp(d).date().isoformat()
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            cal = t.calendar or {}
+            ed = cal.get("Earnings Date") or []
+            out["next"] = [x for x in (iso(d) for d in (ed if isinstance(ed, (list, tuple)) else [ed])) if x]
+            out["eps_est"] = cal.get("Earnings Average")
+            out["rev_est"] = cal.get("Revenue Average")
+            out["ex_div"] = iso(cal["Ex-Dividend Date"]) if cal.get("Ex-Dividend Date") else None
+            out["div_date"] = iso(cal["Dividend Date"]) if cal.get("Dividend Date") else None
+        except Exception as e:  # noqa: BLE001
+            log.info("calendar %s failed: %s", symbol, e)
+        try:
+            df = t.get_earnings_dates(limit=12)
+            if df is not None and not df.empty:
+                for d, row in df.iterrows():
+                    def num(k):
+                        v = row.get(k)
+                        return None if v is None or pd.isna(v) else float(v)
+                    out["history"].append({"date": iso(d), "eps_est": num("EPS Estimate"), "eps": num("Reported EPS"),
+                                           "surprise": num("Surprise(%)")})
+                future = sorted(h["date"] for h in out["history"] if h["eps"] is None and h["date"] >= date.today().isoformat())
+                if future and not out["next"]:
+                    out["next"] = future[:1]
+                out["history"] = [h for h in out["history"] if h["eps"] is not None]
+        except Exception as e:  # noqa: BLE001
+            log.info("earnings dates %s failed: %s", symbol, e)
+        return out if (out["next"] or out["history"]) else {}
+
     def fund(self, symbol: str) -> dict | None:
         """Top holdings, sector weights, asset classes and expense ratio of an ETF / mutual fund."""
         try:
@@ -353,6 +390,22 @@ class MockProvider:
                 "high": mean * r.uniform(1.1, 1.4), "n": int(r.integers(4, 40)),
                 "rec": str(r.choice(["buy", "strong_buy", "hold"])), "rec_mean": round(float(r.uniform(1.5, 3)), 2),
                 "fwd_eps": None, "fwd_pe": None, "currency": self._currency(symbol)}
+
+    def earnings(self, symbol: str) -> dict:
+        if self._quote_type(symbol) != "EQUITY":
+            return {}
+        r = np.random.default_rng(self._seed(symbol) + 17)
+        today = date.today()
+        nxt = today + timedelta(days=int(r.integers(1, 80)))
+        hist = []
+        for i in range(1, 9):
+            d = nxt - timedelta(days=91 * i)
+            est = float(r.uniform(0.5, 3))
+            act = est * float(r.uniform(0.85, 1.2))
+            hist.append({"date": d.isoformat(), "eps_est": round(est, 2), "eps": round(act, 2),
+                         "surprise": round((act / est - 1) * 100, 2)})
+        return {"next": [nxt.isoformat()], "eps_est": round(float(r.uniform(0.5, 3)), 2), "rev_est": None,
+                "ex_div": None, "div_date": None, "history": hist}
 
     def _country(self, sym: str) -> str:
         for suf, c in ((".DE", "Germany"), (".AS", "Netherlands"), (".PA", "France"), (".MC", "Spain"),
@@ -587,6 +640,34 @@ class QuoteEngine:
             _, div = normalize_currency(a.get("currency") or (meta.get(s) or {}).get("currency"))
             out[s] = {k: (v / div if k in ("mean", "median", "low", "high") and v else v) for k, v in a.items()}
         return out
+
+    def earnings(self, symbols: list[str], ttl: float = 12 * 3600) -> dict[str, dict]:
+        """Earnings calendar per stock (cached 12 h; empty answers too)."""
+        symbols = list(dict.fromkeys(symbols))
+        keys = {s: f"earn:{s}" for s in symbols}
+        raw = self.db.get_meta(list(keys.values()), ttl)
+        have = {s: raw[k] for s, k in keys.items() if k in raw}
+        now = time.time()
+        missing = [s for s in symbols if s not in have and now - self._meta_miss.get(keys[s], 0) > self.meta_retry]
+        if missing and hasattr(self.p, "earnings"):
+            def fetch(s):
+                try:
+                    return s, self.p.earnings(s)
+                except Exception as e:  # noqa: BLE001
+                    log.info("earnings %s failed: %s", s, e)
+                    return s, None
+            with ThreadPoolExecutor(max_workers=min(self.workers, 4)) as ex:
+                for s, e_ in ex.map(fetch, missing):
+                    if e_ is None:
+                        self._meta_miss[keys[s]] = time.time()
+                        continue
+                    self.db.put_meta(keys[s], e_)
+                    have[s] = e_
+        stale = [s for s in symbols if s not in have]
+        if stale:
+            old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
+            have.update({s: old[keys[s]] for s in stale if keys[s] in old})
+        return have
 
     # ---- metadata ----
     def meta(self, symbols: list[str]) -> dict[str, dict]:

@@ -130,8 +130,20 @@ window.StonksTargets = function (ctx) {
   const findRow = (id) => { const p = lots().find((x) => x.id === +id); return p ? evalLot(p) : null; };
 
   // ------------------------------------------------------------------ data + badge
+  let EARN = {};
   async function loadLevels() {
     try { LV = await api("/api/targets/levels"); lvAt = Date.now(); } catch (e) { console.warn(e); }
+    try { EARN = Object.fromEntries(((await api("/api/earnings")).items || []).map((x) => [x.symbol, x])); } catch (e) { console.warn(e); }
+  }
+  // % from today's price to the nearest effective stop, per symbol (negative = below) — used by the earnings calendar
+  function stopDistance() {
+    const out = {};
+    for (const p of lots()) {
+      const r = evalLot(p);
+      if (r.toSl == null) continue;
+      if (out[p.symbol] == null || r.toSl > out[p.symbol]) out[p.symbol] = r.toSl;
+    }
+    return out;
   }
   function badge() {
     const el = $("#tg-badge");
@@ -279,10 +291,14 @@ window.StonksTargets = function (ctx) {
         if (v == null) return "";
         return mode() === "pct" ? fmtPrice(v, r.pccy) : pctTxt(vsBuy(v, r.buy));
       };
+      const ev = EARN[p.symbol];
+      const earnSoon = ev && ev.days != null && ev.days >= 0 && ev.days <= 14;
+      const earnRisky = earnSoon && ev.typical_move != null && r.toSl != null && Math.abs(r.toSl) <= ev.typical_move * 1.2;
+      const earnPill = earnSoon ? `<span class="pill ${earnRisky ? "warn" : "ext"}" title="Reports earnings ${ev.days === 0 ? "today" : ev.days === 1 ? "tomorrow" : `in ${ev.days} days`} (${fmtDate(ev.next)}${ev.next_to ? ", estimated" : ""}).${ev.typical_move != null ? ` Typical move after a report: ±${ev.typical_move.toFixed(1)}%.` : ""}${earnRisky ? ` Your stop is only ${Math.abs(r.toSl).toFixed(1)}% away — inside that range.` : ""}">earnings ${ev.days === 0 ? "today" : `${ev.days}d`}</span>` : "";
       const fifo = r.fifo > 0 ? `<span class="pill warn" title="Sales are matched oldest buy first (FIFO): selling now uses the buy of ${fmtDate(r.fifoFirst.p.bought_at) || "an older date"} before this one.">FIFO ${r.fifo + 1}/${r.fifoN}</span>` : "";
       const vol = r.L?.vol;
       return `<tr data-id="${p.id}" class="st-row-${r.st}">
-        <td class="asset"><b>${esc(p.symbol || p.name || "—")}</b>${fifo}<div class="sub">${esc(p.display_name || "")}${p.account ? ` · ${esc(p.account)}` : ""}</div></td>
+        <td class="asset"><b>${esc(p.symbol || p.name || "—")}</b>${fifo}${earnPill}<div class="sub">${esc(p.display_name || "")}${p.account ? ` · ${esc(p.account)}` : ""}</div></td>
         <td>${p.bought_at ? fmtDate(p.bought_at) : "—"}<div class="sub">${p.bought_at ? fmtHeld(p.bought_at) : "no date"} · ${fmtNum(p.quantity)} u.</div></td>
         <td class="num">${fmtPrice(r.buy, r.pccy)}<div class="sub">${fmtMoney(p.cost, b)}</div></td>
         <td class="num">${r.price != null ? fmtPrice(r.price, r.pccy) : '<span class="down">n/a</span>'}<div class="sub ${cls(p.pnl_pct)}">${pctTxt(p.pnl_pct)}</div>
@@ -491,5 +507,5 @@ window.StonksTargets = function (ctx) {
     if (Date.now() - lvAt > 60e3 || !silent) { await loadLevels(); render(); badge(); }
   }
 
-  return { refresh, badge };
+  return { refresh, badge, stopDistance };
 };

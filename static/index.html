@@ -74,6 +74,7 @@
     <div class="subnav" id="p-subnav" role="tablist">
       <button data-sub="holdings" class="active">Holdings</button>
       <button data-sub="targets">Sell targets <span class="nb" id="tg-badge" hidden></span></button>
+      <button data-sub="risk">Risk <span class="nb" id="rk-badge" hidden></span></button>
       <button data-sub="performance">Performance vs index</button>
       <button data-sub="allocation">Allocation</button>
       <button data-sub="exposure">Exposure</button>
@@ -197,6 +198,41 @@
       </div>
     </div>
 
+    <!-- risk -->
+    <div id="p-sub-risk" class="psub" hidden>
+      <div class="toolbar">
+        <label class="ctl">Look back <span class="seg" id="rk-years"><button data-v="1">1y</button><button data-v="3">3y</button><button data-v="5">5y</button></span></label>
+        <span class="hint grow" id="rk-note"></span>
+      </div>
+      <div class="kpis small" id="rk-kpis"></div>
+      <div class="chart-card"><div class="chart-legend" id="rk-legend"></div><div id="rk-dd" class="chart"></div></div>
+      <h3 class="sub-h">Holdings</h3>
+      <p class="hint" id="rk-insight"></p>
+      <div class="table-wrap"><table class="grid" id="rk-hold"><thead></thead><tbody></tbody></table></div>
+      <div class="cost-cols">
+        <div><h3 class="sub-h">How they move together</h3><div id="rk-corr"></div></div>
+        <div><h3 class="sub-h">Concentration</h3><div id="rk-conc"></div></div>
+      </div>
+      <h3 class="sub-h">Stress test</h3>
+      <div class="addrow rk-stress-in">
+        <div class="field">Scenario<span class="seg" id="rk-presets"><button data-k="corr">Correction</button><button data-k="bear">Bear market</button><button data-k="crash">Crash</button><button data-k="usd">Weak dollar</button></span></div>
+        <label class="field">Stock market (%)<input id="rk-s-stocks" type="number" step="1"></label>
+        <label class="field">Crypto (%)<input id="rk-s-crypto" type="number" step="1"></label>
+        <label class="field">Bonds (%)<input id="rk-s-bonds" type="number" step="1"></label>
+        <label class="field">Gold (%)<input id="rk-s-gold" type="number" step="1"></label>
+        <label class="field"><span id="rk-s-fx-l">Foreign currencies (%)</span><input id="rk-s-fx" type="number" step="1"></label>
+        <label class="ctl"><input id="rk-s-beta" type="checkbox" checked> use each stock's beta</label>
+      </div>
+      <div id="rk-stress-out"></div>
+      <h3 class="sub-h">Past crises, with today's portfolio</h3>
+      <div class="table-wrap"><table class="grid" id="rk-scen"></table></div>
+      <h3 class="sub-h">Earnings calendar <label class="ctl rk-earn-ctl">warn <input id="rk-earn-days" class="tgt" type="number" min="1" max="60" step="1"> days before</label></h3>
+      <div class="table-wrap"><table class="grid" id="rk-earn"></table></div>
+      <p class="hint tg-notes">Risk figures replay <b>today's holdings and weights</b> over past prices (in your base currency), so they describe the portfolio you have now.
+        Volatility and drawdowns of the past don't cap future ones. Holdings bought or listed after a crisis are estimated from their beta × the index (crypto: BTC).
+        Earnings dates come from Yahoo; an estimated window means the company hasn't confirmed the day. A stock often moves several % the session after it reports — a stop inside that range can be triggered by the report alone.</p>
+    </div>
+
     <!-- allocation targets -->
     <div id="p-sub-allocation" class="psub" hidden>
       <div class="toolbar">
@@ -241,8 +277,9 @@
         <p class="hint">The whole path to your goal with the same goal, monthly amount and orders per month as above. It is recalculated every time you record a buy.</p>
         <div class="row plan-inputs">
           <label class="field">Expected return per year (%)<input id="proj-ret" type="number" step="0.5" placeholder="6"></label>
-          <label class="field">± range (%)<input id="proj-band" type="number" step="0.5" min="0" placeholder="2"></label>
-          <p class="hint grow">Used only for the projection below — an assumption, not a prediction. Markets don't move in straight lines; the range shows how much a couple of points per year changes the outcome.</p>
+          <label class="field">Volatility per year (%)<input id="proj-vol" type="number" step="0.5" min="0" placeholder="auto"><span class="hint" id="proj-vol-hint"></span></label>
+          <label class="field">Value I want to reach<input id="proj-target" type="number" step="100" min="0" placeholder="= goal"></label>
+          <p class="hint grow">The projection simulates 2,000 possible futures month by month: each month's return is random around the expected return, with the volatility of your mix (calculated from its last 3 years of prices; type your own to override) and realistic fat tails. It shows the median path, where most paths land, and the chance of reaching your value — an assumption-based range, not a prediction.</p>
         </div>
         <div id="mplan-out"></div>
       </div>
@@ -517,6 +554,7 @@
 <script src="/static/planner.js"></script>
 <script src="/static/insights.js"></script>
 <script src="/static/targets.js"></script>
+<script src="/static/risk.js"></script>
 <script src="/static/portfolio.js"></script>
 <script src="/static/app.js"></script>
 </body>

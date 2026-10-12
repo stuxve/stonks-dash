@@ -9,6 +9,7 @@ import datetime as dt
 from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -16,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import exposure, ledger, levels, tax
+from . import exposure, ledger, levels, risk, tax
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -76,6 +77,12 @@ class TxIn(BaseModel):
     currency: str | None = None
     fees: float | None = Field(default=None, ge=0)
     notes: str | None = None
+
+
+class MixIn(BaseModel):
+    weights: dict[str, float]
+    base: str | None = None
+    years: int = Field(default=3, ge=1, le=10)
 
 
 class FillIn(BaseModel):
@@ -751,6 +758,267 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         """Highest close since each open, dated buy (quote currency, bad ticks removed)."""
         return {"peaks": _levels()["lots"]}
 
+    # ------------------------------------------------------------------ risk
+    def _base_prices(base: str, syms: list[str], start: date) -> tuple[dict, dict]:
+        """Daily closes converted to the base currency, plus each symbol's meta."""
+        hist = engine.history(syms, start) if syms else {}
+        meta = engine.meta(syms) if syms else {}
+        ccy = {s_: normalize_currency((meta.get(s_) or {}).get("currency"))[0] for s_ in syms}
+        fx = _fxbook(base, {c for c in ccy.values() if c}, start)
+        out = {}
+        for s_, ser in hist.items():
+            if ser is not None and not ser.empty:
+                out[s_] = (ser * fx.on_index(ccy.get(s_), ser.index)).dropna()
+        return out, meta
+
+    def _asset_class(sym: str, row: dict, m: dict, overrides: dict) -> str:
+        qt = row.get("quote_type") or m.get("quote_type")
+        if row.get("manual_price") is not None or not sym:
+            return "other"
+        if qt == "CRYPTOCURRENCY":
+            return "crypto"
+        if qt in ("ETF", "MUTUALFUND"):
+            _, prof = exposure.fund_profile(sym, row, m, {}, overrides)
+            asset = exposure.PROFILES.get(prof, {}).get("asset")
+            return {"Bonds": "bond", "Commodities": "gold"}.get(asset, "equity")
+        return "equity"
+
+    def _fx_share(sym: str, row: dict, m: dict, cls_: str, base: str, overrides: dict) -> float:
+        """Part of the holding exposed to currencies other than the base (for the FX stress)."""
+        if cls_ == "other":
+            return 0.0
+        if cls_ == "crypto":
+            return 0.0 if base == "USD" else 1.0
+        name = " ".join(filter(None, [m.get("long_name"), m.get("name"), row.get("display_name")]))
+        if exposure.hedge_currency(name, base) == base:
+            return 0.0
+        if row.get("quote_type") in ("ETF", "MUTUALFUND") or m.get("quote_type") in ("ETF", "MUTUALFUND"):
+            _, prof = exposure.fund_profile(sym, row, m, {}, overrides)
+            pr = exposure.PROFILES.get(prof)
+            if not pr:
+                return 0.0 if (row.get("price_currency") == base) else 1.0
+            tot = sum(pr["countries"].values()) or 1
+            if pr.get("currency"):
+                return 0.0 if pr["currency"] == base else 1.0
+            return sum(w for c, w in pr["countries"].items()
+                       if exposure.COUNTRY_CCY.get(c, "Other") != base) / tot
+        ccy = exposure.COUNTRY_CCY.get(exposure.country_of(sym, m)) or row.get("price_currency")
+        return 0.0 if ccy == base else 1.0
+
+    @app.get("/api/risk")
+    def risk_view(base: str | None = None, years: int = Query(3, ge=1, le=10)):
+        base = base_or_default(base)
+        lots, _sells, _divs, fr = _context(base)
+        rows, tot, _ = _open_rows(base, lots, fr)
+        settings = db.get_settings()
+        overrides = settings.get("fund_profiles") or {}
+        hold: dict[str, dict] = {}
+        for r in rows:
+            key = r["symbol"] if r["symbol"] and r["manual_price"] is None else f"manual:{r['id']}"
+            h = hold.setdefault(key, {"key": key, "symbol": r["symbol"], "name": r["display_name"], "value": 0.0,
+                                      "quote_type": r["quote_type"], "price_currency": r["price_currency"],
+                                      "manual_price": r["manual_price"], "display_name": r["display_name"],
+                                      "priced": True})
+            if r["ok"]:
+                h["value"] += r["value"]
+            else:
+                h["priced"] = False
+        total = sum(h["value"] for h in hold.values())
+        if total <= 0:
+            return {"base": base, "empty": True}
+        today = date.today()
+        start = today - timedelta(days=int(years * 365.25))
+        hist_start = min(start, date(2020, 1, 1)) - timedelta(days=10)      # the stress scenarios go back to 2020
+        syms = [k for k in hold if not k.startswith("manual:")]
+        has_crypto = any(h["quote_type"] == "CRYPTOCURRENCY" for h in hold.values())
+        px, meta = _base_prices(base, syms + (["BTC-USD"] if has_crypto and "BTC-USD" not in syms else []), hist_start)
+        b_sym, b_name, b_base, _, _ = _benchmark(base, hist_start)
+        allp = {**{s_: px[s_] for s_ in syms if s_ in px}, **({"__bench__": b_base} if b_base is not None else {})}
+        R_all = risk.business_returns(allp)
+        R = R_all[R_all.index >= pd.Timestamp(start)] if not R_all.empty else R_all
+        m_r = R["__bench__"] if "__bench__" in R else None
+        cols = [s_ for s_ in syms if s_ in R.columns]
+        Rh = R[cols].copy() if cols else pd.DataFrame(index=R.index)
+        for k, h in hold.items():                     # manual / unpriced holdings: carried flat (0% moves)
+            if k not in Rh.columns:
+                Rh[k] = 0.0
+        w = pd.Series({k: hold[k]["value"] / total for k in Rh.columns})
+        rp = risk.portfolio_returns(Rh, w) if len(Rh) else pd.Series(dtype=float)
+
+        def stats(r):
+            if r is None or r.dropna().empty:
+                return None
+            dd = risk.drawdown(r)
+            out = {"vol": risk.ann_vol(r), "ret": risk.ann_return(r), "dd": dd,
+                   "worst_day": risk.worst_window(r, 1), "worst_month": risk.worst_window(r, 21)}
+            if m_r is not None and r is not m_r:
+                out["beta"], out["corr"] = risk.beta_corr(r, m_r)
+            return out
+
+        mix = stats(rp)
+        bench = stats(m_r) if m_r is not None else None
+        # actual portfolio, time-weighted (contributions removed), from the performance series
+        actual = None
+        try:
+            perf = performance(base)
+            if perf.get("dates"):
+                v = pd.Series(perf["value"], index=pd.to_datetime(perf["dates"]), dtype=float)
+                inv = pd.Series(perf["invested"], index=v.index, dtype=float)
+                prev = v.shift(1)
+                r_act = ((v - inv.diff().fillna(0)) / prev - 1)[prev > 0].replace([np.inf, -np.inf], np.nan).dropna()
+                if len(r_act) > 5:
+                    actual = {"dd": risk.drawdown(r_act), "since": perf["dates"][0]}
+        except Exception as e:  # noqa: BLE001
+            log.info("actual drawdown failed: %s", e)
+
+        rc = risk.risk_contributions(Rh, w) if len(Rh) else {}
+        holdings = []
+        for k in sorted(Rh.columns, key=lambda c: -w[c]):
+            h = hold[k]
+            m = meta.get(h["symbol"] or "", {}) or {}
+            cls_ = _asset_class(h["symbol"], h, m, overrides)
+            r = Rh[k]
+            flat = k.startswith("manual:") or k not in cols
+            beta = corr = corr_rest = None
+            if not flat:
+                if m_r is not None:
+                    beta, corr = risk.beta_corr(r, m_r)
+                others = [c for c in Rh.columns if c != k]
+                if others and w[others].sum() > 0:
+                    _, corr_rest = risk.beta_corr(r, risk.portfolio_returns(Rh[others], w[others]))
+            dd = risk.drawdown(r) if not flat else None
+            holdings.append({
+                "key": k, "symbol": h["symbol"], "name": h["name"], "value": h["value"], "weight": w[k] * 100,
+                "class": cls_, "flat": flat, "priced": h["priced"],
+                "vol": risk.ann_vol(r) if not flat else None, "beta": beta, "corr_index": corr, "corr_rest": corr_rest,
+                "risk_share": rc.get(k, 0.0) * 100,
+                "max_dd": dd["max"] if dd else None, "dd_now": dd["current"] if dd else None,
+                "fx_share": _fx_share(h["symbol"] or "", h, m, cls_, base, overrides),
+                "history_from": px[k].index[0].date().isoformat() if k in px else None,
+            })
+        top = [hh["key"] for hh in holdings if not hh["flat"]][:14]
+        cm = Rh[top].corr(min_periods=40) if len(top) > 1 else None
+        corr_matrix = ({"keys": top, "m": [[None if pd.isna(x) else round(float(x), 3) for x in row] for row in cm.to_numpy()]}
+                       if cm is not None else None)
+
+        conc = risk.concentration({hh["key"]: hh["value"] for hh in holdings})
+        look = None
+        try:
+            ex = exposure_view(base)
+            comp = [c for c in ex.get("companies", []) if not c.get("rest") and c.get("pct")]
+            look = {"top5": sum(c["pct"] for c in comp[:5]),
+                    "top": [{"name": c["name"], "symbol": c["symbol"], "pct": c["pct"],
+                             "via": [v_["fund"] for v_ in c.get("via", [])][:3], "direct": c["direct"] > 0} for c in comp[:8]]}
+        except Exception as e:  # noqa: BLE001
+            log.info("look-through concentration failed: %s", e)
+
+        # historical scenarios on today's mix (missing history → estimated from beta × index, or BTC for crypto)
+        b_full = b_base
+        btc = px.get("BTC-USD")
+        scen = []
+        for sc in risk.SCENARIOS:
+            b_ret = risk.window_return(b_full, sc["start"], sc["end"])
+            per, port, est_w = [], 0.0, 0.0
+            for hh in holdings:
+                k = hh["key"]
+                r_ = None if hh["flat"] else risk.window_return(px.get(k), sc["start"], sc["end"])
+                est = False
+                if r_ is None and not hh["flat"]:
+                    if hh["class"] == "crypto":
+                        r_ = risk.window_return(btc, sc["start"], sc["end"])
+                    elif hh["class"] == "equity" and b_ret is not None:
+                        r_ = (hh["beta"] if hh["beta"] is not None else 1.0) * b_ret
+                    est = r_ is not None
+                if hh["flat"]:
+                    r_ = 0.0
+                if r_ is not None:
+                    port += hh["weight"] / 100 * r_
+                    if est:
+                        est_w += hh["weight"]
+                per.append({"key": k, "ret": r_, "est": est})
+            known = [x for x in per if x["ret"] is not None]
+            worst = min(known, key=lambda x: x["ret"]) if known else None
+            scen.append({**sc, "portfolio": port, "loss": port * total, "bench": b_ret,
+                         "estimated_weight": est_w, "missing": [x["key"] for x in per if x["ret"] is None],
+                         "worst": worst, "per": per})
+        return {
+            "base": base, "years": years, "start": start.isoformat(), "total": total,
+            "benchmark": {"symbol": b_sym, "name": b_name, "ok": b_base is not None},
+            "mix": mix, "bench": bench, "actual": actual, "holdings": holdings, "corr": corr_matrix,
+            "concentration": conc, "lookthrough": look, "scenarios": scen,
+            "underwater_bench": (bench or {}).get("dd", {}) and bench["dd"]["curve"],
+            "as_of": time.time(),
+        }
+
+    @app.post("/api/risk/mix")
+    def risk_mix(body: MixIn):
+        """Volatility of a weighted mix of tickers (base currency) — feeds the Monte Carlo projection."""
+        base = base_or_default(body.base)
+        wts = {k.upper(): float(v) for k, v in body.weights.items() if v and v > 0}
+        if not wts:
+            raise HTTPException(400, "weights required")
+        start = date.today() - timedelta(days=int(body.years * 365.25))
+        px, _ = _base_prices(base, sorted(wts), start - timedelta(days=10))
+        R = risk.business_returns({k: v for k, v in px.items() if k in wts}, start)
+        used = [k for k in wts if k in R.columns and R[k].notna().sum() > 60]
+        if not used:
+            return {"vol": None, "used": [], "missing": sorted(wts)}
+        w = pd.Series({k: wts[k] for k in used})
+        w = w / w.sum()
+        rp = risk.portfolio_returns(R[used], w)
+        return {"vol": risk.ann_vol(rp), "ret": risk.ann_return(rp), "used": used,
+                "missing": [k for k in wts if k not in used], "coverage": float(sum(wts[k] for k in used) / sum(wts.values())),
+                "per": {k: risk.ann_vol(R[k]) for k in used}}
+
+    # ------------------------------------------------------------------ earnings calendar
+    @app.get("/api/earnings")
+    def earnings_view():
+        lots, _sells, _divs, fr = _context("EUR")
+        syms = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
+                       and x["symbol"] and x["manual_price"] is None})
+        if not syms:
+            return {"items": []}
+        meta = engine.meta(syms)
+        quotes = engine.quotes(syms)
+        eq = [s_ for s_ in syms if (meta.get(s_) or {}).get("quote_type") == "EQUITY"
+              or (quotes.get(s_) and quotes[s_].quote_type == "EQUITY")]
+        if not eq:
+            return {"items": []}
+        cal = engine.earnings(eq)
+        start = date.today() - timedelta(days=3 * 365)
+        hist = engine.history(eq, start)
+        today = date.today()
+        items = []
+        for s_ in eq:
+            c = cal.get(s_) or {}
+            nxt = [date.fromisoformat(d) for d in (c.get("next") or []) if d]
+            nxt = [d for d in nxt if d >= today - timedelta(days=1)]
+            past = [h for h in (c.get("history") or []) if h.get("date") and date.fromisoformat(h["date"]) < today]
+            past.sort(key=lambda h: h["date"], reverse=True)
+            # typical move: largest close-to-close change on the report day or the next session
+            moves = []
+            ser = hist.get(s_)
+            if ser is not None and len(ser) > 30:
+                r = ser.pct_change()
+                for h in past[:8]:
+                    d = pd.Timestamp(h["date"])
+                    win = r[(r.index >= d) & (r.index <= d + pd.Timedelta(days=4))].dropna().iloc[:2]
+                    if len(win):
+                        moves.append({"date": h["date"], "move": float(win.iloc[win.abs().argmax()]) * 100})
+            q = quotes.get(s_)
+            items.append({
+                "symbol": s_, "name": (q.name if q else None) or (meta.get(s_) or {}).get("name") or s_,
+                "next": nxt[0].isoformat() if nxt else None,
+                "next_to": nxt[-1].isoformat() if len(nxt) > 1 else None,
+                "days": (nxt[0] - today).days if nxt else None,
+                "eps_est": c.get("eps_est"), "rev_est": c.get("rev_est"),
+                "history": past[:4], "moves": moves,
+                "typical_move": float(np.mean([abs(m_["move"]) for m_ in moves])) if moves else None,
+                "ex_div": c.get("ex_div"), "div_date": c.get("div_date"),
+            })
+        items.sort(key=lambda x: (x["days"] is None, x["days"] if x["days"] is not None else 0))
+        return {"items": items, "as_of": time.time()}
+
     # ------------------------------------------------------------------ look-through exposure
     @app.get("/api/exposure")
     def exposure_view(base: str | None = None):
@@ -918,7 +1186,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "risk.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

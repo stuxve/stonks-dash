@@ -5,9 +5,10 @@ window.StonksPortfolio = function (ctx) {
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$ } = ctx;
 
-  const SUBS = ["holdings", "targets", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
+  const SUBS = ["holdings", "targets", "risk", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
   const ins = window.StonksInsights(ctx);
   const tgt = window.StonksTargets({ ...ctx, feeFor: ins.feeFor, openTx });
+  const rk = window.StonksRisk({ ...ctx, targets: tgt });
   let sub = "holdings";
   try { sub = localStorage.getItem("stonks.psub") || "holdings"; } catch {}
   if (!SUBS.includes(sub)) sub = "holdings";
@@ -32,6 +33,7 @@ window.StonksPortfolio = function (ctx) {
     else if (sub === "allocation") drawAlloc();
     else if (sub === "ledger") loadLedger(silent);
     else if (sub === "targets") tgt.refresh(silent);
+    else if (sub === "risk") rk.refresh(silent);
     else ins.refresh(sub, silent);
   }
   // called by app.js after every portfolio reload (buy/sell saved, currency switch, auto-refresh)
@@ -40,6 +42,7 @@ window.StonksPortfolio = function (ctx) {
     ledgerData = sub === "ledger" ? ledgerData : null;
     refresh(true);
     tgt.badge();
+    rk.badge();
   }
 
   // ================================================================== PERFORMANCE
@@ -309,20 +312,45 @@ window.StonksPortfolio = function (ctx) {
     if (document.activeElement !== g) g.value = P().goal ? +(P().goal * r).toFixed(2) : "";
     if (document.activeElement !== m) m.value = P().monthly ? +(P().monthly * r).toFixed(2) : "";
     $$("#plan-k button").forEach((x) => x.classList.toggle("active", +x.dataset.v === (P().per_month || 1)));
-    const pr = $("#proj-ret"), pb = $("#proj-band");
+    const pr = $("#proj-ret"), pv = $("#proj-vol"), pt = $("#proj-target");
     if (document.activeElement !== pr) pr.value = P().ret ?? "";
-    if (document.activeElement !== pb) pb.value = P().band ?? "";
+    if (document.activeElement !== pv) pv.value = P().vol ?? "";
+    if (document.activeElement !== pt) pt.value = P().target ? +(P().target * r).toFixed(0) : "";
   }
   function savePlan(patch) {
     const r = planRate();
     const cur = { goal: P().goal ? P().goal * r : null, monthly: P().monthly ? P().monthly * r : null, per_month: P().per_month || 1,
-      ret: P().ret ?? null, band: P().band ?? null };
+      ret: P().ret ?? null, vol: P().vol ?? null, target: P().target ? P().target * r : null };
     saveAlloc({ plan: { ...cur, ...patch, ccy: base() } });
   }
   $("#plan-goal").addEventListener("change", (e) => { savePlan({ goal: +e.target.value || null }); drawPlan(); });
   $("#plan-monthly").addEventListener("change", (e) => { savePlan({ monthly: +e.target.value || null }); drawPlan(); });
   $("#proj-ret").addEventListener("change", (e) => { savePlan({ ret: e.target.value === "" ? null : +e.target.value }); drawMonthlyPlan(); });
-  $("#proj-band").addEventListener("change", (e) => { savePlan({ band: e.target.value === "" ? null : +e.target.value }); drawMonthlyPlan(); });
+  $("#proj-vol").addEventListener("change", (e) => { savePlan({ vol: e.target.value === "" ? null : +e.target.value }); drawMonthlyPlan(); });
+  $("#proj-target").addEventListener("change", (e) => { savePlan({ target: +e.target.value || null }); drawMonthlyPlan(); });
+
+  // volatility of the mix the plan builds (targets, by ticker) or of today's portfolio — from 3 years of prices
+  const volCache = {};
+  function autoVol(targets) {
+    const dim = allocDim();
+    let wts = {}, what = "your target mix";
+    if (dim === "symbol" && Object.keys(targets).length) wts = { ...targets };
+    else {
+      what = "today's portfolio";
+      for (const x of state.port?.positions || []) if (x.symbol && x.value && x.quote_type !== "MANUAL") wts[x.symbol] = (wts[x.symbol] || 0) + x.value;
+    }
+    const key = `${base()}|${JSON.stringify(Object.entries(wts).sort())}`;
+    if (!Object.keys(wts).length) return { vol: null, what };
+    const c = volCache[key];
+    if (c === undefined) {
+      volCache[key] = null;
+      api("/api/risk/mix", { method: "POST", body: { weights: wts, base: base() } })
+        .then((r) => { volCache[key] = { ...r, what }; if (sub === "allocation") drawMonthlyPlan(); })
+        .catch(() => { volCache[key] = { vol: null, what }; });
+      return { vol: null, what, loading: true };
+    }
+    return c || { vol: null, what, loading: true };
+  }
   $("#plan-k").addEventListener("click", (e) => {
     const b = e.target.closest("button"); if (!b) return;
     savePlan({ per_month: +b.dataset.v });
@@ -403,12 +431,26 @@ window.StonksPortfolio = function (ctx) {
       ["Off target at the goal", p.truncated ? "—" : `${p.final_drift.toFixed(1)} pp`, p.truncated ? "plan longer than 100 years" : "largest gap between final and target %"],
     ];
     // ---- projection at an assumed yearly return
-    const ret = (P().ret ?? 6) / 100, band = (P().band ?? 2) / 100;
+    const ret = (P().ret ?? 6) / 100;
+    const av = autoVol(targets);
+    const volPct = P().vol ?? (av.vol != null ? +(av.vol * 100).toFixed(1) : 15);
+    const vol = volPct / 100;
+    $("#proj-vol").placeholder = av.vol != null ? `auto ${(av.vol * 100).toFixed(1)}` : av.loading ? "auto …" : "15";
+    $("#proj-vol-hint").textContent = P().vol != null ? "your value" : av.vol != null
+      ? `from 3 years of prices of ${av.what}${av.coverage != null && av.coverage < 0.999 ? ` (${Math.round(av.coverage * 100)}% of it has history)` : ""}`
+      : av.loading ? "calculating…" : "no price history — using 15%";
     const startValue = (state.port?.positions || []).reduce((a, x) => a + (x.value ?? x.cost ?? 0), 0);
-    const proj = window.StonksPlanner.project({ months: p.months, startValue, startInvested: p.invested, annual: ret, band });
+    const goalVal = P().target ? P().target * r : goal;
+    const mc = window.StonksPlanner.monteCarlo({ months: p.months, startValue, startInvested: p.invested, annual: ret, vol, sims: 2000, target: goalVal });
+    const proj = mc.pts;
     const end = proj.at(-1);
-    kpis.splice(1, 0, [`Projected value${p.truncated ? ` after ${p.months.length} months` : " at the goal"}`, fmtMoney(end.value, b),
-      `${fmtSigned(end.value - end.invested, b)} on ${fmtMoney(end.invested, b)} invested at ${(ret * 100).toFixed(1)}%/yr`]);
+    const endLbl = p.truncated ? `after ${p.months.length} months` : `by ${monthFmt.format(new Date(end.date.getFullYear(), end.date.getMonth() - 1, 1))}`;
+    const chance = mc.chanceAbove(goalVal);
+    const pct = (x) => (x >= 0.995 ? ">99%" : x < 0.005 ? "<1%" : `${Math.round(x * 100)}%`);
+    kpis.splice(1, 0,
+      [`Chance of ≥ ${fmtMoney(goalVal, b, true)} ${endLbl}`, `<span class="${chance >= 0.5 ? "up" : "warn-t"}">${pct(chance)}</span>`,
+        `${pct(end.pLoss)} chance of ending below the ${fmtMoney(end.invested, b, true)} invested`],
+      [`Projected value ${endLbl}`, fmtMoney(end.value, b), `median · 80% of paths: ${fmtMoney(end.p10, b, true)} – ${fmtMoney(end.p90, b, true)}`]);
     const yearly = proj.filter((x) => x.i > 0 && (x.i % 12 === 0 || x === end));
     let prevInv = proj[0].invested;
     const yearRows = yearly.map((x) => {
@@ -420,18 +462,24 @@ window.StonksPortfolio = function (ctx) {
         <td class="num">${fmtMoney(contributed, b)}</td><td class="num">${fmtMoney(x.invested, b)}</td>
         <td class="num"><b>${fmtMoney(x.value, b)}</b></td>
         <td class="num ${cls(gain)}">${fmtSigned(gain, b)} <span class="sub">${fmtPct(x.invested ? (gain / x.invested) * 100 : null, 1)}</span></td>
-        <td class="num sub">${band ? `${fmtMoney(x.low, b)} – ${fmtMoney(x.high, b)}` : "—"}</td></tr>`;
+        <td class="num sub">${fmtMoney(x.p10, b)} – ${fmtMoney(x.p90, b)}</td>
+        <td class="num">${pct(1 - x.pLoss)}</td><td class="num">${pct(x.pGoal)}</td></tr>`;
     }).join("");
     const projHtml = `
       <div class="chart-card proj-card">
-        <div class="chart-legend"><span class="lk s-port"><i></i>Projected value (${(ret * 100).toFixed(1)}%/yr)</span>
-          ${band ? `<span class="lk s-band"><i class="sq"></i>${((ret - band) * 100).toFixed(1)}–${((ret + band) * 100).toFixed(1)}%/yr</span>` : ""}
-          <span class="lk s-inv"><i></i>Money invested</span></div>
+        <div class="chart-legend"><span class="lk s-port"><i></i>Median path</span>
+          <span class="lk s-band"><i class="sq"></i>Half of the paths (25–75%)</span>
+          <span class="lk s-band2"><i class="sq"></i>80% of the paths (10–90%)</span>
+          <span class="lk s-inv"><i></i>Money invested</span>
+          <span class="lk s-goal"><i></i>${fmtMoney(goalVal, b, true)}</span>
+          <span class="hint">${mc.sims.toLocaleString()} simulations · ${(ret * 100).toFixed(1)}%/yr expected · ${(vol * 100).toFixed(1)}% volatility</span></div>
         <div id="proj-chart" class="chart"></div>
       </div>
       <h3 class="sub-h">Projection by year</h3>
       <div class="table-wrap"><table class="grid"><thead><tr><th>Date</th><th class="num">Added in the period</th><th class="num">Money invested</th>
-        <th class="num">Projected value</th><th class="num">Projected gain</th><th class="num">Range</th></tr></thead><tbody>${yearRows}</tbody></table></div>`;
+        <th class="num">Median value</th><th class="num">Median gain</th><th class="num">80% of paths</th>
+        <th class="num" title="Share of simulated paths worth more than the money invested at that date">Above invested</th>
+        <th class="num" title="Share of simulated paths at or above the value you want to reach">≥ ${fmtMoney(goalVal, b, true)}</th></tr></thead><tbody>${yearRows}</tbody></table></div>`;
 
     // ---- projected allocation: money invested in each bucket over time, as % of the total
     const order = Object.keys(targets).filter((x) => targets[x] > 0).sort((x, y) => targets[y] - targets[x]);
@@ -495,7 +543,7 @@ window.StonksPortfolio = function (ctx) {
             <td class="num ${Math.abs(f.pct - f.target) >= 2 ? "warn-t" : ""}">${fmtPP(f.pct - f.target)}</td></tr>`).join("")}</tbody></table></div>
         </div>
       </div>`;
-    drawProjection(proj, band > 0);
+    drawProjection(proj, true, goalVal);
     lastAlloc = { pts: allocPts, series, lbl, targets };
     drawAllocChart();
   }
@@ -558,16 +606,17 @@ window.StonksPortfolio = function (ctx) {
     svg.querySelector(".hit").addEventListener("pointerleave", () => { xh.hidden = true; hideTip(); });
   }
 
-  function drawProjection(pts, withBand) {
+  function drawProjection(pts, withBand, goalVal = null) {
     const el = $("#proj-chart");
     if (!el || pts.length < 2) return;
     const b = base();
     const W = el.clientWidth || 800, H = 300, m = { t: 12, r: 16, b: 28, l: 70 };
     const x = d3.scaleTime().domain(d3.extent(pts, (p) => p.date)).range([m.l, W - m.r]);
-    const y = d3.scaleLinear().domain([0, d3.max(pts, (p) => Math.max(p.high, p.value, p.invested)) * 1.05]).nice(5).range([H - m.b, m.t]);
+    const y = d3.scaleLinear().domain([0, Math.max(d3.max(pts, (p) => Math.max(p.high, p.value, p.invested)), goalVal || 0) * 1.05]).nice(5).range([H - m.b, m.t]);
     const money = new Intl.NumberFormat(undefined, { style: "currency", currency: b, notation: "compact", maximumFractionDigits: 1 });
     const line = (k, curve = d3.curveMonotoneX) => d3.line().x((p) => x(p.date)).y((p) => y(p[k])).curve(curve)(pts);
     const area = d3.area().x((p) => x(p.date)).y0((p) => y(p.low)).y1((p) => y(p.high)).curve(d3.curveMonotoneX)(pts);
+    const area2 = pts[0].p25 != null ? d3.area().x((p) => x(p.date)).y0((p) => y(p.p25)).y1((p) => y(p.p75)).curve(d3.curveMonotoneX)(pts) : null;
     const span = (pts.at(-1).date - pts[0].date) / (365.25 * 864e5);
     const yt = y.ticks(5);
     const xt = span > 3 ? x.ticks(d3.timeYear.every(Math.max(1, Math.ceil(span / Math.max(2, Math.floor(W / 90))))))
@@ -577,7 +626,9 @@ window.StonksPortfolio = function (ctx) {
       <g class="grid">${yt.map((t) => `<line x1="${m.l}" x2="${W - m.r}" y1="${y(t)}" y2="${y(t)}"/>`).join("")}</g>
       <g class="yaxis">${yt.map((t) => `<text x="${m.l - 8}" y="${y(t)}" dy="0.32em">${money.format(t)}</text>`).join("")}</g>
       <g class="xaxis">${xt.map((t) => `<text x="${x(t)}" y="${H - 8}">${dfmt.format(t)}</text>`).join("")}</g>
-      ${withBand ? `<path class="band" d="${area}"/>` : ""}
+      ${withBand ? `<path class="band band2" d="${area}"/>` : ""}
+      ${withBand && area2 ? `<path class="band" d="${area2}"/>` : ""}
+      ${goalVal ? `<line class="goal-ln" x1="${m.l}" x2="${W - m.r}" y1="${y(goalVal)}" y2="${y(goalVal)}"/>` : ""}
       <path class="ln s-inv" d="${line("invested", d3.curveStepAfter)}"/>
       <path class="ln s-port" d="${line("value")}"/>
       <line class="xh" y1="${m.t}" y2="${H - m.b}" hidden/>
@@ -598,10 +649,12 @@ window.StonksPortfolio = function (ctx) {
       const gain = p.value - p.invested;
       const endOf = new Date(p.date.getFullYear(), p.date.getMonth() - 1, 1);
       showTip(`<div class="tt-name">${p.i ? `End of ${fmtM.format(endOf)} · month ${p.i}` : "Today"}</div>
-        <dl class="tt-series"><dt><span class="lk s-port"><i></i>Projected value</span></dt><dd><b>${fmtMoney(p.value, b)}</b></dd>
+        <dl class="tt-series"><dt><span class="lk s-port"><i></i>Median value</span></dt><dd><b>${fmtMoney(p.value, b)}</b></dd>
         <dt><span class="lk s-inv"><i></i>Money invested</span></dt><dd><b>${fmtMoney(p.invested, b)}</b></dd>
-        <dt>Projected gain</dt><dd class="${cls(gain)}">${fmtSigned(gain, b)} (${fmtPct(p.invested ? gain / p.invested * 100 : null, 1)})</dd>
-        ${withBand ? `<dt>Range</dt><dd>${fmtMoney(p.low, b)} – ${fmtMoney(p.high, b)}</dd>` : ""}</dl>`, e);
+        <dt>Median gain</dt><dd class="${cls(gain)}">${fmtSigned(gain, b)} (${fmtPct(p.invested ? gain / p.invested * 100 : null, 1)})</dd>
+        ${p.p25 != null ? `<dt>Half of the paths</dt><dd>${fmtMoney(p.p25, b)} – ${fmtMoney(p.p75, b)}</dd>` : ""}
+        ${withBand ? `<dt>80% of the paths</dt><dd>${fmtMoney(p.low, b)} – ${fmtMoney(p.high, b)}</dd>` : ""}
+        ${p.pLoss != null && p.i ? `<dt>Below invested</dt><dd>${Math.round(p.pLoss * 100)}% of paths</dd>` : ""}</dl>`, e);
     });
     svg.querySelector(".hit").addEventListener("pointerleave", () => { xh.hidden = true; dv.hidden = true; di.hidden = true; hideTip(); });
   }

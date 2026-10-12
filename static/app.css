@@ -462,3 +462,43 @@ tr.st-row-brk td:first-child { box-shadow: inset 3px 0 0 #7aa2ff; }
 .row-in input { width: 90px; }
 .tg-notes p { margin: 0 0 6px; }
 .tg-notes ul.plain { gap: 4px; font-size: 12px; }
+/* monte carlo fan */
+svg.lc .band.band2 { opacity: .08; }
+svg.lc .band:not(.band2) { opacity: .2; }
+.lk.s-band i.sq { background: rgba(57,135,229,.42); }
+.lk.s-band2 i.sq { background: rgba(57,135,229,.18); }
+svg.lc .goal-ln { stroke: #f5c451; stroke-dasharray: 5 4; stroke-width: 1.2; }
+.lk.s-goal { color: #f5c451; } .lk.s-goal i { border-top: 2px dashed #f5c451; }
+#proj-vol-hint { font-size: 10px; max-width: 200px; }
+/* risk tab */
+.kpi .v small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+svg.lc .dd-area { fill: rgba(246, 53, 56, .28); stroke: rgba(246, 53, 56, .8); stroke-width: 1; }
+svg.lc .ln.s-bench { stroke: var(--muted); stroke-dasharray: 4 3; fill: none; stroke-width: 1.3; }
+svg.lc .dd-dot { fill: var(--down); }
+.lk.s-dd i.sq { background: rgba(246, 53, 56, .5); }
+.lk.s-bench i { border-top: 2px dashed var(--muted); }
+th.rkbar, td.rkbar { width: 200px; min-width: 160px; }
+.rk2 { position: relative; height: 12px; }
+.rk2 i { position: absolute; left: 0; height: 5px; border-radius: 3px; }
+.rk2 i.w { top: 0; background: #8b92a1; }
+.rk2 i.r { top: 7px; background: #3987e5; }
+.rk2 i.r.hot { background: #f5a524; }
+.corr { display: grid; gap: 2px; font-size: 10px; font-variant-numeric: tabular-nums; overflow-x: auto; }
+.corr .ch { color: var(--muted); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-bottom: 2px; }
+.corr .rh { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 4px; line-height: 24px; }
+.corr .cc { height: 24px; border-radius: 3px; display: grid; place-items: center; color: var(--text-strong); }
+.cbar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.cbar i { display: block; height: 100%; background: #3987e5; }
+#rk-conc table + table { margin-top: 12px; }
+.rk-stress-in .seg { margin-top: 2px; }
+.rk-stress-in input[type=number] { width: 100px; }
+.stress-res { display: flex; gap: 24px; align-items: center; margin: 10px 0; }
+.stress-res .k { color: var(--muted); font-size: 12px; }
+.stress-res .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.stress-res .hint { max-width: 700px; }
+tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
+.pill.ok-s { background: rgba(48, 204, 90, .12); color: var(--up); }
+.pill.bad-s { background: rgba(246, 53, 56, .12); color: var(--down); }
+.rk-earn-ctl { margin-left: 12px; font-weight: 400; }
+.rk-earn-ctl input { width: 52px; }
+#rk-dd { min-height: 0; height: 220px; }
