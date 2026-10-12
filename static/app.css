@@ -543,3 +543,22 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .id-custom-status .linkbtn { background: none; border: 0; padding: 0; color: #7aa2ff; cursor: pointer; font: inherit; text-decoration: underline; }
 #id-table tr.flash td { animation: flash 1.6s ease-out; }
 @keyframes flash { 0%, 40% { background: rgba(122, 162, 255, .25); } 100% { background: transparent; } }
+/* telegram */
+.tgx { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); margin: 0 0 12px; }
+.tgx > summary { cursor: pointer; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; list-style: none; }
+.tgx > summary::-webkit-details-marker { display: none; }
+.tgx > summary::after { content: "▸"; margin-left: auto; color: var(--muted); }
+.tgx[open] > summary::after { content: "▾"; }
+.tgx-body { padding: 0 14px 12px; border-top: 1px solid var(--border); }
+.tgx-body h4 { margin: 12px 0 6px; font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+.tgx-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.tgx-steps { margin: 0 0 8px; padding-left: 18px; font-size: 13px; }
+.tgx-steps li { margin-bottom: 4px; }
+.tgx .row-in input { width: 360px; max-width: 100%; }
+.tgx-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.tgx-row { display: flex; flex-wrap: wrap; gap: 10px 14px; margin-top: 10px; }
+.tgx-row input { width: 110px; }
+.tgx-row .grow input { width: 100%; min-width: 220px; }
+.tgx-log td { font-size: 12px; }
+.tgx code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+@media (max-width: 900px) { .tgx-cols { grid-template-columns: 1fr; } }

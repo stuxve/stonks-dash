@@ -32,6 +32,7 @@ The base image `python:3.12-slim` is multi-arch, so the same compose file also b
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `TELEGRAM_BOT_TOKEN` | — | Bot token for Telegram alerts (optional; it can also be pasted in Sell targets). |
 | `STONKS_BIND` | `127.0.0.1` | Host interface. **The app has no authentication.** Keep it on localhost, or expose it only behind a VPN (WireGuard) or a reverse proxy with auth. |
 | `STONKS_PORT` | `8000` | Host port |
 | `STONKS_PROVIDER` | `yahoo` | `yahoo` for live data, or `mock` for offline demo data |
@@ -77,6 +78,12 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Broke out**: the price closed for 2 days more than one daily move above your target, or above a resistance it was under in the last 4 weeks. **Raise stop** moves the stop half a daily move under that level and the target to the next resistance, instead of selling.
   - Each row also shows the peak since the buy, a stop · buy · now · target bar with the zones shaded, the distance to the target and the stop, the P/L at the target after the account's sell fee, and a status: *Broke out*, *Target hit*, *Stop hit*, *Near target*, *Near stop*, *Watching* or *No exit set*. Alerts show as a count on the tab.
   - **Sell** opens the sale dialog prefilled. **All buys** copies a lot's exits to every buy of the same asset. **Fill buys that have no exit yet** sets default exits in one go. Nothing is sold automatically. Later buys of an asset are flagged **FIFO n/m**, because a sale always uses the oldest buy first.
+- **Telegram alerts** (panel at the top of Sell targets). The Pi checks your buys every 15 minutes, using the same rules as the tab, even when no browser is open. It sends a message only when something **changes**: a target hit, a stop hit (fixed, % trailing or ×ATR), a breakout with the suggested new stop and target, near target or near stop (optional), and earnings within N days. There's a cooldown so a price flapping around a level doesn't spam you, and an optional daily summary at a time you choose. Setup:
+  1. Create a bot with **@BotFather** (`/newbot`).
+  2. Paste the token in the panel, or set `TELEGRAM_BOT_TOKEN` in `.env`, which is safer. The token is stored only on the Pi and is never returned by the API or included in backups.
+  3. Press **Link my Telegram** and **Start** in the bot. Only the chat that sends the one-time code is linked; messages from any other chat are ignored.
+
+  Commands in the chat: `/status`, `/summary`, `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
 - **Risk** replays today's holdings and weights over the last 1, 3 or 5 years of prices, in your base currency. It has its own benchmark picker (MSCI World by default), and each option shows its correlation with your portfolio, with ★ on the best fit. If the benchmark used by Performance and "Vs index" fits much worse, a button lets you switch that one too. Holdings with a short price history (for example a Munich listing Yahoo barely covers) borrow the earlier part from a proxy. The app tries, in order: a ticker you type in the table, another listing of the same fund (same root ticker, currency and price), then an ETF on the same index (in its local currency if your fund is hedged). This way they're never treated as cash.
   - Volatility, max drawdown (peak, trough, recovery and how long it lasted), distance from the last peak, worst month and beta/correlation vs the benchmark, next to the same figures for the benchmark. There's also the max drawdown of the portfolio you actually held, time-weighted so contributions don't count. It starts on the first day you held at least 3 effective positions with none above 50% of cost, so a period when you owned a single stock doesn't count as a portfolio drawdown. That earlier figure is shown alongside.
   - A drawdown chart, your mix against the benchmark.
@@ -167,6 +174,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
+| GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |
 | GET | `/api/targets/peaks` | Peak and low close since each open, dated buy |

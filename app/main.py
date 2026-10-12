@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import exposure, ideas, ledger, levels, risk, seeds, tax
+from . import alerts, exposure, ideas, ledger, levels, risk, seeds, tax
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -83,6 +83,21 @@ class MixIn(BaseModel):
     weights: dict[str, float]
     base: str | None = None
     years: int = Field(default=3, ge=1, le=10)
+
+
+class AlertCfgIn(BaseModel):
+    enabled: bool | None = None
+    events: dict[str, bool] | None = None
+    interval_min: int | None = Field(default=None, ge=5, le=1440)
+    near_pct: float | None = Field(default=None, gt=0, le=50)
+    earn_days: int | None = Field(default=None, ge=0, le=30)
+    summary_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$|^$")
+    cooldown_h: float | None = Field(default=None, ge=0, le=168)
+    app_url: str | None = Field(default=None, max_length=200)
+
+
+class TokenIn(BaseModel):
+    token: str | None = Field(default=None, max_length=100)
 
 
 class FillIn(BaseModel):
@@ -1230,6 +1245,135 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         _ideas_cache[ck] = (time.time(), out)
         return out
 
+    # ------------------------------------------------------------------ Telegram alerts
+    def _alert_snapshot():
+        base = base_or_default(None)
+        lots, _sells, _divs, fr = _context(base)
+        rows, _tot, fx = _open_rows(base, lots, fr)
+        try:
+            lv = _levels()
+        except Exception as e:  # noqa: BLE001
+            log.info("levels for alerts failed: %s", e)
+            lv = {}
+        st = db.get_settings()
+        near = (st.get("alerts") or {}).get("near_pct") or (st.get("sell_targets") or {}).get("near") or 5
+        ev = alerts.evaluate(rows, fx, lv, float(near), st.get("account_fees") or {})
+        try:
+            earn = earnings_view().get("items", [])
+        except Exception as e:  # noqa: BLE001
+            log.info("earnings for alerts failed: %s", e)
+            earn = []
+        dist = {}
+        for r in ev:
+            if r["stop"] and r["price"]:
+                d = (r["stop"] / r["price"] - 1) * 100
+                if r["symbol"] not in dist or d > dist[r["symbol"]]:
+                    dist[r["symbol"]] = d
+        return {"base": base, "lots": ev, "earnings": earn, "stop_dist": dist}
+
+    def _alert_summary() -> str:
+        base = base_or_default(None)
+        t = portfolio(base)["totals"]
+        snap = _alert_snapshot()
+        unmon = monitor.config()["events"].get("unmonitored")
+        act = [r for r in snap["lots"] if r["status"] in alerts.TITLE and (r["has"] or unmon)]
+        soon = [x for x in snap["earnings"] if x.get("days") is not None and 0 <= x["days"] <= 7]
+        lines = [f"📊 <b>Portfolio</b> {alerts.fmt_money(t['value'], base)}",
+                 f"Today {alerts.fmt_signed(t.get('day_pnl'), base)} ({alerts.fmt_pct(t.get('day_pct'), 2)}) · "
+                 f"total {alerts.fmt_signed(t.get('pnl'), base)} ({alerts.fmt_pct(t.get('pnl_pct'))})"]
+        if act:
+            lines.append("")
+            lines += [f"{alerts.EMO[r['status']]} {alerts.html.escape(r['symbol'] or '')} {alerts.TITLE[r['status']].lower()} · "
+                      f"{alerts.fmt_money(r['price'], r['ccy'])}" for r in act]
+        if soon:
+            lines.append("")
+            lines += [f"📅 {x['symbol']} earnings {x['next']}" for x in soon]
+        return "\n".join(lines)
+
+    monitor = alerts.Monitor(db, _alert_snapshot, _alert_summary)
+    app.state.alerts = monitor
+    if os.getenv("STONKS_NO_WARMUP") != "1":
+        monitor.start()
+
+    def _alerts_status():
+        m = monitor
+        cfg = m.config()
+        me = None
+        if m.token():
+            try:
+                me = m.tg.me()
+            except Exception as e:  # noqa: BLE001
+                m.last_error = str(e)
+        p = m.pairing if m.pairing and time.time() < m.pairing["until"] else None
+        st = m.state()
+        return {"config": {k: v for k, v in cfg.items()}, "token": m.token_source(),
+                "bot": {"username": me.get("username"), "name": me.get("first_name")} if me else None,
+                "pairing": ({"code": p["code"], "until": p["until"],
+                             "link": f"https://t.me/{me['username']}?start={p['code']}" if me else None} if p else None),
+                "linked": bool(cfg.get("chat_id")), "last_check": m.last_check, "last_error": m.last_error,
+                "muted_until": st.get("muted_until") or None, "log": m.log()[:20]}
+
+    @app.get("/api/alerts")
+    def alerts_get():
+        return _alerts_status()
+
+    @app.put("/api/alerts/config")
+    def alerts_config(body: AlertCfgIn):
+        patch = body.model_dump(exclude_unset=True)
+        if "summary_time" in patch and not patch["summary_time"]:
+            patch["summary_time"] = None
+        if "events" in patch:
+            patch["events"] = {**monitor.config()["events"], **patch["events"]}
+        monitor.save_config(patch)
+        return _alerts_status()
+
+    @app.post("/api/alerts/token")
+    def alerts_token(body: TokenIn):
+        if monitor.token_source() == "env":
+            raise HTTPException(400, "The token is set with TELEGRAM_BOT_TOKEN in the environment; change it there.")
+        tok = (body.token or "").strip()
+        if tok and not __import__("re").fullmatch(r"\d{5,}:[A-Za-z0-9_-]{30,}", tok):
+            raise HTTPException(400, "That doesn't look like a bot token (123456789:AA…) — copy it from @BotFather.")
+        old = monitor.token()
+        monitor.set_token(tok or None)
+        if tok:
+            try:
+                monitor.tg.me(refresh=True)
+            except Exception as e:  # noqa: BLE001
+                monitor.set_token(old)
+                raise HTTPException(400, f"Telegram rejected the token: {e}") from None
+        else:
+            monitor.save_config({"chat_id": None, "chat_name": None})
+        return _alerts_status()
+
+    @app.post("/api/alerts/link")
+    def alerts_link():
+        if not monitor.token():
+            raise HTTPException(400, "Set the bot token first.")
+        monitor.new_pairing()
+        return _alerts_status()
+
+    @app.post("/api/alerts/unlink")
+    def alerts_unlink():
+        monitor.save_config({"chat_id": None, "chat_name": None})
+        return _alerts_status()
+
+    @app.post("/api/alerts/test")
+    def alerts_test():
+        if not monitor.config().get("chat_id"):
+            raise HTTPException(400, "Link a chat first.")
+        ok = monitor.send("🔔 Test from <b>stonks-dash</b>: alerts reach this chat.\n\n" + _alert_summary(), "test")
+        if not ok:
+            raise HTTPException(502, monitor.last_error or "Telegram send failed")
+        return _alerts_status()
+
+    @app.post("/api/alerts/check")
+    def alerts_check_now():
+        if not monitor.config().get("chat_id"):
+            raise HTTPException(400, "Link a chat first.")
+        sent = monitor.check(force=True)
+        return {"sent": len(sent), **_alerts_status()}
+
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():
@@ -1446,7 +1590,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "risk.js", "ideas.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

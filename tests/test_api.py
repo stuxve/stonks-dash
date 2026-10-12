@@ -403,3 +403,75 @@ def test_ideas_extra_tickers(client):
     st = {c["symbol"]: c["status"] for c in d["custom"]}
     assert st == {"CIE.MC": "added", "SAN.MC": "in_list", "IWDA.AS": "not_stock"}
     assert any(r["symbol"] == "CIE.MC" for r in d["rows"])
+
+
+def test_alert_rules_match_sell_targets():
+    from app import alerts
+    fx = {"EUR": 1.0, "USD": 0.9}
+    base = {"id": 1, "symbol": "X", "currency": "USD", "price_currency": "USD", "avg_cost": 100.0, "ok": True,
+            "quantity": 10, "cost": 900.0, "pnl": 0, "pnl_pct": 0, "account": "B"}
+    L = {"vol": {"atr": 2.0}, "resistance": [{"level": 130.0}], "support": [], "last_closes": [121, 123],
+         "breakout": None}
+    ev = lambda p, L=L, pk=None: alerts.eval_lot({**base, **p}, fx, L, pk, 5, {})  # noqa: E731
+    assert ev({"price": 110, "target_price": 120})["status"] == "watch"
+    assert ev({"price": 115, "target_price": 120})["status"] == "near-tp"
+    assert ev({"price": 121, "target_price": 120})["status"] == "tp"           # closes not 1 ATR above yet
+    r = ev({"price": 123, "target_price": 120}, dict(L, last_closes=[122.5, 123]))
+    assert r["status"] == "brk" and r["sugg"]["stop"] == pytest.approx(119) and r["sugg"]["target"] == 130
+    # trailing 10% below a 150 peak → stop 135 → hit at 134
+    r = ev({"price": 134, "trail_pct": 10}, pk={"peak": 150})
+    assert r["status"] == "sl" and r["stop_src"] == "trail" and r["stop"] == pytest.approx(135)
+    # ×ATR beats a lower fixed stop
+    r = ev({"price": 146, "atr_k": 3, "stop_price": 120}, pk={"peak": 150})
+    assert r["stop_src"] == "atr" and r["stop"] == pytest.approx(144) and r["status"] == "near-sl"
+    assert ev({"price": 110})["status"] == "none"
+    assert alerts.fmt_money(1234.5, "EUR") == "1.234,50 €"
+
+
+def test_telegram_alerts_flow(client, monkeypatch):
+    m = client.app.state.alerts
+    sent = []
+
+    def fake_call(method, http_timeout=15, **p):
+        if method == "getMe":
+            return {"username": "stonks_test_bot", "first_name": "Stonks"}
+        if method == "sendMessage":
+            sent.append(p)
+            return {"message_id": len(sent)}
+        return []
+    monkeypatch.setattr(m.tg, "call", fake_call)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert client.post("/api/alerts/token", json={"token": "nope"}).status_code == 400
+    r = client.post("/api/alerts/token", json={"token": "123456789:" + "A" * 35}).json()
+    assert r["token"] == "app" and r["bot"]["username"] == "stonks_test_bot"
+    assert "secret" not in json_dumps(client.get("/api/settings").json())             # never leaked
+    assert "AAAAAAAAAA" not in json_dumps(client.get("/api/export").json())
+    # pairing: only the chat that sends the code gets linked
+    code = client.post("/api/alerts/link").json()["pairing"]["code"]
+    m.handle_update({"update_id": 1, "message": {"chat": {"id": 666, "first_name": "Eve"}, "text": "/start 000000"}})
+    assert not client.get("/api/alerts").json()["linked"]
+    m.handle_update({"update_id": 2, "message": {"chat": {"id": 42, "first_name": "Juan"}, "text": f"/start {code}"}})
+    st = client.get("/api/alerts").json()
+    assert st["linked"] and st["config"]["chat_id"] == 42 and sent[-1]["chat_id"] == 42
+    n = len(sent)
+    m.handle_update({"update_id": 3, "message": {"chat": {"id": 666}, "text": "/status"}})
+    assert len(sent) == n                                                               # other chats ignored
+    # a target below the price → one alert, then silence until the status changes
+    pid = client.post("/api/positions", json={"symbol": "MSFT", "quantity": 1, "avg_cost": 10, "currency": "USD",
+                                              "bought_at": "2025-01-02", "target_price": 11}).json()["id"]
+    client.put("/api/alerts/config", json={"events": {"earnings": False}})
+    r = client.post("/api/alerts/check").json()
+    assert r["sent"] >= 1 and any("MSFT" in s["text"] for s in sent)
+    assert not any("IS3N.DE" in s["text"] for s in sent)          # buys without exits aren't monitored by default
+    assert client.post("/api/alerts/check").json()["sent"] == 0
+    m.handle_update({"update_id": 4, "message": {"chat": {"id": 42}, "text": "/status"}})
+    assert "MSFT" in sent[-1]["text"]
+    m.handle_update({"update_id": 5, "message": {"chat": {"id": 42}, "text": "/mute 2"}})
+    assert client.get("/api/alerts").json()["muted_until"]
+    assert client.post("/api/alerts/test").status_code == 200 and "Test" in sent[-1]["text"]
+    client.delete(f"/api/positions/{pid}")
+
+
+def json_dumps(x):
+    import json
+    return json.dumps(x)

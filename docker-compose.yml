@@ -14,6 +14,7 @@ services:
       STONKS_QUOTE_TTL: ${STONKS_QUOTE_TTL:-60}       # seconds between live price fetches
       STONKS_HISTORY_TTL: ${STONKS_HISTORY_TTL:-21600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}   # optional: Telegram alerts bot (or paste it in Sell targets)
     volumes:
       - stonks-data:/data
     read_only: true
