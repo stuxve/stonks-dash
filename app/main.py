@@ -1126,17 +1126,19 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     @app.get("/api/ideas")
     def ideas_view(universe: str = Query("spain", pattern="^(spain|world)$"), base: str | None = None):
         base = base_or_default(base)
-        ck = (universe, base)
+        st = db.get_settings()
+        custom = list(dict.fromkeys(x.strip().upper() for x in
+                                    (((st.get("ideas") or {}).get("custom") or {}).get(universe) or []) if x.strip()))
+        ck = (universe, base, tuple(custom))          # a new extra ticker must not be answered from the cache
         hit = _ideas_cache.get(ck)
         if hit and time.time() - hit[0] < 300 and not hit[1]["progress"]["pending"]:
             return hit[1]
-        st = db.get_settings()
-        custom = [x.upper() for x in (((st.get("ideas") or {}).get("custom") or {}).get(universe) or [])]
         if universe == "spain":
-            syms = list(seeds.IBEX35)
+            base_list = list(seeds.IBEX35)
         else:
-            syms = [x for x in seeds.US_MEGACAPS + seeds.EUROPE_LEADERS if not x.endswith(".MC")] + ideas.WORLD_EXTRA
-        syms = list(dict.fromkeys([x.upper() for x in syms] + custom))
+            base_list = [x for x in seeds.US_MEGACAPS + seeds.EUROPE_LEADERS if not x.endswith(".MC")] + ideas.WORLD_EXTRA
+        base_list = [x.upper() for x in base_list]
+        syms = list(dict.fromkeys(base_list + custom))
         fund, prog = engine.fundamentals(syms)
         today = date.today()
         hist = engine.history(syms, today - timedelta(days=400))
@@ -1204,6 +1206,27 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                "ref_sectors": {k_: v / wsum * 100 for k_, v in ideas.WORLD_SECTORS.items()},
                "my_regions": {k_: my_reg.get(k_, 0.0) / rg_tot * 100 if rg_tot else 0.0 for k_ in ideas.WORLD_REGIONS},
                "ref_regions": ideas.WORLD_REGIONS, "has_portfolio": rp is not None, "as_of": time.time()}
+        # what happened to each extra ticker, so the page can say so
+        pend = set(getattr(engine, "_fund_job", set()) or set())
+        scored = {r_["symbol"] for r_ in rows_}
+        status = []
+        for x in custom:
+            f = fund.get(x)
+            if x in base_list:
+                st_ = "in_list"
+            elif x in scored:
+                st_ = "added"
+            elif f and f.get("quote_type") and f["quote_type"] != "EQUITY":
+                st_ = "not_stock"
+            elif not f and x in pend:
+                st_ = "loading"
+            elif not f:
+                st_ = "not_found"
+            else:
+                st_ = "no_data"
+            status.append({"symbol": x, "status": st_, "name": (f or {}).get("name"),
+                           "quote_type": (f or {}).get("quote_type")})
+        out["custom"] = status
         _ideas_cache[ck] = (time.time(), out)
         return out
 

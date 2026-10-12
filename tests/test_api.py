@@ -385,3 +385,21 @@ def test_ideas_withholding_and_ranks():
     assert r == {"a": 0.0, "b": 50.0, "c": 100.0}
     assert ideas._rank({"a": 1, "b": 2}, higher_better=False) == {"a": 100.0, "b": 0.0}
     assert ideas.region_of("Japan") == "Japan" and ideas.region_of("Taiwan") == "Emerging markets"
+
+
+def test_ideas_extra_tickers(client):
+    import time as _t
+
+    def get():
+        for _ in range(40):
+            d = client.get("/api/ideas?universe=spain").json()
+            if not d["progress"]["pending"]:
+                return d
+            _t.sleep(0.25)
+        return d
+    get()                                                  # warm the cache without extras
+    client.put("/api/settings", json={"ideas": {"custom": {"spain": ["CIE.MC", "SAN.MC", "IWDA.AS"]}}})
+    d = get()                                              # must not be served from the old cache
+    st = {c["symbol"]: c["status"] for c in d["custom"]}
+    assert st == {"CIE.MC": "added", "SAN.MC": "in_list", "IWDA.AS": "not_stock"}
+    assert any(r["symbol"] == "CIE.MC" for r in d["rows"])

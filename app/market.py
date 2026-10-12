@@ -439,7 +439,7 @@ class MockProvider:
         fin = sec == "Financial Services"
         y = float(r.choice([0, 0, r.uniform(0.005, 0.07)]))
         return {"name": symbol.split(".")[0] + " Corp", "sector": sec, "industry": None, "country": self._country(symbol),
-                "currency": self._currency(symbol), "quote_type": "EQUITY", "price": px,
+                "currency": self._currency(symbol), "quote_type": self._quote_type(symbol), "price": px,
                 "market_cap": float(np.exp(r.uniform(np.log(5e9), np.log(3e12)))),
                 "pe": float(r.uniform(6, 45)), "fpe": float(r.uniform(5, 38)), "pb": float(r.uniform(0.6, 12)),
                 "ev_ebitda": None if fin else float(r.uniform(4, 30)), "roe": float(r.uniform(-0.05, 0.45)),

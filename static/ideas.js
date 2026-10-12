@@ -125,7 +125,7 @@ window.StonksIdeas = function (ctx) {
       <th class="num" title="Analyst consensus upside (number of analysts)">Upside</th><th>Why it ranks here</th><th></th></tr></thead>
       <tbody>${shown.map((r, i) => `<tr data-sym="${esc(r.symbol)}">
         <td class="num sub">${i + 1}</td>
-        <td class="asset"><b>${esc(r.symbol)}</b>${r.held_pct >= 0.5 ? `<span class="pill" title="Already ${r.held_pct.toFixed(1)}% of your portfolio, directly or inside your funds">held ${r.held_pct.toFixed(1)}%</span>` : ""}
+        <td class="asset"><b>${esc(r.symbol)}</b>${((S().custom || {})[uni()] || []).includes(r.symbol) ? '<span class="pill ext" title="One of your extra tickers">extra</span>' : ""}${r.held_pct >= 0.5 ? `<span class="pill" title="Already ${r.held_pct.toFixed(1)}% of your portfolio, directly or inside your funds">held ${r.held_pct.toFixed(1)}%</span>` : ""}
           <div class="sub">${esc(r.name)} · ${esc(r.sector)}${r.country ? ` · ${esc(r.country)}` : ""}</div></td>
         <td class="num"><div class="scb"><i style="width:${r.score.toFixed(0)}%"></i></div><b>${r.score.toFixed(0)}</b></td>
         ${FACTORS.map(([k, l]) => `<td class="fc" style="background:${heat(r.f[k])}" title="${esc(l)}: ${r.f[k] == null ? "no data" : r.f[k].toFixed(0) + "/100"}${r.why[k] ? ` — ${esc(r.why[k])}` : ""}">${r.f[k] == null ? "·" : r.f[k].toFixed(0)}</td>`).join("")}
@@ -139,6 +139,16 @@ window.StonksIdeas = function (ctx) {
           <a href="https://finance.yahoo.com/quote/${encodeURIComponent(r.symbol)}" target="_blank" rel="noopener noreferrer" title="Open on Yahoo Finance">Yahoo ↗</a></div></td></tr>`).join("")}</tbody>`;
     $("#id-more").innerHTML = rows.length > showN ? `<button class="btn ghost xs" data-n="${showN + 15}">Show 15 more</button><button class="btn ghost xs" data-n="999">Show all ${rows.length}</button>`
       : showN > 15 ? `<button class="btn ghost xs" data-n="15">Show top 15</button>` : "";
+    const rankOf = new Map(rows.map((r, i) => [r.symbol, i + 1]));
+    const MSG = { in_list: "already in the list", loading: "fetching from Yahoo…", not_found: "not found on Yahoo — check the ticker (e.g. LOG.MC, 7203.T)",
+      not_stock: "not a single stock", no_data: "no company data on Yahoo" };
+    $("#id-custom-status").innerHTML = (d.custom || []).map((c) => {
+      const rk = rankOf.get(c.symbol);
+      const ok = c.status === "added" || c.status === "in_list";
+      return `<span class="cs ${ok ? "ok" : c.status === "loading" ? "wait" : "bad"}"><b>${esc(c.symbol)}</b> ${
+        c.status === "added" ? "added" : esc(MSG[c.status] || c.status)}${c.status === "not_stock" && c.quote_type ? ` (${esc(c.quote_type)})` : ""}${
+        rk ? ` · <button class="linkbtn" data-goto="${esc(c.symbol)}" title="Show it in the table">#${rk} of ${rows.length}</button>` : ok && (sector || S().hide_held) ? " · hidden by the filter" : ""}</span>`;
+    }).join("");
     $("#id-note").textContent = `${rows.length} stocks scored · ${d.has_portfolio ? "fit uses your current holdings" : "add holdings to score fit"} · prices and momentum update live, company data daily`;
   }
 
@@ -160,9 +170,20 @@ window.StonksIdeas = function (ctx) {
   $("#id-sector").addEventListener("change", () => { showN = 15; draw(); });
   $("#id-hide-held").addEventListener("change", (e) => { save({ hide_held: e.target.checked }); draw(); });
   $("#id-more").addEventListener("click", (e) => { const b = e.target.closest("[data-n]"); if (!b) return; showN = +b.dataset.n; draw(); });
-  $("#id-custom").addEventListener("change", (e) => {
-    const list = e.target.value.split(/[\s,;]+/).map((x) => x.trim().toUpperCase()).filter(Boolean);
-    save({ custom: { ...(S().custom || {}), [uni()]: list } }).then(() => load(false));
+  function applyCustom() {
+    const list = [...new Set($("#id-custom").value.split(/[\s,;]+/).map((x) => x.trim().toUpperCase()).filter(Boolean))];
+    $("#id-custom-status").innerHTML = list.length ? `<span class="hint">Checking ${list.map(esc).join(", ")} on Yahoo…</span>` : "";
+    save({ custom: { ...(S().custom || {}), [uni()]: list } }).then(() => load(true));
+  }
+  $("#id-custom").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); applyCustom(); } });
+  $("#id-custom-btn").addEventListener("click", applyCustom);
+  $("#id-custom-status").addEventListener("click", (e) => {
+    const a = e.target.closest("[data-goto]"); if (!a) return;
+    e.preventDefault();
+    const sym = a.dataset.goto;
+    $("#id-sector").value = ""; showN = 999; draw();
+    const tr = $(`#id-table tr[data-sym="${CSS.escape(sym)}"]`);
+    if (tr) { tr.scrollIntoView({ block: "center" }); tr.classList.add("flash"); setTimeout(() => tr.classList.remove("flash"), 1600); }
   });
   $("#id-table").addEventListener("click", (e) => {
     const b = e.target.closest(".buy"); if (!b) return;

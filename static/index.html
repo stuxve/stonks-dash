@@ -253,7 +253,9 @@
       <div class="table-wrap"><table class="grid" id="id-table"></table></div>
       <div class="row plan-more" id="id-more"></div>
       <div class="addrow id-custom-row">
-        <label class="field grow"><span id="id-custom-l">Extra tickers</span><input id="id-custom" type="text" placeholder="Yahoo tickers, comma separated — e.g. LOG.MC, CIE.MC, NVO"></label>
+        <label class="field grow"><span id="id-custom-l">Extra tickers</span><input id="id-custom" type="text" placeholder="Yahoo tickers, comma separated — e.g. LOG.MC, CIE.MC, NVO — then Enter"></label>
+        <button class="btn ghost" id="id-custom-btn">Add to the list</button>
+        <div class="id-custom-status" id="id-custom-status"></div>
       </div>
       <div class="hint tg-notes">
         <p>Each factor is a 0–100 percentile inside the list (valuation is compared within the same sector when there are 4+ peers). The score is the weighted average of the factors you choose. Stocks with missing data are scored only on the factors they have, with a small penalty.</p>

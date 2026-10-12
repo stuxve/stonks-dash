@@ -536,3 +536,10 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 #id-table td.why { max-width: 380px; white-space: normal; overflow-wrap: anywhere; }
 #id-table td:last-child { width: 120px; white-space: nowrap; }
 #id-table td:last-child .row-actions { justify-content: flex-end; }
+.id-custom-status { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; }
+.id-custom-status .cs.ok b { color: var(--up); }
+.id-custom-status .cs.bad { color: #f5a524; }
+.id-custom-status .cs.wait { color: var(--muted); }
+.id-custom-status .linkbtn { background: none; border: 0; padding: 0; color: #7aa2ff; cursor: pointer; font: inherit; text-decoration: underline; }
+#id-table tr.flash td { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 40% { background: rgba(122, 162, 255, .25); } 100% { background: transparent; } }
