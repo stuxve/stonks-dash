@@ -323,3 +323,36 @@ def test_risk_mix_earnings_endpoints(client):
     assert e and all(x["symbol"] != "BTC-USD" for x in e)          # stocks only
     x = e[0]
     assert x["next"] and x["days"] >= 0 and len(x["history"]) <= 4 and x["typical_move"] is not None
+
+
+def test_risk_proxy_benchmark_and_actual(client):
+    # IBCF.MU has only a few days of history in the mock (like Yahoo's Munich listing); IBCF.DE is the same fund
+    r = client.post("/api/positions", json={"symbol": "IBCF.MU", "quantity": 100, "avg_cost": 150, "currency": "EUR",
+                                            "bought_at": "2026-08-27"})
+    assert r.status_code == 201
+    d = client.get("/api/risk?years=3&bench=VWCE.DE").json()
+    h = next(x for x in d["holdings"] if x["symbol"] == "IBCF.MU")
+    assert h["proxy"] and h["proxy"]["symbol"] == "IBCF.DE" and h["proxy"]["kind"] == "listing"
+    assert h["vol"] and h["vol"] > 0.05 and h["risk_share"] > 0           # no longer carried as cash
+    assert d["benchmark"]["symbol"] == "VWCE.DE"
+    assert d["fit"] and d["fit"][0]["corr"] >= d["fit"][-1]["corr"]
+    a = d["actual"]
+    assert a and "diversified" in a and a.get("first", {}).get("top")
+    # a manual proxy wins
+    client.put("/api/settings", json={"risk_proxies": {"IBCF.MU": "SPY"}})
+    d2 = client.get("/api/risk?years=3").json()
+    h2 = next(x for x in d2["holdings"] if x["symbol"] == "IBCF.MU")
+    assert h2["proxy"]["symbol"] == "SPY" and h2["proxy"]["kind"] == "manual"
+    # the Monte Carlo volatility uses the proxy too
+    mx = client.post("/api/risk/mix", json={"weights": {"IBCF.MU": 100}}).json()
+    assert mx["vol"] and mx["vol"] > 0.05
+
+
+def test_diversified_start_skips_single_stock_period(client):
+    for p in client.get("/api/positions").json():
+        client.delete(f"/api/positions/{p['id']}")
+    client.post("/api/positions", json={"symbol": "TSLA", "quantity": 10, "avg_cost": 100, "currency": "USD", "bought_at": "2022-01-03"})
+    for s, d in (("MSFT", "2024-03-01"), ("NVDA", "2024-03-01"), ("IWDA.AS", "2024-03-01")):
+        client.post("/api/positions", json={"symbol": s, "quantity": 10, "avg_cost": 100, "currency": "USD", "bought_at": d})
+    a = client.get("/api/risk?years=3").json()["actual"]
+    assert a["diversified"] and a["since"] == "2024-03-01" and a["first"]["top"] == "TSLA"

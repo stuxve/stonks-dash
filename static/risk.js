@@ -9,6 +9,9 @@ window.StonksRisk = function (ctx) {
   const save = (patch) => saveSettings({ risk: { ...S(), ...patch } });
   const years = () => +(S().years || 3);
   const earnDays = () => +(S().earn_days || 7);
+  const bench = () => (S().benchmark || "IWDA.AS").toUpperCase();
+  const BENCH_NAMES = { "IWDA.AS": "MSCI World", "VWCE.DE": "FTSE All-World (≈ACWI)", "SXR8.DE": "S&P 500", "EQQQ.DE": "Nasdaq-100",
+    "IS3N.DE": "Emerging markets", "MEUD.PA": "Stoxx Europe 600" };
   let data = null, loading = false, earn = null, earnAt = 0;
 
   const pct = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(d)}%`);
@@ -24,7 +27,7 @@ window.StonksRisk = function (ctx) {
     loading = true;
     if (!silent || !data) $("#rk-kpis").innerHTML = `<div class="loading">Replaying ${years()} years of prices…</div>`;
     try {
-      data = await api(`/api/risk?base=${base()}&years=${years()}`);
+      data = await api(`/api/risk?base=${base()}&years=${years()}&bench=${encodeURIComponent(bench())}`);
       draw();
     } catch (e) { $("#rk-kpis").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
     finally { loading = false; }
@@ -49,6 +52,7 @@ window.StonksRisk = function (ctx) {
   function draw() {
     const d = data;
     $$("#rk-years button").forEach((x) => x.classList.toggle("active", +x.dataset.v === years()));
+    if (d && !d.empty) drawBenchPicker();
     if (!d || d.empty) { $("#rk-kpis").innerHTML = `<div class="empty">No priced holdings yet.</div>`; return; }
     const b = base(), mix = d.mix || {}, bn = d.bench || {}, dd = mix.dd;
     const bname = esc(d.benchmark?.name || d.benchmark?.symbol || "index");
@@ -68,9 +72,7 @@ window.StonksRisk = function (ctx) {
       kpi("Concentration", `${(conc.top5 || 0).toFixed(0)}%<small> top 5</small>`,
         `largest ${(conc.top1 || 0).toFixed(0)}% · like ${(conc.effective_n || 0).toFixed(1)} equal holdings${d.lookthrough ? ` · top 5 companies (incl. inside funds) ${d.lookthrough.top5.toFixed(0)}%` : ""}`,
         "Effective holdings = 1 / sum of squared weights: 10 equal holdings → 10; one at 90% → about 1.2."),
-      d.actual?.dd ? kpi("Your actual max drawdown", `<span class="down">${pct(d.actual.dd.max)}</span>`,
-        `real portfolio since ${fmtDate(d.actual.since)}, contributions removed · ${fmtDate(d.actual.dd.peak)} → ${fmtDate(d.actual.dd.trough)}`,
-        "Time-weighted: what the portfolio you actually held lost, not counting money you added.") : "",
+      actualKpi(d.actual),
     ].join("");
     drawUnderwater();
     drawHoldings();
@@ -78,6 +80,35 @@ window.StonksRisk = function (ctx) {
     drawConc();
     drawStress();
     drawScenarios();
+  }
+
+  // drawdown of the portfolio you really held — only from the day it looked like a portfolio
+  function actualKpi(a) {
+    if (!a) return "";
+    const f = a.first || {};
+    const before = f.top ? `before that it was mostly ${esc(f.top)} (${Math.round(f.top_share)}% at ${fmtDate(f.date)})` : "";
+    if (a.diversified) {
+      if (!a.dd) return kpi("Your actual max drawdown", "—", `diversified only since ${fmtDate(a.since)} — not enough history yet${before ? ` · ${before}` : ""}`);
+      return kpi("Your actual max drawdown", `<span class="down">${pct(a.dd.max)}</span>`,
+        `since ${fmtDate(a.since)}, when you first held ≥3 effective positions · ${fmtDate(a.dd.peak)} → ${fmtDate(a.dd.trough)}${a.full && a.full.max < a.dd.max - 0.001 ? ` · ${pct(a.full.max)} counting the earlier, concentrated period` : ""}`,
+        `Time-weighted (money you added doesn't count). Starts on the first day your open positions were at least 3 effective holdings with none above 50% of cost; ${before || "earlier it was a single position"}.`);
+    }
+    return kpi("Your actual max drawdown", `<span class="down">${pct(a.dd.max)}</span>`,
+      `<span class="warn-t">concentrated portfolio</span> — never ≥3 effective positions, so this is mostly ${esc(f.top || "one holding")}'s own fall`,
+      "Time-weighted (money you added doesn't count).");
+  }
+
+  function drawBenchPicker() {
+    const fit = new Map((data.fit || []).map((f) => [f.symbol, f]));
+    const opts = [...new Set([...Object.keys(BENCH_NAMES), bench()])];
+    const best = (data.fit || [])[0];
+    $("#rk-bench").innerHTML = opts.map((s) => {
+      const f = fit.get(s);
+      return `<option value="${esc(s)}" ${s === bench() ? "selected" : ""}>${esc(BENCH_NAMES[s] || s)} — ${esc(s)}${f ? ` · corr ${f.corr.toFixed(2)}` : ""}${best && best.symbol === s ? " ★ best fit" : ""}</option>`;
+    }).join("");
+    const g = data.global_benchmark, gf = fit.get(g), cur = fit.get(bench());
+    $("#rk-bench-note").innerHTML = g !== bench() && gf && cur && cur.corr - gf.corr > 0.1
+      ? `Performance and “Vs index” use <b>${esc(g)}</b> (corr ${gf.corr.toFixed(2)} with your portfolio). <button class="btn ghost xs" id="rk-bench-global">Use ${esc(bench())} there too</button>` : "";
   }
 
   function drawUnderwater() {
@@ -130,7 +161,7 @@ window.StonksRisk = function (ctx) {
     t.tBodies[0].innerHTML = hs.map((h) => {
       const heavy = h.risk_share > h.weight * 1.5 && h.risk_share > 5;
       return `<tr>
-      <td class="asset"><b>${esc(h.symbol || h.name)}</b><span class="pill">${esc(CLS[h.class] || h.class)}</span><div class="sub">${esc(h.name || "")}${h.flat ? " · no price history, carried flat" : h.history_from && h.history_from > data.start ? ` · data since ${fmtDate(h.history_from)}` : ""}</div></td>
+      <td class="asset"><b>${esc(h.symbol || h.name)}</b><span class="pill">${esc(CLS[h.class] || h.class)}</span><div class="sub">${esc(h.name || "")}${h.flat ? " · no price history, carried flat" : ""}</div>${proxyNote(h)}</td>
       <td class="num">${h.weight.toFixed(1)}%</td>
       <td class="rkbar"><div class="rk2" title="${h.weight.toFixed(1)}% of the money, ${h.risk_share.toFixed(1)}% of the risk"><i class="w" style="width:${(h.weight / maxShare * 100).toFixed(1)}%"></i><i class="r ${heavy ? "hot" : ""}" style="width:${(Math.max(0, h.risk_share) / maxShare * 100).toFixed(1)}%"></i></div>
         <div class="sub">${h.risk_share.toFixed(1)}% of risk${heavy ? ` · <span class="warn-t">${(h.risk_share / Math.max(h.weight, 0.01)).toFixed(1)}× its weight</span>` : ""}</div></td>
@@ -145,6 +176,16 @@ window.StonksRisk = function (ctx) {
       heavy ? `<b>${esc(heavy.symbol)}</b> is ${heavy.weight.toFixed(1)}% of your money but ${heavy.risk_share.toFixed(0)}% of the portfolio's swings.` : "",
       div.length ? `Diversifying (correlation with the rest below 0.3): ${div.map(esc).join(", ")}.` : "",
     ].filter(Boolean).join(" ");
+  }
+
+  const PROXY_KIND = { listing: "same fund, other listing", index: "ETF on the same index", manual: "your choice" };
+  function proxyNote(h) {
+    const pr = h.proxy, cfg = (state.settings.risk_proxies || {})[h.symbol] || "";
+    const short = !h.flat && h.history_from && h.history_from > data.start;
+    if (!pr && !short && !cfg) return "";
+    const txt = pr ? `history before ${pr.until ? fmtDate(pr.until) : "today"} from <b>${esc(pr.symbol)}</b> (${PROXY_KIND[pr.kind] || pr.kind}${pr.hedged ? ", in its own currency — your fund is hedged" : ""})`
+      : `<span class="warn-t">only ${h.history_from ? `since ${fmtDate(h.history_from)}` : "a few days"} of prices — add a proxy</span>`;
+    return `<div class="sub rk-proxy-row">${txt} <input class="rk-proxy" data-sym="${esc(h.symbol)}" value="${esc(cfg)}" placeholder="proxy ticker" title="Ticker with a long history that moves like this holding (e.g. another listing of the same ETF). Empty = automatic."></div>`;
   }
 
   function drawCorr() {
@@ -256,6 +297,20 @@ window.StonksRisk = function (ctx) {
   }
 
   // ------------------------------------------------------------------ events
+  $("#rk-bench").addEventListener("change", (e) => { save({ benchmark: e.target.value }); load(false); });
+  $("#p-sub-risk").addEventListener("click", async (e) => {
+    if (!e.target.closest("#rk-bench-global")) return;
+    await saveSettings({ benchmark: bench() });
+    ctx.loadPortfolio?.(true);
+    load(true);
+  });
+  $("#rk-hold").addEventListener("change", (e) => {
+    const el = e.target.closest(".rk-proxy"); if (!el) return;
+    const cur = { ...(state.settings.risk_proxies || {}) };
+    const v = el.value.trim().toUpperCase();
+    if (v) cur[el.dataset.sym] = v; else delete cur[el.dataset.sym];
+    saveSettings({ risk_proxies: cur }).then(() => load(false));
+  });
   $("#rk-years").addEventListener("click", (e) => {
     const bt = e.target.closest("button"); if (!bt) return;
     save({ years: +bt.dataset.v }); load(false);

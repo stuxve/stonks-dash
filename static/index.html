@@ -202,6 +202,8 @@
     <div id="p-sub-risk" class="psub" hidden>
       <div class="toolbar">
         <label class="ctl">Look back <span class="seg" id="rk-years"><button data-v="1">1y</button><button data-v="3">3y</button><button data-v="5">5y</button></span></label>
+        <label class="ctl">Compare with <select id="rk-bench"></select></label>
+        <span class="hint" id="rk-bench-note"></span>
         <span class="hint grow" id="rk-note"></span>
       </div>
       <div class="kpis small" id="rk-kpis"></div>
@@ -229,7 +231,7 @@
       <h3 class="sub-h">Earnings calendar <label class="ctl rk-earn-ctl">warn <input id="rk-earn-days" class="tgt" type="number" min="1" max="60" step="1"> days before</label></h3>
       <div class="table-wrap"><table class="grid" id="rk-earn"></table></div>
       <p class="hint tg-notes">Risk figures replay <b>today's holdings and weights</b> over past prices (in your base currency), so they describe the portfolio you have now.
-        Volatility and drawdowns of the past don't cap future ones. Holdings bought or listed after a crisis are estimated from their beta × the index (crypto: BTC).
+        Volatility and drawdowns of the past don't cap future ones. Holdings with a short price history (e.g. a listing Yahoo barely covers) borrow the earlier part from a proxy: another listing of the same fund, an ETF on the same index, or a ticker you choose. Stocks listed after a crisis are estimated from their beta × the index (crypto: BTC).
         Earnings dates come from Yahoo; an estimated window means the company hasn't confirmed the day. A stock often moves several % the session after it reports — a stop inside that range can be triggered by the report alone.</p>
     </div>
 

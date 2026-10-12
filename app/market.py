@@ -273,7 +273,7 @@ class MockProvider:
         "Real Estate": "COL.MC MRL.MC",
     }
     ETFS = set("VWCE.DE IWDA.AS EUNL.DE SXR8.DE CSPX.L VUSA.AS IS3N.DE XDWD.DE MEUD.PA EQQQ.DE "
-               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD IBCF.MU URTH IEMG VGK EZU EWP EWJ EWU BNDW".split())
+               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD IBCF.MU IBCF.DE URTH IEMG VGK EZU EWP EWJ EWU BNDW".split())
     NO_FUND_DATA = {"IBCF.MU"}   # simulates European listings Yahoo publishes no composition for
 
     def __init__(self):
@@ -303,7 +303,7 @@ class MockProvider:
         if sym.endswith("=X"):
             pair = sym[:-2]
             return pair[3:6] if len(pair) == 6 else "USD"
-        for suf, c in ((".DE", "EUR"), (".AS", "EUR"), (".PA", "EUR"), (".MC", "EUR"), (".MI", "EUR"),
+        for suf, c in ((".DE", "EUR"), (".MU", "EUR"), (".AS", "EUR"), (".PA", "EUR"), (".MC", "EUR"), (".MI", "EUR"),
                        (".LS", "EUR"), (".L", "GBp"), (".SW", "CHF"), (".CO", "DKK"), (".SS", "CNY"),
                        (".HK", "HKD"), (".T", "JPY")):
             if sym.endswith(suf):
@@ -328,7 +328,10 @@ class MockProvider:
         lvl = float(np.exp(r.uniform(np.log(5), np.log(900))))
         return lvl * (100 if self._currency(sym) == "GBp" else 1)
 
+    ALIAS = {"IBCF.DE": "IBCF.MU"}     # same fund on another exchange: same prices
+
     def _series(self, sym: str, start: date) -> pd.Series:
+        sym = self.ALIAS.get(sym, sym)
         r = np.random.default_rng(self._seed(sym))
         end = date.today()
         days = pd.bdate_range(start=date(end.year - 6, 1, 1), end=end)
@@ -351,10 +354,21 @@ class MockProvider:
         s = pd.Series(level, index=days)
         return s[s.index >= pd.Timestamp(start)]
 
+    SHORT_HISTORY = {"IBCF.MU": 3}   # simulates a listing Yahoo has only a few days of history for
+
     def closes(self, symbols, start=None, period=None):
         if start is None:
             start = date.today() - timedelta(days=8)
-        return {s: self._series(s, start) for s in symbols if s not in self.fail}
+        out = {}
+        for s in symbols:
+            if s in self.fail:
+                continue
+            ser = self._series(s, start)
+            if s in self.SHORT_HISTORY:
+                full = self._series(s, date.today() - timedelta(days=30))
+                ser = ser[ser.index >= full.index[-self.SHORT_HISTORY[s]]]
+            out[s] = ser
+        return out
 
     def info(self, symbol: str) -> dict:
         r = np.random.default_rng(self._seed(symbol) + 7)
@@ -440,6 +454,7 @@ class MockProvider:
         from . import seeds
         pool = set(seeds.US_MEGACAPS + seeds.EUROPE_LEADERS + seeds.IBEX35 + seeds.CRYPTO)
         pool |= {s for s, *_ in seeds.WORLD_INDICES + seeds.INDEX_FUNDS_ETFS + seeds.MACRO}
+        pool |= {"IBCF.MU", "IBCF.DE"}
         q = query.strip().upper()
         hits = sorted(s for s in pool if q in s)[:limit]
         return [{"symbol": s, "name": self.info(s)["name"], "exchange": "MOCK",

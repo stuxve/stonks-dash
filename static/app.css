@@ -502,3 +502,6 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .rk-earn-ctl { margin-left: 12px; font-weight: 400; }
 .rk-earn-ctl input { width: 52px; }
 #rk-dd { min-height: 0; height: 220px; }
+.rk-proxy-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.rk-proxy { width: 96px; font-size: 11px; padding: 1px 5px; background: var(--panel); border: 1px solid var(--border); border-radius: 4px; }
+#rk-bench { max-width: 330px; }

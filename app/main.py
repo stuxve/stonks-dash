@@ -373,9 +373,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         hist = engine.history(list(pairs.values()), start) if pairs else {}
         return ledger.FxBook(base, spot, {c: hist.get(pair) for c, pair in pairs.items()})
 
-    def _benchmark(base: str, start: date):
+    def _benchmark(base: str, start: date, sym: str | None = None):
         """(symbol, name, series in base currency, native series, currency) — or Nones when unavailable."""
-        sym = (db.get_settings().get("benchmark") or DEFAULT_BENCHMARK).upper()
+        sym = (sym or db.get_settings().get("benchmark") or DEFAULT_BENCHMARK).upper()
         try:
             hist = engine.history([sym], start).get(sym)
             meta = engine.meta([sym]).get(sym) or {}
@@ -805,8 +805,113 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         ccy = exposure.COUNTRY_CCY.get(exposure.country_of(sym, m)) or row.get("price_currency")
         return 0.0 if ccy == base else 1.0
 
+    RISK_BENCHMARKS = ["IWDA.AS", "VWCE.DE", "SXR8.DE", "EQQQ.DE", "IS3N.DE", "MEUD.PA"]
+
+    def _alt_listing(sym: str) -> str | None:
+        """Another listing of the same fund with a longer history: same root ticker, same currency, same price (±3%)."""
+        key = f"alt:{sym}"
+        hit = db.get_meta([key], 7 * 86400).get(key)
+        if hit is not None:
+            return hit.get("symbol")
+        root = sym.split(".")[0].upper()
+        try:
+            cands = [r["symbol"] for r in prov.search(root, limit=15)
+                     if r["symbol"].split(".")[0].upper() == root and r["symbol"].upper() != sym.upper()]
+        except Exception:  # noqa: BLE001
+            cands = []
+        best = None
+        if cands:
+            q = engine.quotes([sym] + cands)
+            own = q.get(sym)
+            hist = engine.history(cands, date.today() - timedelta(days=3 * 365))
+            for c in cands:
+                qc, h = q.get(c), hist.get(c)
+                if not (own and own.ok and qc and qc.ok and qc.currency == own.currency
+                        and abs(qc.price / own.price - 1) < 0.03) or h is None or len(h) < 250:
+                    continue
+                if best is None or h.index[0] < best[1]:
+                    best = (c, h.index[0])
+        db.put_meta(key, {"symbol": best[0] if best else None})
+        return best[0] if best else None
+
+    def _splice_proxies(base: str, px: dict, keys: list[str], meta: dict, info: dict, since: date) -> dict:
+        """For holdings whose own price history starts well after `since`, prepend a proxy with a long history:
+        your manual choice (Risk tab), another listing of the same fund, or an ETF on the same index (in its local
+        currency when your fund is hedged to your base currency). Returns {key: proxy info}; `px` is updated."""
+        cfg = {k.upper(): v.upper() for k, v in (db.get_settings().get("risk_proxies") or {}).items() if v}
+        overrides = db.get_settings().get("fund_profiles") or {}
+        used = {}
+        for k in keys:
+            own = px.get(k)
+            if own is not None and len(own) and own.index[0] <= pd.Timestamp(since) + pd.Timedelta(days=30):
+                continue
+            m = meta.get(k) or {}
+            row = info.get(k) or {}
+            qt = row.get("quote_type") or m.get("quote_type")
+            cand, kind = cfg.get(k.upper()), "manual"
+            if not cand and qt in ("ETF", "MUTUALFUND"):
+                alt = _alt_listing(k)
+                if alt:
+                    cand, kind = alt, "listing"
+                else:
+                    _, prof = exposure.fund_profile(k, row, m, {}, overrides)
+                    cand, kind = exposure.PROFILES.get(prof, {}).get("proxy"), "index"
+            if not cand:
+                continue
+            name = " ".join(filter(None, [m.get("long_name"), m.get("name"), row.get("display_name")]))
+            hedged = kind == "index" and exposure.hedge_currency(name, base) == base
+            if hedged:     # a hedged fund moves like the index in its own currency, without the FX swings
+                pser = engine.history([cand], since - timedelta(days=10)).get(cand)
+            else:
+                pser = _base_prices(base, [cand], since - timedelta(days=10))[0].get(cand)
+            if pser is None or pser.empty:
+                continue
+            pser = pser.dropna()
+            if own is not None and len(own):
+                t0 = own.index[0]
+                before = pser[pser.index < t0]
+                at = pser[pser.index <= t0]
+                if before.empty or at.empty or not at.iloc[-1]:
+                    continue
+                synth = pd.concat([before * (float(own.iloc[0]) / float(at.iloc[-1])), own])
+            else:
+                t0, synth = None, pser
+            px[k] = synth[~synth.index.duplicated(keep="last")].sort_index()
+            used[k] = {"symbol": cand, "kind": kind, "hedged": hedged,
+                       "until": t0.date().isoformat() if t0 is not None else None}
+        return used
+
+    def _diversified_since(lots: list[dict], sells: list[dict], fr) -> tuple[date | None, dict]:
+        """First day the open positions (at cost) look like a portfolio: ≥ 3 effective holdings and none above 50%."""
+        sell_date = {t["id"]: ledger.tx_date(t) for t in sells}
+        sold = {}
+        for mt in fr.matches:
+            sold.setdefault(mt.lot_id, []).append((sell_date.get(mt.sell_id), mt.qty))
+        fxr = engine.fx_rates({x["currency"] for x in lots}, "EUR")
+        days = sorted({ledger.lot_date(x) for x in lots} | set(sell_date.values()))
+        first = None
+        for d in days:
+            w = {}
+            for x in lots:
+                if ledger.lot_date(x) > d:
+                    continue
+                q = float(x["quantity"]) - sum(qq for dd, qq in sold.get(x["id"], []) if dd and dd <= d)
+                if q <= ledger.EPS:
+                    continue
+                key = x["symbol"] or f"m{x['id']}"
+                w[key] = w.get(key, 0.0) + ledger.lot_cost_native(x, q) * (fxr.get(x["currency"]) or 1.0)
+            tot = sum(w.values())
+            if not tot:
+                continue
+            sh = sorted((v / tot for v in w.values()), reverse=True)
+            if first is None:
+                first = {"date": d.isoformat(), "top": max(w, key=w.get), "top_share": sh[0] * 100, "n": len(w)}
+            if 1 / sum(v * v for v in sh) >= 3 and sh[0] <= 0.5:
+                return d, first
+        return None, first or {}
+
     @app.get("/api/risk")
-    def risk_view(base: str | None = None, years: int = Query(3, ge=1, le=10)):
+    def risk_view(base: str | None = None, years: int = Query(3, ge=1, le=10), bench: str | None = None):
         base = base_or_default(base)
         lots, _sells, _divs, fr = _context(base)
         rows, tot, _ = _open_rows(base, lots, fr)
@@ -832,7 +937,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         syms = [k for k in hold if not k.startswith("manual:")]
         has_crypto = any(h["quote_type"] == "CRYPTOCURRENCY" for h in hold.values())
         px, meta = _base_prices(base, syms + (["BTC-USD"] if has_crypto and "BTC-USD" not in syms else []), hist_start)
-        b_sym, b_name, b_base, _, _ = _benchmark(base, hist_start)
+        proxies = _splice_proxies(base, px, syms, meta, hold, hist_start)
+        bench = (bench or (settings.get("risk") or {}).get("benchmark") or DEFAULT_BENCHMARK).upper()
+        b_sym, b_name, b_base, _, _ = _benchmark(base, hist_start, bench)
         allp = {**{s_: px[s_] for s_ in syms if s_ in px}, **({"__bench__": b_base} if b_base is not None else {})}
         R_all = risk.business_returns(allp)
         R = R_all[R_all.index >= pd.Timestamp(start)] if not R_all.empty else R_all
@@ -856,7 +963,20 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             return out
 
         mix = stats(rp)
-        bench = stats(m_r) if m_r is not None else None
+        bench_stats = stats(m_r) if m_r is not None else None
+        fit = []
+        try:
+            cands = list(dict.fromkeys(RISK_BENCHMARKS + [b_sym, (settings.get("benchmark") or DEFAULT_BENCHMARK).upper()]))
+            cpx, _ = _base_prices(base, cands, start - timedelta(days=10))
+            CR = risk.business_returns(cpx, start)
+            for c in cands:
+                if c in CR and len(rp):
+                    be, co = risk.beta_corr(rp, CR[c])
+                    if co is not None:
+                        fit.append({"symbol": c, "corr": co, "beta": be})
+            fit.sort(key=lambda f: -f["corr"])
+        except Exception as e:  # noqa: BLE001
+            log.info("benchmark fit failed: %s", e)
         # actual portfolio, time-weighted (contributions removed), from the performance series
         actual = None
         try:
@@ -866,8 +986,14 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 inv = pd.Series(perf["invested"], index=v.index, dtype=float)
                 prev = v.shift(1)
                 r_act = ((v - inv.diff().fillna(0)) / prev - 1)[prev > 0].replace([np.inf, -np.inf], np.nan).dropna()
-                if len(r_act) > 5:
-                    actual = {"dd": risk.drawdown(r_act), "since": perf["dates"][0]}
+                div_d, first = _diversified_since(lots, _sells, fr)
+                full = risk.drawdown(r_act) if len(r_act) > 5 else None
+                if div_d is not None:
+                    r_div = r_act[r_act.index > pd.Timestamp(div_d)]
+                    actual = {"dd": risk.drawdown(r_div) if len(r_div) > 5 else None, "since": div_d.isoformat(),
+                              "diversified": True, "start": perf["dates"][0], "first": first, "full": full}
+                elif full:
+                    actual = {"dd": full, "since": perf["dates"][0], "diversified": False, "first": first}
         except Exception as e:  # noqa: BLE001
             log.info("actual drawdown failed: %s", e)
 
@@ -894,7 +1020,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 "risk_share": rc.get(k, 0.0) * 100,
                 "max_dd": dd["max"] if dd else None, "dd_now": dd["current"] if dd else None,
                 "fx_share": _fx_share(h["symbol"] or "", h, m, cls_, base, overrides),
-                "history_from": px[k].index[0].date().isoformat() if k in px else None,
+                "history_from": (proxies[k]["until"] if k in proxies else
+                                 (px[k].index[0].date().isoformat() if k in px else None)),
+                "proxy": proxies.get(k),
             })
         top = [hh["key"] for hh in holdings if not hh["flat"]][:14]
         cm = Rh[top].corr(min_periods=40) if len(top) > 1 else None
@@ -922,7 +1050,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             for hh in holdings:
                 k = hh["key"]
                 r_ = None if hh["flat"] else risk.window_return(px.get(k), sc["start"], sc["end"])
-                est = False
+                est = bool(r_ is not None and k in proxies and proxies[k]["until"]
+                           and sc["start"] < proxies[k]["until"])
                 if r_ is None and not hh["flat"]:
                     if hh["class"] == "crypto":
                         r_ = risk.window_return(btc, sc["start"], sc["end"])
@@ -944,9 +1073,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         return {
             "base": base, "years": years, "start": start.isoformat(), "total": total,
             "benchmark": {"symbol": b_sym, "name": b_name, "ok": b_base is not None},
-            "mix": mix, "bench": bench, "actual": actual, "holdings": holdings, "corr": corr_matrix,
+            "mix": mix, "bench": bench_stats, "actual": actual, "fit": fit,
+            "global_benchmark": (settings.get("benchmark") or DEFAULT_BENCHMARK).upper(), "holdings": holdings, "corr": corr_matrix,
             "concentration": conc, "lookthrough": look, "scenarios": scen,
-            "underwater_bench": (bench or {}).get("dd", {}) and bench["dd"]["curve"],
+            "proxies": proxies,
             "as_of": time.time(),
         }
 
@@ -958,7 +1088,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         if not wts:
             raise HTTPException(400, "weights required")
         start = date.today() - timedelta(days=int(body.years * 365.25))
-        px, _ = _base_prices(base, sorted(wts), start - timedelta(days=10))
+        px, meta = _base_prices(base, sorted(wts), start - timedelta(days=10))
+        _splice_proxies(base, px, sorted(wts), meta, {}, start)
         R = risk.business_returns({k: v for k, v in px.items() if k in wts}, start)
         used = [k for k in wts if k in R.columns and R[k].notna().sum() > 60]
         if not used:
