@@ -562,3 +562,6 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .tgx-log td { font-size: 12px; }
 .tgx code { background: var(--panel-2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 @media (max-width: 900px) { .tgx-cols { grid-template-columns: 1fr; } }
+/* daily moves in Holdings */
+#p-table td.wkcell, #p-table td.typcell { line-height: 1.25; white-space: nowrap; font-size: 12px; }
+#p-table td.wkcell .sub, #p-table td.typcell .sub { font-size: 10px; }

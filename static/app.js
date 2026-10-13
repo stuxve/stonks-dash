@@ -385,8 +385,17 @@
     state.port = await api(`/api/portfolio?base=${base()}`);
     $("#demo-badge").hidden = state.port.provider !== "mock";
     drawPortfolio();
+    loadMoves();
     pf.onPortfolio();
     stamp(state.port.as_of);
+  }
+
+  // daily-move stats change slowly: refresh at most every 5 minutes (today's move is shown live from the quotes)
+  let movesAt = 0;
+  async function loadMoves() {
+    if (Date.now() - movesAt < 5 * 60e3 && state.moves) return;
+    movesAt = Date.now();
+    try { state.moves = (await api("/api/moves")).symbols || {}; drawPortfolio(); } catch (e) { console.warn(e); movesAt = 0; }
   }
 
   function pView() {
@@ -508,6 +517,9 @@
       ["Today", `<span class="${cls(p.day_pnl)}">${fmtSigned(p.day_pnl, b)}</span>`],
       ["Weight", total && p.value ? fmtPct(p.value / total * 100, 1).replace("+", "") : "—"],
     ];
+    const mv = state.moves?.[p.symbol];
+    if (mv?.week) rows.push(["This week", `<span class="up">${pc(mv.week.best.ret)}</span> best · <span class="down">${pc(mv.week.worst.ret)}</span> worst day <span class="sub">· week ${pc(mv.week.change)}</span>`]);
+    if (mv) rows.push(["Typical day", `±${(mv.median_abs * 100).toFixed(1)}% <span class="sub">· 90%: ${pc(mv.q.p5)} … ${pc(mv.q.p95)}</span>`]);
     if (p.vs_bench != null) rows.push([`Vs ${esc(state.port.benchmark?.symbol || "index")}`, `<span class="${cls(p.vs_bench)}">${fmtPP(p.vs_bench)}</span> <span class="sub">idx ${fmtPct(p.bench_ret, 1)}</span>`]);
     if (p.bought_at) rows.push([p.lots ? "Held (first buy)" : "Held", `${fmtHeld(p.bought_at)} <span class="sub">· ${fmtDate(p.bought_at)}</span>`]);
     if (p.account) rows.push([p.lots && p.account.endsWith("accounts") ? "Accounts" : "Account",
@@ -537,6 +549,8 @@
     { key: "avg_cost", label: "Avg cost", num: true },
     { key: "price", label: "Price", num: true },
     { key: "day", label: "1D", num: true },
+    { key: "wk", label: "This week", num: true, title: "Best and worst day of the last 7 days, and the change over the week" },
+    { key: "typ", label: "Typical day", num: true, title: "How much it usually moves in a day (last year): half of the days move less than this; 90% of days fall in the range below" },
     { key: "value", label: "Value", num: true },
     { key: "pnl", label: "P&L", num: true },
     { key: "pnl_pct", label: "P&L %", num: true },
@@ -547,10 +561,49 @@
   const vsCell = (p) => (p.vs_bench == null
     ? `<td class="num"><span class="sub">—</span></td>`
     : `<td class="num ${cls(p.vs_bench)}" title="Index over the same dates: ${fmtPct(p.bench_ret)}">${fmtPP(p.vs_bench)}<div class="sub">idx ${fmtPct(p.bench_ret, 1)}</div></td>`);
+  // ---- daily moves: this week's best/worst day and the usual size of a day's move (from /api/moves)
+  const pc = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(d)}%`);
+  const dShort = (iso) => (iso ? new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" }).format(new Date(iso + "T00:00:00")) : "");
+  function dayCell(p) {
+    const m = state.moves?.[p.symbol];
+    const r = p.day;
+    let unusual = "";
+    if (m && r != null) {
+      const v = r / 100;
+      if (v > m.q.p95 || v < m.q.p5) {
+        const big = v > m.q.p99 || v < m.q.p1;
+        unusual = `<div class="sub warn-t" title="${big ? "Bigger than 99% of the days in the last year" : "Outside the range of 90% of the days in the last year"} (90% of days: ${pc(m.q.p5)} … ${pc(m.q.p95)}; 98%: ${pc(m.q.p1)} … ${pc(m.q.p99)})">${big ? "rare move" : "unusual"}</div>`;
+      }
+    }
+    return `<td class="num ${cls(r)}">${fmtPct(r)}${unusual}</td>`;
+  }
+  function weekCell(p) {
+    const w = state.moves?.[p.symbol]?.week;
+    if (!w) return `<td class="num"><span class="sub">—</span></td>`;
+    const tip = `Last 7 days (${w.days} sessions)\nBest day: ${pc(w.best.ret)} on ${fmtDate(w.best.date)}\nWorst day: ${pc(w.worst.ret)} on ${fmtDate(w.worst.date)}\nWeek: ${pc(w.change)} · range ${fmtPrice(w.range.lo, p.price_currency)} – ${fmtPrice(w.range.hi, p.price_currency)}`;
+    return `<td class="num wkcell" title="${esc(tip)}"><span class="up">${pc(w.best.ret)}</span> <span class="sub">${dShort(w.best.date)}</span><br>
+      <span class="down">${pc(w.worst.ret)}</span> <span class="sub">${dShort(w.worst.date)}</span><div class="sub ${cls(w.change)}">week ${pc(w.change)}</div></td>`;
+  }
+  function typCell(p) {
+    const m = state.moves?.[p.symbol];
+    if (!m) return `<td class="num"><span class="sub">—</span></td>`;
+    const q = m.q, dy = m.days;
+    const tip = `Last year, ${m.n} sessions (moves in the asset's own currency)\n`
+      + `Half of the days move less than ±${(m.median_abs * 100).toFixed(1)}%\n`
+      + `50% of days: ${pc(q.p25)} to ${pc(q.p75)}\n90% of days: ${pc(q.p5)} to ${pc(q.p95)}\n98% of days: ${pc(q.p1)} to ${pc(q.p99)}\n`
+      + `Days up more than 3%: ${dy.up3} · down more than 3%: ${dy.dn3}\nDays up more than 5%: ${dy.up5} · down more than 5%: ${dy.dn5}\n`
+      + `Best day: ${pc(m.year_best.ret)} (${fmtDate(m.year_best.date)}) · worst day: ${pc(m.year_worst.ret)} (${fmtDate(m.year_worst.date)})\n`
+      + `Up days: ${Math.round(m.up_share * 100)}%`;
+    return `<td class="num typcell" title="${esc(tip)}">±${(m.median_abs * 100).toFixed(1)}%<div class="sub">90%: ${pc(q.p5)} … ${pc(q.p95)}</div>
+      <div class="sub">±3%+: ${dy.up3 + dy.dn3} d/yr</div></td>`;
+  }
+
   function renderTable(d, positions = d.positions) {
     const b = base();
     const total = d.totals.value || 0;
-    const rows = positions.map((p) => ({ ...p, day: p.changes?.["1D"], held: heldDays(p.bought_at), weight: total && p.value ? p.value / total * 100 : null }));
+    const mv = state.moves || {};
+    const rows = positions.map((p) => ({ ...p, day: p.changes?.["1D"], held: heldDays(p.bought_at), weight: total && p.value ? p.value / total * 100 : null,
+      wk: mv[p.symbol]?.week?.change ?? null, typ: mv[p.symbol]?.median_abs ?? null }));
     const { key, dir } = state.sort;
     rows.sort((a, c) => {
       const x = a[key], y = c[key];
@@ -560,7 +613,7 @@
       return (typeof x === "string" ? x.localeCompare(y) : x - y) * dir;
     });
     const t = $("#p-table");
-    t.tHead.innerHTML = `<tr>${COLS.map((c) => `<th class="sortable ${c.num ? "num" : ""}" data-k="${c.key}">${c.label}${c.key === key ? `<span class="arr">${dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("")}<th></th></tr>`;
+    t.tHead.innerHTML = `<tr>${COLS.map((c) => `<th class="sortable ${c.num ? "num" : ""}" data-k="${c.key}"${c.title ? ` title="${esc(c.title)}"` : ""}>${c.label}${c.key === key ? `<span class="arr">${dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("")}<th></th></tr>`;
     const open = state.expanded || (state.expanded = new Set());
     const lotRow = (l) => `<tr class="lot-row" data-id="${l.id}">
       <td class="asset"><span class="sub">↳ lot</span></td>
@@ -568,7 +621,7 @@
       ${heldCell(l.bought_at)}
       <td class="num">${fmtNum(l.quantity)}</td>
       <td class="num">${fmtPrice(l.avg_cost, l.currency)}</td>
-      <td></td><td></td>
+      <td></td><td></td><td></td><td></td>
       <td class="num">${fmtMoney(l.value, b)}</td>
       <td class="num ${cls(l.pnl)}">${fmtSigned(l.pnl, b)}</td>
       <td class="num ${cls(l.pnl_pct)}">${fmtPct(l.pnl_pct)}</td>
@@ -582,7 +635,7 @@
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
       <td class="num">${p.ok ? fmtPrice(p.price, p.price_currency) : '<span class="down">n/a</span>'}</td>
-      <td class="num ${cls(p.day)}">${fmtPct(p.day)}</td>
+      ${dayCell(p)}${weekCell(p)}${typCell(p)}
       <td class="num">${fmtMoney(p.value, b)}</td>
       <td class="num ${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</td>
       <td class="num ${cls(p.pnl_pct)}">${fmtPct(p.pnl_pct)}</td>
@@ -593,7 +646,7 @@
     </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map(lotRow).join("") : "")).join("");
     const tt = d.totals;
     t.tFoot.innerHTML = rows.length ? `<tr><td>Total</td><td></td><td></td><td></td><td></td><td></td>
-      <td class="num ${cls(tt.day_pct)}">${fmtPct(tt.day_pct)}</td><td class="num">${fmtMoney(tt.value, b)}</td>
+      <td class="num ${cls(tt.day_pct)}">${fmtPct(tt.day_pct)}</td><td></td><td></td><td class="num">${fmtMoney(tt.value, b)}</td>
       <td class="num ${cls(tt.pnl)}">${fmtSigned(tt.pnl, b)}</td><td class="num ${cls(tt.pnl_pct)}">${fmtPct(tt.pnl_pct)}</td>
       <td class="num ${cls(tt.vs_bench)}">${tt.vs_bench == null ? "—" : fmtPP(tt.vs_bench)}</td><td class="num">100%</td><td></td></tr>` : "";
   }

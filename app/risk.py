@@ -145,3 +145,43 @@ def window_return(s: pd.Series | None, start: str, end: str) -> float | None:
     if pa.empty or pb.empty or not pa.iloc[-1]:
         return None
     return float(pb.iloc[-1] / pa.iloc[-1] - 1)
+
+
+def daily_moves(s: pd.Series) -> dict | None:
+    """How much a price moves in a day: last-year distribution of daily returns, records, this week's best/worst day.
+    Works on the asset's own currency (its moves, not your FX). `s` should be cleaned of bad ticks."""
+    s = s.dropna()
+    s = s[s > 0]
+    if len(s) < 30:
+        return None
+    r = s.pct_change().dropna()
+    end = r.index[-1]
+    yr = r[r.index > end - pd.Timedelta(days=365)]
+    if len(yr) < 20:
+        return None
+    q = yr.quantile([0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99])
+    wk = r[r.index > end - pd.Timedelta(days=7)]
+    base_wk = s[s.index <= end - pd.Timedelta(days=7)]
+    today = float(r.iloc[-1])
+    out = {
+        "n": int(len(yr)),
+        "q": {k: float(v) for k, v in zip(("p1", "p5", "p25", "p50", "p75", "p95", "p99"), q.to_numpy())},
+        "median_abs": float(yr.abs().median()),
+        "sd": float(yr.std()),
+        "up_share": float((yr > 0).mean()),
+        "days": {"up3": int((yr > 0.03).sum()), "dn3": int((yr < -0.03).sum()),
+                 "up5": int((yr > 0.05).sum()), "dn5": int((yr < -0.05).sum())},
+        "year_best": {"ret": float(yr.max()), "date": yr.idxmax().date().isoformat()},
+        "year_worst": {"ret": float(yr.min()), "date": yr.idxmin().date().isoformat()},
+        "today": {"ret": today, "date": end.date().isoformat(),
+                  "pctile": float((yr < today).mean() * 100)},
+        "week": None,
+    }
+    if len(wk):
+        out["week"] = {"best": {"ret": float(wk.max()), "date": wk.idxmax().date().isoformat()},
+                       "worst": {"ret": float(wk.min()), "date": wk.idxmin().date().isoformat()},
+                       "change": float(s.iloc[-1] / base_wk.iloc[-1] - 1) if len(base_wk) else None,
+                       "days": int(len(wk)),
+                       "range": {"hi": float(s[s.index > end - pd.Timedelta(days=7)].max()),
+                                 "lo": float(s[s.index > end - pd.Timedelta(days=7)].min())}}
+    return out

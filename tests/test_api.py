@@ -516,3 +516,19 @@ def test_breakdown_direction():
          "breakout": {"level": 105.0, "lo": 104.0, "hi": 106.0, "touches": 3, "since": "2026-10-01"}, "breakdown": None}
     r2 = alerts.eval_lot({**up, "target_price": 150.0}, {"EUR": 1.0}, L, None, 5, {})
     assert r2["status"] == "brk" and "Broke out ↑ upside" in alerts.lot_message(r2, "EUR", None)
+
+
+def test_daily_moves(client):
+    import numpy as np
+    from app import risk
+    idx = pd.bdate_range("2025-01-01", periods=300)
+    r = np.random.default_rng(5).normal(0, 0.01, 300)
+    r[-2], r[-4] = 0.06, -0.045                       # this week: a big up day and a big down day
+    s = pd.Series(100 * np.cumprod(1 + r), index=idx)
+    m = risk.daily_moves(s)
+    assert m["week"]["best"]["ret"] == pytest.approx(0.06, abs=1e-9) and m["week"]["worst"]["ret"] == pytest.approx(-0.045, abs=1e-9)
+    assert m["week"]["best"]["date"] == idx[-2].date().isoformat()
+    assert 0.004 < m["median_abs"] < 0.01 and m["q"]["p5"] < 0 < m["q"]["p95"]
+    assert m["days"]["up5"] >= 1 and m["year_best"]["ret"] == pytest.approx(0.06, abs=1e-9)
+    d = client.get("/api/moves").json()["symbols"]
+    assert d and all("week" in v and "q" in v for v in d.values())

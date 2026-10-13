@@ -1374,6 +1374,26 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         sent = monitor.check(force=True)
         return {"sent": len(sent), **_alerts_status()}
 
+    # ------------------------------------------------------------------ daily moves (Holdings)
+    @app.get("/api/moves")
+    def moves_view():
+        """Per held symbol: typical daily move (last year), records, and this week's best / worst day."""
+        lots, _sells, _divs, fr = _context("EUR")
+        syms = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
+                       and x["symbol"] and x["manual_price"] is None})
+        if not syms:
+            return {"symbols": {}}
+        hist = engine.history(syms, date.today() - timedelta(days=400))
+        out = {}
+        for s_ in syms:
+            ser = hist.get(s_)
+            if ser is None or ser.empty:
+                continue
+            m = risk.daily_moves(levels.clean(ser))
+            if m:
+                out[s_] = m
+        return {"symbols": out, "as_of": time.time()}
+
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():
