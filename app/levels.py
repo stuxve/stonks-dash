@@ -165,6 +165,27 @@ def breakout(s: pd.Series, all_zones: list[dict], atr: float | None, recent: int
     return {**best, "since": crossed.index[0].date().isoformat() if len(crossed) else None}
 
 
+def breakdown(s: pd.Series, all_zones: list[dict], atr: float | None, recent: int = 20, confirm: int = 2) -> dict | None:
+    """Downside break: a support (held the price 2+ times) that the price was above within `recent` bars and has now
+    closed below, by more than one ATR, for `confirm` bars. Returns the nearest such level above the price."""
+    s = s.dropna()
+    if not atr or len(s) < recent + confirm + 1:
+        return None
+    lastn = s.iloc[-confirm:]
+    before = s.iloc[-(recent + confirm):-confirm]
+    best = None
+    for z in all_zones:
+        if z["lows"] < 1 or z["touches"] < 2:
+            continue
+        if (lastn < z["lo"] - atr).all() and (before > z["hi"]).any():
+            if best is None or z["level"] < best["level"]:
+                best = z
+    if not best:
+        return None
+    crossed = s[(s.index >= before.index[0]) & (s < best["lo"])]
+    return {**best, "since": crossed.index[0].date().isoformat() if len(crossed) else None}
+
+
 def hit_probability(price: float, level: float, vol_y: float | None, years: float) -> float | None:
     """Chance the price TOUCHES `level` within `years`, for a driftless log-random walk (reflection principle)."""
     if not (price and level and vol_y and years > 0):
@@ -195,6 +216,7 @@ def analyze(s: pd.Series, price: float | None = None) -> dict | None:
         "price": px, "vol": v,
         "resistance": above, "support": below,
         "breakout": breakout(s, zs, v and v["atr"]),
+        "breakdown": breakdown(s, zs, v and v["atr"]),
         "last_closes": [float(x) for x in s.iloc[-3:]],
         "history_from": s.index[0].date().isoformat(),
         "series": s,

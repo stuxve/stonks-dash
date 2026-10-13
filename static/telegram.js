@@ -11,7 +11,7 @@ window.StonksTelegram = function (ctx) {
     const s = Math.round(Date.now() / 1000 - t);
     return s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleString();
   };
-  const EV = [["tp", "Target hit"], ["sl", "Stop hit"], ["brk", "Breakout (suggests raising the stop)"], ["near", "Near target / near stop"],
+  const EV = [["tp", "Target hit"], ["sl", "Stop hit"], ["brk", "Upside break ↑ (suggests raising the stop)"], ["brkdn", "Downside break ↓ (a support gave way)"], ["near", "Near target / near stop"],
     ["earnings", "Earnings coming up"], ["unmonitored", "Also for buys without any exit set"]];
 
   async function load() {

@@ -489,8 +489,30 @@ def test_breakout_message_is_explicit():
     r = alerts.eval_lot(p, fx, L, None, 5, {})
     assert r["status"] == "brk" and alerts.title_of(r) == "Rebound"               # below the buy price
     msg = alerts.lot_message(r, "EUR", None, now=datetime(2026, 10, 13, 10, 28))
-    assert "Rebound — ASML.AS" in msg and "1.513,90 €" in msg and "touched 2×" in msg
+    assert "Rebound ↑ upside — ASML.AS" in msg and "Upside break" in msg and "1.513,90 €" in msg and "touched 2×" in msg
     assert "1.350,60 €" in msg and "→ <b>1.496,90 €</b>" in msg                    # from the current stop to the new one
     assert "2.057,34 € (unchanged)" in msg and "doesn't lock a gain" in msg and "10:28" in msg
     r2 = alerts.eval_lot({**p, "price": 1700.0, "pnl_pct": 4.2}, fx, dict(L, last_closes=[1690, 1700]), None, 5, {})
     assert alerts.title_of(r2) == "Broke out"
+
+
+def test_breakdown_direction():
+    import numpy as np
+    from datetime import datetime
+    from app import alerts, levels
+    # support at ~95 held many times, then a fall through it with 2 confirming closes
+    c = np.r_[100 + 5 * np.sin(np.arange(400) / 8), np.linspace(100, 88, 15), [87.5, 87.0, 86.6]]
+    a = levels.analyze(pd.Series(c, index=pd.bdate_range("2024-01-01", periods=len(c))))
+    bd = a["breakdown"]
+    assert bd and 94 < bd["level"] < 96 and a["breakout"] is None
+    p = {"id": 1, "symbol": "X", "currency": "EUR", "price_currency": "EUR", "avg_cost": 90.0, "ok": True, "price": 86.6,
+         "quantity": 10, "cost": 900.0, "pnl": -34, "pnl_pct": -3.8, "stop_price": 70.0, "target_price": 110.0}
+    r = alerts.eval_lot(p, {"EUR": 1.0}, a, None, 5, {})
+    assert r["status"] == "brkdn" and r["sugg"]["dir"] == "down" and alerts.direction_of(r) == "↓ downside"
+    msg = alerts.lot_message(r, "EUR", None, now=datetime(2026, 10, 13, 12, 0))
+    assert "Broke down ↓ downside" in msg and "Downside break" in msg and "support" in msg
+    up = {**p, "price": 120.0, "pnl_pct": 33.0}
+    L = {"vol": {"atr": 1.0}, "resistance": [], "support": [], "last_closes": [119, 120],
+         "breakout": {"level": 105.0, "lo": 104.0, "hi": 106.0, "touches": 3, "since": "2026-10-01"}, "breakdown": None}
+    r2 = alerts.eval_lot({**up, "target_price": 150.0}, {"EUR": 1.0}, L, None, 5, {})
+    assert r2["status"] == "brk" and "Broke out ↑ upside" in alerts.lot_message(r2, "EUR", None)

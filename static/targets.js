@@ -18,7 +18,8 @@ window.StonksTargets = function (ctx) {
   const trailUi = {};                                   // per-lot trailing mode chosen before a value exists
 
   const STATUS = {
-    brk: { o: -1, label: "Broke out", cls: "st-brk", tip: "Closed above a resistance (or your target) for 2+ days by more than a typical daily move. Raising the stop keeps the gain and lets it run." },
+    brk: { o: -1, label: "Broke out ↑", cls: "st-brk", tip: "Upside break: closed above a resistance (or your target) for 2+ days by more than a typical daily move. Raising the stop keeps the gain and lets it run." },
+    brkdn: { o: 1.5, label: "Broke down ↓", cls: "st-down", tip: "Downside break: closed below a support (held the price 2+ times) for 2+ days by more than a typical daily move. Old support often acts as resistance on the way back up." },
     tp: { o: 0, label: "Target hit", cls: "st-open", tip: "The price is at or above your target." },
     sl: { o: 1, label: "Stop hit", cls: "st-down", tip: "The price is at or below your stop." },
     "near-tp": { o: 2, label: "Near target", cls: "st-ext", tip: "Within the 'near' range below your target." },
@@ -27,7 +28,7 @@ window.StonksTargets = function (ctx) {
     nodata: { o: 5, label: "No price", cls: "st-closed", tip: "No live price for this asset right now." },
     none: { o: 6, label: "No exit set", cls: "st-none", tip: "Set a target, a stop or a trailing stop to monitor this buy." },
   };
-  const ALERT = new Set(["tp", "sl", "brk"]);
+  const ALERT = new Set(["tp", "sl", "brk", "brkdn"]);
 
   // ------------------------------------------------------------------ helpers
   const pctTxt = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(d)}%`);
@@ -83,16 +84,26 @@ window.StonksTargets = function (ctx) {
       const closes = (L.last_closes || []).slice(-2);
       if (tp != null && price >= tp && closes.length === 2 && closes.every((c) => c >= tp + atr)) {
         const ns = tp - 0.5 * atr;
-        if (stop == null || ns > stop + 0.1 * atr) sugg = { stop: ns, target: nextZone ? nextZone.level : null, why: `closed above your target ${fmtPrice(tp, pccy)} for 2 days` };
+        if (stop == null || ns > stop + 0.1 * atr) sugg = { dir: "up", stop: ns, target: nextZone ? nextZone.level : null, why: `closed above your target ${fmtPrice(tp, pccy)} for 2 days` };
       } else if (L.breakout && price > L.breakout.hi) {
         const ns = L.breakout.lo - 0.5 * atr;
         if (ns < price && (stop == null || ns > stop + 0.1 * atr)) {
-          sugg = { stop: ns, target: tp != null && tp > price ? tp : (nextZone ? nextZone.level : null),
+          sugg = { dir: "up", stop: ns, target: tp != null && tp > price ? tp : (nextZone ? nextZone.level : null),
             why: `broke the ${fmtPrice(L.breakout.level, pccy)} resistance (${L.breakout.touches}× touched)${L.breakout.since ? ` on ${fmtDate(L.breakout.since)}` : ""}` };
         }
       }
       if (sugg && sugg.target != null && sugg.target <= sugg.stop) sugg.target = null;
       if (sugg) st = "brk";
+      // downside: a support gave way — warn, show the next support, offer a tighter stop under it
+      const bd = L.breakdown;
+      if (!sugg && st !== "tp" && bd && price < bd.lo) {
+        const nsup = (L.support || []).find((z) => z.level < price);
+        const ns = nsup ? nsup.lo - 0.5 * atr : null;
+        const tighter = ns != null && ns < price && (stop == null || ns > stop + 0.1 * atr) ? ns : null;
+        sugg = { dir: "down", stop: tighter, target: tp, next: nsup ? nsup.level : null, level: bd.level,
+          why: `fell through the ${fmtPrice(bd.level, pccy)} support (${bd.touches}× touched)${bd.since ? ` on ${fmtDate(bd.since)}` : ""}` };
+        st = "brkdn";
+      }
     }
 
     const fxp = fx[pccy] || 0;
@@ -245,6 +256,7 @@ window.StonksTargets = function (ctx) {
     const tgt = g.target == null ? "Target: none (no resistance above)"
       : r.tp != null && Math.abs(g.target - r.tp) < 1e-6 ? `Target: ${fmtPrice(g.target, c)} (unchanged)`
       : `Target: ${r.tp != null ? fmtPrice(r.tp, c) : "none"} → ${fmtPrice(g.target, c)}`;
+    if (g.dir === "down") return `${stop}\nNext support: ${g.next != null ? fmtPrice(g.next, c) : "none below"} · target unchanged`;
     return `${stop}\n${tgt}`;
   }
 
@@ -255,7 +267,7 @@ window.StonksTargets = function (ctx) {
     const pad = (hi - lo) * 0.08 || hi * 0.05;
     lo -= pad; hi += pad;
     const x = (v) => ((v - lo) / (hi - lo) * 100).toFixed(2);
-    const zs = [...(r.L?.resistance || []), ...(r.L?.support || []), ...(r.L?.breakout ? [r.L.breakout] : [])].filter((z) => z.hi > lo && z.lo < hi);
+    const zs = [...(r.L?.resistance || []), ...(r.L?.support || []), ...(r.L?.breakout ? [r.L.breakout] : []), ...(r.L?.breakdown ? [r.L.breakdown] : [])].filter((z) => z.hi > lo && z.lo < hi);
     const fill = r.price != null ? `<i class="fill ${r.price >= r.buy ? "up" : "down"}" style="left:${x(Math.min(r.buy, r.price))}%;width:${(x(Math.max(r.buy, r.price)) - x(Math.min(r.buy, r.price))).toFixed(2)}%"></i>` : "";
     return `<div class="rb" data-id="${r.p.id}">${zs.map((z) => `<i class="zone" style="left:${x(Math.max(z.lo, lo))}%;width:${Math.max(0.8, x(Math.min(z.hi, hi)) - x(Math.max(z.lo, lo))).toFixed(2)}%"></i>`).join("")}${fill}
       ${r.stop != null ? `<i class="m stop ${r.stopSrc}" style="left:${x(r.stop)}%"></i>` : ""}
@@ -310,7 +322,7 @@ window.StonksTargets = function (ctx) {
       const fifo = r.fifo > 0 ? `<span class="pill warn" title="Sales are matched oldest buy first (FIFO): selling now uses the buy of ${fmtDate(r.fifoFirst.p.bought_at) || "an older date"} before this one.">FIFO ${r.fifo + 1}/${r.fifoN}</span>` : "";
       const vol = r.L?.vol;
       if (r.st === "brk" && r.price != null && r.price < r.buy) {
-        s = { ...s, label: "Rebound", tip: "Closed above a resistance for 2+ days by more than a typical daily move, but it's still below your buy price: raising the stop limits the loss, it doesn't lock a gain." };
+        s = { ...s, label: "Rebound ↑", tip: "Closed above a resistance for 2+ days by more than a typical daily move, but it's still below your buy price: raising the stop limits the loss, it doesn't lock a gain." };
       }
       return `<tr data-id="${p.id}" class="st-row-${r.st}">
         <td class="asset"><b>${esc(p.symbol || p.name || "—")}</b>${fifo}${earnPill}<div class="sub">${esc(p.display_name || "")}${p.account ? ` · ${esc(p.account)}` : ""}</div></td>
@@ -328,7 +340,7 @@ window.StonksTargets = function (ctx) {
         <td class="num ${cls(r.atTp)}">${r.atTp != null ? fmtSigned(r.atTp, b) : "—"}<div class="sub">${r.atTpPct != null ? pctTxt(r.atTpPct) : ""}</div></td>
         <td><span class="st ${s.cls}" title="${esc(r.sugg ? `${s.tip} It ${r.sugg.why}.` : s.tip)}">${s.label}</span></td>
         <td><div class="row-actions">
-          ${r.sugg ? `<button class="raise" title="${esc(raiseText(r))}">Raise stop</button>` : ""}
+          ${r.sugg && r.sugg.stop != null ? `<button class="raise" title="${esc(raiseText(r))}">${r.sugg.dir === "down" ? "Tighten stop" : "Raise stop"}</button>` : ""}
           <button class="sell" title="Record the sale of this buy">Sell</button>
           <button class="copy" title="Use these exits for every buy of ${esc(p.symbol || "")}">All buys</button>
           <button class="clear" title="Remove the exits of this buy">Clear</button></div></td></tr>`;
@@ -344,7 +356,7 @@ window.StonksTargets = function (ctx) {
     const kpi = (k, v, d = "") => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
     const set = all.filter((r) => r.has);
     const n = (st) => all.filter((r) => r.st === st).length;
-    const hitTp = n("tp"), hitSl = n("sl"), brk = n("brk"), nearN = n("near-tp") + n("near-sl");
+    const hitTp = n("tp"), hitSl = n("sl"), brkUp = n("brk"), brkDn = n("brkdn"), brk = brkUp + brkDn, nearN = n("near-tp") + n("near-sl");
     const withTp = all.filter((r) => r.atTp != null), withSl = all.filter((r) => r.atSl != null);
     const sum = (a, f) => a.reduce((s, r) => s + (f(r) || 0), 0);
     const tpNow = sum(withTp, (r) => r.p.pnl), slNow = sum(withSl, (r) => r.p.pnl);
@@ -354,7 +366,7 @@ window.StonksTargets = function (ctx) {
     $("#tg-kpis").innerHTML = [
       kpi("Buys monitored", `${set.length} / ${all.length}`, `<span class="muted-t">with a target, stop or trailing stop</span>`),
       kpi("Alerts", `<span class="${hitTp + hitSl + brk ? "warn-t" : ""}">${hitTp + hitSl + brk}</span>`,
-        `<span class="up">${hitTp} target</span> · <span class="down">${hitSl} stop</span> · <span class="ext-t">${brk} breakout</span> · ${nearN} near`),
+        `<span class="up">${hitTp} target</span> · <span class="down">${hitSl} stop</span> · <span class="ext-t">${brkUp} break ↑</span> · <span class="down">${brkDn} break ↓</span> · ${nearN} near`),
       kpi("If every target is hit", withTp.length ? `<span class="${cls(tpSum)}">${fmtSigned(tpSum, b)}</span>` : "—",
         withTp.length ? `<span class="${cls(tpSum - tpNow)}">${fmtSigned(tpSum - tpNow, b)}</span> vs now · ${withTp.length} buys` : ""),
       kpi("If every stop is hit", withSl.length ? `<span class="${cls(slSum)}">${fmtSigned(slSum, b)}</span>` : "—",
@@ -428,7 +440,7 @@ window.StonksTargets = function (ctx) {
       }
       return render();
     }
-    if (e.target.closest(".raise") && r.sugg) {
+    if (e.target.closest(".raise") && r.sugg && r.sugg.stop != null) {
       const g = r.sugg;
       if (!confirm(`${p.symbol}: ${g.why}.\n\n${raiseText(r)}${r.price < r.buy ? "\n\nStill below your buy price: the higher stop limits the loss, it doesn't lock a gain." : ""}\n\nApply?`)) return;
       // set the target first when it goes up, so the stop never ends above it on the server
