@@ -120,11 +120,13 @@ def eval_lot(p: dict, fx: dict, L: dict | None, pk: dict | None, near: float, fe
         if tp is not None and price >= tp and len(closes) == 2 and all(c >= tp + atr for c in closes):
             ns = tp - 0.5 * atr
             if stop is None or ns > stop + 0.1 * atr:
-                sugg = {"stop": ns, "target": nxt["level"] if nxt else None, "why": f"closed above your target {fmt_num(tp)} for 2 days"}
+                sugg = {"stop": ns, "target": nxt["level"] if nxt else None, "level": tp, "kind": "target",
+                        "why": f"closed above your target {fmt_num(tp)} for 2 days"}
         elif bk and price > bk["hi"]:
             ns = bk["lo"] - 0.5 * atr
             if ns < price and (stop is None or ns > stop + 0.1 * atr):
                 sugg = {"stop": ns, "target": tp if tp is not None and tp > price else (nxt["level"] if nxt else None),
+                        "level": bk["level"], "touches": bk["touches"], "since": bk.get("since"), "kind": "zone",
                         "why": f"broke the {fmt_num(bk['level'])} resistance ({bk['touches']}× touched)"}
         if sugg and sugg["target"] is not None and sugg["target"] <= sugg["stop"]:
             sugg["target"] = None
@@ -155,12 +157,21 @@ EMO = {"tp": "✅", "sl": "🛑", "brk": "🚀", "near-tp": "🎯", "near-sl": "
 TITLE = {"tp": "Target hit", "sl": "Stop hit", "brk": "Broke out", "near-tp": "Near target", "near-sl": "Near stop"}
 
 
-def lot_message(r: dict, base: str, app_url: str | None) -> str:
+def title_of(r: dict) -> str:
+    """'Broke out' reads as good news; below your buy price it's a rebound that only lets you cut the loss."""
+    if r["status"] == "brk" and r.get("price") is not None and r["price"] < r["buy"]:
+        return "Rebound"
+    return TITLE[r["status"]]
+
+
+def lot_message(r: dict, base: str, app_url: str | None, now: datetime | None = None) -> str:
     e = html.escape
     c = r["ccy"]
+    now = now or datetime.now(ZoneInfo(os.getenv("TZ") or "Europe/Madrid"))
     when = f" · bought {r['bought_at']}" if r.get("bought_at") else ""
-    lines = [f"{EMO[r['status']]} <b>{TITLE[r['status']]} — {e(r['symbol'] or r['name'])}</b>",
-             f"Price <b>{fmt_money(r['price'], c)}</b> ({fmt_pct(r['pnl_pct'])} vs buy {fmt_money(r['buy'], c)})"]
+    emo = "↗️" if title_of(r) == "Rebound" else EMO[r["status"]]
+    lines = [f"{emo} <b>{title_of(r)} — {e(r['symbol'] or r['name'])}</b>",
+             f"Price <b>{fmt_money(r['price'], c)}</b> ({fmt_pct(r['pnl_pct'])} vs your buy {fmt_money(r['buy'], c)}) · {now:%H:%M}"]
     src = {"fixed": "stop", "trail": "trailing stop", "atr": "×ATR stop"}.get(r.get("stop_src") or "", "stop")
     if r["status"] in ("tp", "near-tp") and r["tp"] is not None:
         lines.append(f"Target {fmt_money(r['tp'], c)}" + (f" · P/L there {fmt_signed(r['at_tp'], base)}" if r.get("at_tp") is not None else ""))
@@ -168,9 +179,23 @@ def lot_message(r: dict, base: str, app_url: str | None) -> str:
         lines.append(f"{src.capitalize()} {fmt_money(r['stop'], c)}" + (f" · P/L there {fmt_signed(r['at_sl'], base)}" if r.get("at_sl") is not None else ""))
     if r["status"] == "brk" and r.get("sugg"):
         g = r["sugg"]
-        lines.append(f"It {e(g['why'])}.")
-        lines.append(f"Suggested: stop → <b>{fmt_money(g['stop'], c)}</b>, target → "
-                     + (f"<b>{fmt_money(g['target'], c)}</b>" if g.get("target") is not None else "none (no resistance above)"))
+        if g.get("kind") == "zone":
+            since = f", since {g['since']}" if g.get("since") else ""
+            lines.append(f"Closed 2 days above the <b>{fmt_money(g['level'], c)}</b> resistance (touched {g.get('touches')}×{since}).")
+        else:
+            lines.append(f"Closed 2 days above your target <b>{fmt_money(g['level'], c)}</b>.")
+        vs = lambda px: fmt_pct((px / r["buy"] - 1) * 100) + " vs buy" if px is not None and r["buy"] else ""  # noqa: E731
+        cur = f"{fmt_money(r['stop'], c)} ({vs(r['stop'])})" if r.get("stop") is not None else "none"
+        lines.append(f"Stop: {cur} → <b>{fmt_money(g['stop'], c)}</b> ({vs(g['stop'])}) suggested")
+        if g.get("target") is None:
+            lines.append("Target: none above (no resistance left) — let the stop do the work")
+        elif r.get("tp") is not None and abs(g["target"] - r["tp"]) < 1e-6:
+            lines.append(f"Target: {fmt_money(g['target'], c)} (unchanged)")
+        else:
+            lines.append(f"Target: {fmt_money(r['tp'], c) if r.get('tp') is not None else 'none'} → <b>{fmt_money(g['target'], c)}</b> (next resistance)")
+        if r["price"] < r["buy"]:
+            lines.append("<i>Still below your buy price: the higher stop limits the loss, it doesn't lock a gain.</i>")
+        lines.append("Apply it with <b>Raise stop</b> in Sell targets.")
     lines.append(f"<i>{e(r.get('account') or '')}{when} · {fmt_num(r['quantity'], 4)} u. · P/L now {fmt_signed(r.get('pnl'), base)}</i>")
     if app_url:
         lines.append(f'<a href="{e(app_url.rstrip("/"))}/#portfolio">Open Sell targets</a>')
@@ -405,7 +430,7 @@ class Monitor:
             else:
                 order = ["brk", "tp", "sl", "near-tp", "near-sl"]
                 act.sort(key=lambda r: order.index(r["status"]))
-                lines = [f"{EMO[r['status']]} <b>{html.escape(r['symbol'] or r['name'])}</b> {TITLE[r['status']].lower()} · "
+                lines = [f"{EMO[r['status']]} <b>{html.escape(r['symbol'] or r['name'])}</b> {title_of(r).lower()} · "
                          f"{fmt_money(r['price'], r['ccy'])} ({fmt_pct(r['pnl_pct'])})" for r in act]
                 self.tg.send(linked, "\n".join(lines))
         elif cmd == "/summary":

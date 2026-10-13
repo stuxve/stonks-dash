@@ -154,7 +154,7 @@ def breakout(s: pd.Series, all_zones: list[dict], atr: float | None, recent: int
     before = s.iloc[-(recent + confirm):-confirm]
     best = None
     for z in all_zones:
-        if z["highs"] < 1:          # only a level that capped the price before is a resistance to break
+        if z["highs"] < 1 or z["touches"] < 2:   # a level that capped the price before, more than once
             continue
         if (lastn > z["hi"] + atr).all() and (before < z["lo"]).any():
             if best is None or z["level"] > best["level"]:

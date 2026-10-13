@@ -475,3 +475,22 @@ def test_telegram_alerts_flow(client, monkeypatch):
 def json_dumps(x):
     import json
     return json.dumps(x)
+
+
+def test_breakout_message_is_explicit():
+    from datetime import datetime
+    from app import alerts
+    fx = {"EUR": 1.0}
+    p = {"id": 9, "symbol": "ASML.AS", "currency": "EUR", "price_currency": "EUR", "avg_cost": 1631.8, "ok": True,
+         "price": 1545.0, "quantity": 0.0944, "cost": 154.0, "pnl": -8.19, "pnl_pct": -5.3, "account": "Trade Republic",
+         "bought_at": "2026-10-09", "stop_price": 1350.6, "target_price": 2057.34}
+    L = {"vol": {"atr": 20.0}, "resistance": [{"level": 1621.2}], "last_closes": [1540, 1545],
+         "breakout": {"level": 1513.9, "lo": 1506.9, "hi": 1515.0, "touches": 2, "since": "2026-10-10"}}
+    r = alerts.eval_lot(p, fx, L, None, 5, {})
+    assert r["status"] == "brk" and alerts.title_of(r) == "Rebound"               # below the buy price
+    msg = alerts.lot_message(r, "EUR", None, now=datetime(2026, 10, 13, 10, 28))
+    assert "Rebound — ASML.AS" in msg and "1.513,90 €" in msg and "touched 2×" in msg
+    assert "1.350,60 €" in msg and "→ <b>1.496,90 €</b>" in msg                    # from the current stop to the new one
+    assert "2.057,34 € (unchanged)" in msg and "doesn't lock a gain" in msg and "10:28" in msg
+    r2 = alerts.eval_lot({**p, "price": 1700.0, "pnl_pct": 4.2}, fx, dict(L, last_closes=[1690, 1700]), None, 5, {})
+    assert alerts.title_of(r2) == "Broke out"

@@ -1283,7 +1283,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                  f"total {alerts.fmt_signed(t.get('pnl'), base)} ({alerts.fmt_pct(t.get('pnl_pct'))})"]
         if act:
             lines.append("")
-            lines += [f"{alerts.EMO[r['status']]} {alerts.html.escape(r['symbol'] or '')} {alerts.TITLE[r['status']].lower()} · "
+            lines += [f"{alerts.EMO[r['status']]} {alerts.html.escape(r['symbol'] or '')} {alerts.title_of(r).lower()} · "
                       f"{alerts.fmt_money(r['price'], r['ccy'])}" for r in act]
         if soon:
             lines.append("")

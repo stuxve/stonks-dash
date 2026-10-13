@@ -193,7 +193,7 @@ window.StonksTargets = function (ctx) {
       const v = round(z.lo - 0.5 * r.atr);
       const why = flip ? `Old resistance broken${z.since ? ` on ${fmtDate(z.since)}` : ""} — now acting as support. Half a typical daily move below it. `
         : "Half a typical daily move below the support. ";
-      return `<button class="lvc s ${flip ? "flip" : ""}" data-set="stop_price" data-v="${v}" title="${esc(why + zoneTitle(r, z, flip ? "Broken resistance" : "Support"))}">${fmtPrice(v, r.pccy)}<span>${flip ? "↑ broke" : `${z.touches}×`}</span></button>`;
+      return `<button class="lvc s ${flip ? "flip" : ""}" data-set="stop_price" data-v="${v}" title="${esc(why + zoneTitle(r, z, flip ? "Broken resistance" : "Support"))}">${fmtPrice(v, r.pccy)}<span>${flip ? `under ↑${fmtNum(z.level, 2)}` : `${z.touches}×`}</span></button>`;
     };
     const html = (bk ? [chip(bk, true)] : []).concat(zs.map((z) => chip(z, false)));
     return html.length ? `<div class="lv">${html.join("")}</div>` : "";
@@ -235,6 +235,17 @@ window.StonksTargets = function (ctx) {
     const tip = `${a.n || "?"} analysts · low ${fmtPrice(a.low, r.pccy)} · median ${fmtPrice(a.median, r.pccy)} · high ${fmtPrice(a.high, r.pccy)}${a.rec ? ` · ${a.rec.replace("_", " ")}` : ""}`;
     return `<button class="lvc a" data-set="target_price" data-v="${round(a.mean)}" title="${esc(tip)} — click to use as target">${fmtPrice(a.mean, r.pccy)}</button>
       <div class="sub ${cls(a.upside)}">${pctTxt(a.upside)} · ${a.n || "?"} an.</div>${tags.join("")}`;
+  }
+
+  // "Stop 1.350,60 € → 1.496,91 € · target 2.057,34 € (unchanged)" — same wording as the Telegram alert
+  function raiseText(r) {
+    const g = r.sugg, c = r.pccy;
+    const vs = (px) => (px != null && r.buy ? ` (${pctTxt(vsBuy(px, r.buy))} vs buy)` : "");
+    const stop = `Stop: ${r.stop != null ? fmtPrice(r.stop, c) + vs(r.stop) : "none"} → ${fmtPrice(g.stop, c)}${vs(g.stop)}`;
+    const tgt = g.target == null ? "Target: none (no resistance above)"
+      : r.tp != null && Math.abs(g.target - r.tp) < 1e-6 ? `Target: ${fmtPrice(g.target, c)} (unchanged)`
+      : `Target: ${r.tp != null ? fmtPrice(r.tp, c) : "none"} → ${fmtPrice(g.target, c)}`;
+    return `${stop}\n${tgt}`;
   }
 
   function rangeBar(r) {
@@ -285,7 +296,8 @@ window.StonksTargets = function (ctx) {
       <th class="num">To target <span class="sub">chance in ${hz()}</span></th>
       <th class="num" title="Profit or loss if sold at the target, after the account's sell fee">P/L at target</th><th>Status</th><th></th></tr>`;
     t.tBodies[0].innerHTML = rows.length ? rows.map((r) => {
-      const p = r.p, s = STATUS[r.st];
+      const p = r.p;
+      let s = STATUS[r.st];
       const other = (f) => {
         const v = f === "target_price" ? r.tp : p.stop_price;
         if (v == null) return "";
@@ -297,6 +309,9 @@ window.StonksTargets = function (ctx) {
       const earnPill = earnSoon ? `<span class="pill ${earnRisky ? "warn" : "ext"}" title="Reports earnings ${ev.days === 0 ? "today" : ev.days === 1 ? "tomorrow" : `in ${ev.days} days`} (${fmtDate(ev.next)}${ev.next_to ? ", estimated" : ""}).${ev.typical_move != null ? ` Typical move after a report: ±${ev.typical_move.toFixed(1)}%.` : ""}${earnRisky ? ` Your stop is only ${Math.abs(r.toSl).toFixed(1)}% away — inside that range.` : ""}">earnings ${ev.days === 0 ? "today" : `${ev.days}d`}</span>` : "";
       const fifo = r.fifo > 0 ? `<span class="pill warn" title="Sales are matched oldest buy first (FIFO): selling now uses the buy of ${fmtDate(r.fifoFirst.p.bought_at) || "an older date"} before this one.">FIFO ${r.fifo + 1}/${r.fifoN}</span>` : "";
       const vol = r.L?.vol;
+      if (r.st === "brk" && r.price != null && r.price < r.buy) {
+        s = { ...s, label: "Rebound", tip: "Closed above a resistance for 2+ days by more than a typical daily move, but it's still below your buy price: raising the stop limits the loss, it doesn't lock a gain." };
+      }
       return `<tr data-id="${p.id}" class="st-row-${r.st}">
         <td class="asset"><b>${esc(p.symbol || p.name || "—")}</b>${fifo}${earnPill}<div class="sub">${esc(p.display_name || "")}${p.account ? ` · ${esc(p.account)}` : ""}</div></td>
         <td>${p.bought_at ? fmtDate(p.bought_at) : "—"}<div class="sub">${p.bought_at ? fmtHeld(p.bought_at) : "no date"} · ${fmtNum(p.quantity)} u.</div></td>
@@ -313,7 +328,7 @@ window.StonksTargets = function (ctx) {
         <td class="num ${cls(r.atTp)}">${r.atTp != null ? fmtSigned(r.atTp, b) : "—"}<div class="sub">${r.atTpPct != null ? pctTxt(r.atTpPct) : ""}</div></td>
         <td><span class="st ${s.cls}" title="${esc(r.sugg ? `${s.tip} It ${r.sugg.why}.` : s.tip)}">${s.label}</span></td>
         <td><div class="row-actions">
-          ${r.sugg ? `<button class="raise" title="Stop → ${fmtPrice(r.sugg.stop, r.pccy)}${r.sugg.target != null ? `, target → ${fmtPrice(r.sugg.target, r.pccy)}` : ", target cleared"}">Raise stop</button>` : ""}
+          ${r.sugg ? `<button class="raise" title="${esc(raiseText(r))}">Raise stop</button>` : ""}
           <button class="sell" title="Record the sale of this buy">Sell</button>
           <button class="copy" title="Use these exits for every buy of ${esc(p.symbol || "")}">All buys</button>
           <button class="clear" title="Remove the exits of this buy">Clear</button></div></td></tr>`;
@@ -415,7 +430,7 @@ window.StonksTargets = function (ctx) {
     }
     if (e.target.closest(".raise") && r.sugg) {
       const g = r.sugg;
-      if (!confirm(`${p.symbol}: ${g.why}.\n\nStop → ${fmtPrice(g.stop, r.pccy)}\nTarget → ${g.target != null ? fmtPrice(g.target, r.pccy) : "none (no resistance above)"}\n\nApply?`)) return;
+      if (!confirm(`${p.symbol}: ${g.why}.\n\n${raiseText(r)}${r.price < r.buy ? "\n\nStill below your buy price: the higher stop limits the loss, it doesn't lock a gain." : ""}\n\nApply?`)) return;
       // set the target first when it goes up, so the stop never ends above it on the server
       const body = { stop_price: round(g.stop), target_price: g.target != null ? round(g.target) : null };
       return patch(p.id, body);
