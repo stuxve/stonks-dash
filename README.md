@@ -103,6 +103,13 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Income**: dividend yield **net of the foreign withholding a Spanish resident can't credit**, which is the part above the usual 15% treaty rate. Spanish dividends lose nothing.
   - **Low risk**: low volatility.
 
+  A third list, **Commodities**, covers gold, silver, platinum, palladium, copper, aluminium, Brent, WTI, natural gas, wheat, corn, soybeans, coffee, cocoa and sugar (front-month futures on Yahoo). Commodities have no earnings, so they're scored on different factors:
+  - **Diversify**: low correlation with your portfolio and with world stocks.
+  - **Crisis hedge**: average return during the 2020, 2022, Aug 2024 and 2025 stock-market falls.
+  - **Trend**: vs the 200-day average, and whether the 50-day average is above the 200-day.
+  - **Momentum**, **Pullback** (how far below the 1-year high) and **Low risk**.
+
+  Each commodity shows how to buy it as a UCITS ETC (name, ISIN, TER) and whether that product is physical (follows spot) or futures-based (its return differs from spot because of the roll). There are broad commodity ETFs for the rest, and your portfolio's asset-class mix is shown alongside. Commodities have their own presets (Balanced, Diversify me, Crisis hedge, Trend, Contrarian).
   Presets (Balanced, Diversify me, Value, Quality, Growth, Dividends) or Custom sliders weight the factors, and the ranking updates instantly. Each row explains why it ranks there and flags problems: high debt, payout above 100%, falling earnings, a sector you're already heavy in, or a stock you already hold. Company data comes from Yahoo and is fetched in the background the first time each day (about 100 calls for World); prices, momentum and fit update with the page.
 - **Performance vs index** compares your portfolio with a "shadow portfolio". Every euro you invested or took out on a date is treated as a buy or sell of the benchmark on that same date. It shows both gains, the difference, and the money-weighted annual return (XIRR) for you and for the index. The chart plots your portfolio value, the index value and the net amount invested. The default benchmark is IWDA.AS (MSCI World in EUR), and you can switch to VWCE, the S&P 500, the Nasdaq-100, emerging markets, the Stoxx 600 or any other ticker. Manual or unpriced assets are carried at cost.
 - **Allocation** lets you pick what to allocate by (my groups, asset type, account, sector or each asset) and set a target % for each bucket. It shows the current %, how far each bucket has drifted, and how much to buy or sell to reach the target. **Measure by** compares against market value or money invested.
@@ -173,7 +180,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET/POST/PATCH/DELETE | `/api/positions[/{id}]` | Portfolio CRUD |
 | GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
-| GET | `/api/ideas?universe=spain\|world` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
+| GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |

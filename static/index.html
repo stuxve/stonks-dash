@@ -240,7 +240,7 @@
     <!-- ideas: stock screener with portfolio fit -->
     <div id="p-sub-ideas" class="psub" hidden>
       <div class="toolbar">
-        <span class="seg" id="id-uni"><button data-v="spain">Spain · IBEX 35</button><button data-v="world">World · large caps</button></span>
+        <span class="seg" id="id-uni"><button data-v="spain">Spain · IBEX 35</button><button data-v="world">World · large caps</button><button data-v="commodities">Commodities</button></span>
         <span class="ctl">Focus <span class="seg" id="id-preset"></span></span>
         <select id="id-sector"></select>
         <label class="ctl"><input type="checkbox" id="id-hide-held"> hide stocks I already hold</label>
@@ -258,7 +258,7 @@
         <button class="btn ghost" id="id-custom-btn">Add to the list</button>
         <div class="id-custom-status" id="id-custom-status"></div>
       </div>
-      <div class="hint tg-notes">
+      <div class="hint tg-notes" id="id-stock-note">
         <p>Each factor is a 0–100 percentile inside the list (valuation is compared within the same sector when there are 4+ peers). The score is the weighted average of the factors you choose. Stocks with missing data are scored only on the factors they have, with a small penalty.</p>
         <ul class="plain">
           <li><b>Fit</b> is the personal part: it rises for sectors and regions where your stocks are below a global index, for low correlation with your current holdings (last year of daily returns, in your base currency), and falls for companies you already own, directly or through your funds.</li>

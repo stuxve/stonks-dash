@@ -532,3 +532,16 @@ def test_daily_moves(client):
     assert m["days"]["up5"] >= 1 and m["year_best"]["ret"] == pytest.approx(0.06, abs=1e-9)
     d = client.get("/api/moves").json()["symbols"]
     assert d and all("week" in v and "q" in v for v in d.values())
+
+
+def test_ideas_commodities(client):
+    d = client.get("/api/ideas?universe=commodities").json()
+    names = {r["name"] for r in d["rows"]}
+    assert {"Gold", "Silver", "Copper", "Brent crude oil"} <= names
+    gold = next(r for r in d["rows"] if r["name"] == "Gold")
+    assert gold["physical"] and any(isin == "IE00B4ND3602" for _, isin, _ in gold["etc"])
+    assert set(gold["f"]) == {"diversify", "hedge", "trend", "momentum", "pullback", "risk"}
+    assert gold["crises"] and gold["crisis"] is not None and gold["vol"] > 0
+    copper = next(r for r in d["rows"] if r["name"] == "Copper")
+    assert not copper["physical"] and any("futures" in f for f in copper["flags"])
+    assert "Stocks" in d["asset_mix"] and d["broad"]

@@ -565,3 +565,5 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 /* daily moves in Holdings */
 #p-table td.wkcell, #p-table td.typcell { line-height: 1.25; white-space: nowrap; font-size: 12px; }
 #p-table td.wkcell .sub, #p-table td.typcell .sub { font-size: 10px; }
+#id-table td.etc { font-size: 11px; max-width: 300px; white-space: normal; }
+#id-table td.etc code { font-size: 10px; }

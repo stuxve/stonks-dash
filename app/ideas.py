@@ -233,3 +233,86 @@ def score(cands: list[dict], my_sectors: dict[str, float], my_regions: dict[str,
                     "f": {kk: (round(v, 1) if v is not None else None) for kk, v in f.items()},
                     "why": {kk: v for kk, v in why.items() if v}, "flags": flags, "coverage": coverage})
     return out
+
+
+# ---------------------------------------------------------------------------------------------- commodities
+# Analysis uses the front-month futures on Yahoo (USD). "How to invest" lists UCITS ETCs/ETFs a European investor
+# can buy (ISIN, TER). Physical ETCs follow the spot price; futures-based ones also earn/lose the roll yield.
+COMMODITIES = [
+    {"symbol": "GC=F", "name": "Gold", "group": "Precious metals", "unit": "USD/oz", "physical": True,
+     "etc": [["Xetra-Gold", "DE000A0S9GB0", "no TER, ~0.3%/yr custody"],
+             ["iShares Physical Gold ETC", "IE00B4ND3602", "0.12%"],
+             ["Invesco Physical Gold ETC", "IE00B579F325", "0.12%"]]},
+    {"symbol": "SI=F", "name": "Silver", "group": "Precious metals", "unit": "USD/oz", "physical": True,
+     "etc": [["iShares Physical Silver ETC", "IE00B4NCWG09", "0.20%"],
+             ["WisdomTree Physical Silver", "JE00B1VS3333", "0.49%"]]},
+    {"symbol": "PL=F", "name": "Platinum", "group": "Precious metals", "unit": "USD/oz", "physical": True,
+     "etc": [["WisdomTree Physical Platinum", "JE00B1VS2W53", "0.49%"]]},
+    {"symbol": "PA=F", "name": "Palladium", "group": "Precious metals", "unit": "USD/oz", "physical": True,
+     "etc": [["WisdomTree Physical Palladium", "JE00B1VS3002", "0.49%"]]},
+    {"symbol": "HG=F", "name": "Copper", "group": "Industrial metals", "unit": "USD/lb", "physical": False,
+     "etc": [["WisdomTree Copper", "GB00B15KXQ89", "0.49%"]]},
+    {"symbol": "ALI=F", "name": "Aluminium", "group": "Industrial metals", "unit": "USD/t", "physical": False, "etc": []},
+    {"symbol": "BZ=F", "name": "Brent crude oil", "group": "Energy", "unit": "USD/bbl", "physical": False,
+     "etc": [["WisdomTree Brent Crude Oil", "JE00B78CGV99", "0.49%"]]},
+    {"symbol": "CL=F", "name": "WTI crude oil", "group": "Energy", "unit": "USD/bbl", "physical": False,
+     "etc": [["WisdomTree WTI Crude Oil", "GB00B15KXV33", "0.49%"]]},
+    {"symbol": "NG=F", "name": "Natural gas", "group": "Energy", "unit": "USD/MMBtu", "physical": False, "etc": []},
+    {"symbol": "ZW=F", "name": "Wheat", "group": "Agriculture", "unit": "USc/bu", "physical": False, "etc": []},
+    {"symbol": "ZC=F", "name": "Corn", "group": "Agriculture", "unit": "USc/bu", "physical": False, "etc": []},
+    {"symbol": "ZS=F", "name": "Soybeans", "group": "Agriculture", "unit": "USc/bu", "physical": False, "etc": []},
+    {"symbol": "KC=F", "name": "Coffee", "group": "Agriculture", "unit": "USc/lb", "physical": False, "etc": []},
+    {"symbol": "CC=F", "name": "Cocoa", "group": "Agriculture", "unit": "USD/t", "physical": False, "etc": []},
+    {"symbol": "SB=F", "name": "Sugar", "group": "Agriculture", "unit": "USc/lb", "physical": False, "etc": []},
+]
+BROAD_COMMODITY_ETFS = [["Invesco Bloomberg Commodity UCITS ETF Acc", "IE00BD6FTQ80", "0.19%"],
+                        ["iShares Diversified Commodity Swap UCITS ETF", "IE00BDFL4P12", "0.19%"]]
+CRISES = ("covid", "bear2022", "carry2024", "tariffs2025")      # windows when stocks fell (risk.SCENARIOS)
+
+
+def score_commodities(cands: list[dict]) -> list[dict]:
+    """cands: symbol, name, group, unit, physical, etc + trend (price / 200-day average − 1), golden (50d > 200d),
+    mom (12-1), from_high (vs 1-year high), vol, corr (with your portfolio), corr_stocks, crisis (avg return in
+    stock-market falls), ret_1w/1m/1y. Factor scores 0–100 within the list."""
+    S = {c["symbol"]: c for c in cands}
+    r_tr = _rank({k: c.get("trend") for k, c in S.items()})
+    r_mo = _rank({k: c.get("mom") for k, c in S.items()})
+    r_pb = _rank({k: c.get("from_high") for k, c in S.items()}, higher_better=False)   # further below = more pullback
+    r_vo = _rank({k: c.get("vol") for k, c in S.items()}, higher_better=False)
+    r_co = _rank({k: c.get("corr") for k, c in S.items()}, higher_better=False)
+    r_cs = _rank({k: c.get("corr_stocks") for k, c in S.items()}, higher_better=False)
+    r_hd = _rank({k: c.get("crisis") for k, c in S.items()})
+    out = []
+    for k, c in S.items():
+        f = {"trend": _avg(r_tr.get(k), 100.0 if c.get("golden") else (0.0 if c.get("golden") is False else None)),
+             "momentum": r_mo.get(k), "pullback": r_pb.get(k), "risk": r_vo.get(k),
+             "diversify": _avg(r_co.get(k), r_cs.get(k)), "hedge": r_hd.get(k)}
+        why, flags = {}, []
+        if c.get("trend") is not None:
+            why["trend"] = f"{c['trend'] * 100:+.0f}% vs its 200-day average" + (", 50-day above 200-day" if c.get("golden") else ", 50-day below 200-day" if c.get("golden") is False else "")
+        if c.get("mom") is not None:
+            why["momentum"] = f"{c['mom'] * 100:+.0f}% over 12 months (excl. last month)"
+        if c.get("from_high") is not None:
+            why["pullback"] = f"{abs(c['from_high']) * 100:.0f}% below its 1-year high" if c["from_high"] < -0.02 else "at its 1-year high"
+        if c.get("vol") is not None:
+            why["risk"] = f"volatility {c['vol'] * 100:.0f}%/yr"
+            if c["vol"] > 0.45:
+                flags.append(f"very volatile ({c['vol'] * 100:.0f}%/yr)")
+        if c.get("corr") is not None or c.get("corr_stocks") is not None:
+            bits = []
+            if c.get("corr") is not None:
+                bits.append(f"corr {c['corr']:.2f} with your portfolio")
+            if c.get("corr_stocks") is not None:
+                bits.append(f"{c['corr_stocks']:.2f} with world stocks")
+            why["diversify"] = ", ".join(bits)
+        if c.get("crisis") is not None:
+            why["hedge"] = f"{c['crisis'] * 100:+.0f}% on average when stocks fell ({c.get('crisis_n')} episodes)"
+        if not c.get("physical"):
+            flags.append("futures-based: ETC returns differ from the spot price (roll)")
+        coverage = sum(v is not None for v in f.values()) / len(f)
+        out.append({k2: c.get(k2) for k2 in ("symbol", "name", "group", "unit", "physical", "etc", "price", "currency",
+                                             "ret_1d", "ret_1w", "ret_1m", "ret_1y", "trend", "golden", "mom", "from_high",
+                                             "vol", "corr", "corr_stocks", "crisis", "crisis_n", "crises")}
+                   | {"f": {kk: (round(v, 1) if v is not None else None) for kk, v in f.items()},
+                      "why": why, "flags": flags, "coverage": coverage, "sector": c.get("group")})
+    return out

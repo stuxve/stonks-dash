@@ -1138,9 +1138,108 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     _ideas_cache: dict = {}
 
+    def _ideas_commodities(base: str) -> dict:
+        st = db.get_settings()
+        custom = list(dict.fromkeys(x.strip().upper() for x in
+                                    (((st.get("ideas") or {}).get("custom") or {}).get("commodities") or []) if x.strip()))
+        ck = ("commodities", base, tuple(custom))
+        hit = _ideas_cache.get(ck)
+        if hit and time.time() - hit[0] < 300:
+            return hit[1]
+        items = [dict(c) for c in ideas.COMMODITIES]
+        known = {c["symbol"] for c in items}
+        for x in custom:
+            if x not in known:
+                items.append({"symbol": x, "name": x, "group": "Your extras", "unit": "", "physical": True, "etc": [], "custom": True})
+        syms = [c["symbol"] for c in items]
+        today = date.today()
+        hist_start = date(2019, 12, 1)                 # the crisis windows start in 2020
+        raw = engine.history(syms, hist_start)
+        meta = engine.meta(syms)
+        bpx, _m = _base_prices(base, syms, hist_start)
+        start = today - timedelta(days=365)
+        CR = risk.business_returns(bpx, start) if bpx else pd.DataFrame()
+        try:
+            rp = _mix_returns(base, start)
+        except Exception as e:  # noqa: BLE001
+            log.info("portfolio returns for commodities failed: %s", e)
+            rp = None
+        b_sym, _bn, b_base, _bn2, _bc = _benchmark(base, start - timedelta(days=10), "IWDA.AS")
+        bR = risk.business_returns({"b": b_base}, start)["b"] if b_base is not None else None
+        scen = {sc["key"]: sc for sc in risk.SCENARIOS}
+        cands = []
+        for c in items:
+            x = c["symbol"]
+            h = raw.get(x)
+            m = meta.get(x) or {}
+            if c.get("custom"):
+                c["name"] = m.get("name") or x
+            c["currency"] = normalize_currency(m.get("currency"))[0] or "USD"
+            if h is None or len(h.dropna()) < 60:
+                c["missing"] = True
+                cands.append(c)
+                continue
+            h = levels.clean(h)
+            last = h.index[-1]
+
+            def ret(days):
+                b_ = h[h.index <= last - pd.Timedelta(days=days)]
+                return float(h.iloc[-1] / b_.iloc[-1] - 1) if len(b_) else None
+            ma200 = h.iloc[-200:].mean() if len(h) >= 200 else None
+            ma50 = h.iloc[-50:].mean() if len(h) >= 50 else None
+            y1 = h[h.index > last - pd.Timedelta(days=365)]
+            p_1m = h[h.index <= last - pd.Timedelta(days=30)]
+            p_13 = h[h.index <= last - pd.Timedelta(days=365)]
+            c.update(price=float(h.iloc[-1]), ret_1d=float(h.iloc[-1] / h.iloc[-2] - 1), ret_1w=ret(7), ret_1m=ret(30),
+                     ret_1y=ret(365), trend=(float(h.iloc[-1] / ma200 - 1) if ma200 else None),
+                     golden=(bool(ma50 > ma200) if ma50 and ma200 else None),
+                     mom=(float(p_1m.iloc[-1] / p_13.iloc[-1] - 1) if len(p_1m) and len(p_13) else None),
+                     from_high=float(h.iloc[-1] / y1.max() - 1), vol=risk.ann_vol(y1.pct_change()))
+            if rp is not None and x in CR:
+                c["corr"] = risk.beta_corr(CR[x], rp)[1]
+            if bR is not None and x in CR:
+                c["corr_stocks"] = risk.beta_corr(CR[x], bR)[1]
+            cr = {}
+            for k_ in ideas.CRISES:
+                sc = scen.get(k_)
+                v = risk.window_return(bpx.get(x), sc["start"], sc["end"]) if sc else None
+                if v is not None:
+                    cr[sc["label"]] = v
+            c["crises"] = cr
+            c["crisis"] = (sum(cr.values()) / len(cr)) if cr else None
+            c["crisis_n"] = len(cr)
+            cands.append(c)
+        rows_ = ideas.score_commodities([c for c in cands if not c.get("missing")])
+        missing = [c["symbol"] for c in cands if c.get("missing")]
+        # your asset mix (look-through): how much is already in commodities
+        mix = {}
+        try:
+            ex = exposure_view(base)
+            for r_ in ex.get("sectors", []):
+                k_ = r_["key"]
+                grp = ("Commodities" if k_ in ("Commodities", "Gold") else "Crypto" if k_ == "Crypto" else
+                       "Bonds" if k_ == "Bonds" else "Cash & other" if k_ in ("Cash", "Other", "Unclassified", "Unknown", "Unknown (fund)")
+                       else "Stocks")
+                mix[grp] = mix.get(grp, 0.0) + r_["pct"]
+        except Exception as e:  # noqa: BLE001
+            log.info("asset mix failed: %s", e)
+        held = {}
+        for r_ in _open_rows(base, *(_context(base)[i] for i in (0, 3)))[0]:
+            if r_.get("symbol") in syms and r_.get("value"):
+                held[r_["symbol"]] = held.get(r_["symbol"], 0.0) + r_["value"]
+        out = {"universe": "commodities", "base": base, "rows": rows_, "missing": missing,
+               "broad": ideas.BROAD_COMMODITY_ETFS, "asset_mix": mix, "held": held,
+               "has_portfolio": rp is not None, "progress": {"have": len(rows_), "total": len(items), "pending": 0},
+               "custom": [{"symbol": x, "status": "added" if x not in missing else "not_found"} for x in custom],
+               "as_of": time.time()}
+        _ideas_cache[ck] = (time.time(), out)
+        return out
+
     @app.get("/api/ideas")
-    def ideas_view(universe: str = Query("spain", pattern="^(spain|world)$"), base: str | None = None):
+    def ideas_view(universe: str = Query("spain", pattern="^(spain|world|commodities)$"), base: str | None = None):
         base = base_or_default(base)
+        if universe == "commodities":
+            return _ideas_commodities(base)
         st = db.get_settings()
         custom = list(dict.fromkeys(x.strip().upper() for x in
                                     (((st.get("ideas") or {}).get("custom") or {}).get(universe) or []) if x.strip()))
