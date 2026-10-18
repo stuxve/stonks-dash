@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import time
 import datetime as dt
 from datetime import date, timedelta
@@ -24,6 +25,7 @@ from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("stonks")
+SYMBOL_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.\-=^]{0,19}$")
 
 DATA_DIR = os.getenv("STONKS_DATA_DIR", "/data")
 PROVIDER = os.getenv("STONKS_PROVIDER", "yahoo").lower()
@@ -1475,23 +1477,61 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     # ------------------------------------------------------------------ daily moves (Holdings)
     @app.get("/api/moves")
-    def moves_view():
-        """Per held symbol: typical daily move (last year), records, and this week's best / worst day."""
+    def moves_view(extra: str = ""):
+        """Per held symbol (plus `extra`, comma-separated tickers you don't hold): typical daily move over the last
+        year, this week's best / worst day, and highs and lows over 15 days / 6 months / 1 year. A listing whose own
+        Yahoo history is too short (common for Munich or other secondary listings) borrows the earlier part from
+        another listing of the same fund or an ETF on the same index, like the Risk tab; `proxy` says which."""
         lots, _sells, _divs, fr = _context("EUR")
-        syms = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
+        held = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
                        and x["symbol"] and x["manual_price"] is None})
+        ext = [t for t in dict.fromkeys(t.strip().upper() for t in extra.split(",")) if t and SYMBOL_RE.match(t)][:40]
+        ext = [t for t in ext if t not in held]
+        syms = held + ext
         if not syms:
-            return {"symbols": {}}
-        hist = engine.history(syms, date.today() - timedelta(days=400))
-        out = {}
+            return {"symbols": {}, "missing": {}, "extra": {}}
+        since = date.today() - timedelta(days=380)
+        hist = engine.history(syms, since - timedelta(days=20))
+        meta = engine.meta(syms)
+        quotes = engine.quotes(syms)
+        px = {s_: ser.dropna() for s_, ser in hist.items() if ser is not None and not ser.dropna().empty}
+        proxies = {}
         for s_ in syms:
-            ser = hist.get(s_)
-            if ser is None or ser.empty:
+            own = px.get(s_)
+            if own is not None and len(own) and own.index[0] <= pd.Timestamp(since) + pd.Timedelta(days=30):
                 continue
-            m = risk.daily_moves(levels.clean(ser))
+            q = quotes.get(s_)
+            ccy = normalize_currency((meta.get(s_) or {}).get("currency") or (q.currency if q else None))[0]
+            if not ccy:
+                continue
+            info = {s_: {"quote_type": (q.quote_type if q else None), "display_name": (q.name if q else None)}}
+            try:     # in the fund's own currency: highs and lows are prices, not your FX
+                used = _splice_proxies(ccy, px, [s_], meta, info, since)
+            except Exception as e:  # noqa: BLE001
+                log.warning("moves proxy for %s failed: %s", s_, e)
+                used = {}
+            if s_ in used:
+                proxies[s_] = used[s_]
+        out, missing = {}, {}
+        for s_ in syms:
+            ser = px.get(s_)
+            m = risk.daily_moves(levels.clean(ser)) if ser is not None and len(ser) else None
             if m:
+                if s_ in proxies:
+                    m["proxy"] = proxies[s_]
                 out[s_] = m
-        return {"symbols": out, "as_of": time.time()}
+            else:
+                missing[s_] = {"closes": int(len(ser)) if ser is not None else 0,
+                               "first": ser.index[0].date().isoformat() if ser is not None and len(ser) else None}
+        extra_info = {}
+        for s_ in ext:
+            q = quotes.get(s_)
+            ok = bool(q and q.ok)
+            extra_info[s_] = {"ok": ok or s_ in out, "name": (q.name if q else None) or s_,
+                              "price": q.price if ok else None, "currency": q.currency if ok else None,
+                              "day": (q.changes or {}).get("1D") if ok else None,
+                              "quote_type": q.quote_type if q else None}
+        return {"symbols": out, "missing": missing, "extra": extra_info, "as_of": time.time()}
 
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")

@@ -568,3 +568,14 @@ def test_window_extremes(client):
     assert 0 < y["pos"] < 1 and risk.window_extremes(s.iloc[:2], 15) is None
     d = client.get("/api/moves").json()["symbols"]
     assert d and all(set(v["windows"]) == {"15d", "6m", "1y"} for v in d.values())
+
+
+def test_moves_proxy_and_extra_tickers(client):
+    client.post("/api/positions", json={"symbol": "IBCF.MU", "quantity": 1, "avg_cost": 150, "currency": "EUR",
+                                        "bought_at": "2026-08-27"})
+    d = client.get("/api/moves?extra=aapl,MSFT,bad ticker!,AAPL").json()
+    # IBCF.MU has only a few days of Yahoo history in the mock: the earlier part comes from a proxy
+    ib = d["symbols"]["IBCF.MU"]
+    assert ib["proxy"]["symbol"] == "IBCF.DE" and ib["proxy"]["kind"] == "listing" and ib["windows"]["1y"]["n"] > 200
+    assert "AAPL" in d["symbols"] and set(d["extra"]) == {"AAPL"}          # MSFT is held; invalid one dropped
+    assert d["extra"]["AAPL"]["ok"] and d["extra"]["AAPL"]["price"] > 0

@@ -205,8 +205,11 @@
     <div id="p-sub-ranges" class="psub" hidden>
       <div class="toolbar">
         <label class="ctl">Sort by <select id="rg-sort"></select></label>
-        <span class="hint grow">Highest and lowest close of each window, where today sits in that range, and the biggest one-day rise and fall. Hover a cell for details.</span>
+        <div class="field symbol-search rg-addbox"><input id="rg-add" type="text" autocomplete="off" placeholder="Add a ticker you don't hold — e.g. AAPL, Inditex, IE00B5BMR087"><ul class="suggest" hidden></ul></div>
+        <span id="rg-extras" class="rg-extras"></span>
+        <span class="hint" id="rg-add-note"></span>
       </div>
+      <p class="hint">Highest and lowest close of each window, where today sits in that range, and the biggest one-day rise and fall. Hover a cell for details.</p>
       <div class="kpis small" id="rg-kpis"></div>
       <div class="table-wrap"><table class="grid" id="rg-table"></table></div>
       <p class="hint">Based on daily closes, not intraday highs and lows. Windows are calendar days (15 days ≈ 10–11 sessions; crypto trades every day).</p>

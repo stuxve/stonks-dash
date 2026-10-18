@@ -577,3 +577,8 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .rgl { white-space: nowrap; line-height: 1.5; }
 .rg-badges { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 3px; }
 .rg-badges .pill { font-size: 10.5px; }
+.rg-addbox { position: relative; min-width: 300px; }
+.rg-addbox input { width: 100%; }
+.rg-extras { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.rg-proxy { margin-top: 3px; cursor: help; }
+.rg-badges .linkbtn { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 11px; text-decoration: underline; }

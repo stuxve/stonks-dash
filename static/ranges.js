@@ -1,19 +1,24 @@
-/* stonks-dash — Highs & lows: for each holding, the highest and lowest close and the biggest one-day rise and fall
- * of the last 15 days, 6 months and 1 year, and where today's price and today's move sit against them. */
+/* stonks-dash — Highs & lows: for each holding (and any extra tickers you add), the highest and lowest close and the
+ * biggest one-day rise and fall of the last 15 days, 6 months and 1 year, and where today's price and move sit against them. */
 window.StonksRanges = function (ctx) {
   "use strict";
-  const { api, esc, state, saveSettings, fmtPrice, fmtDate, cls, $, $$ } = ctx;
+  const { api, esc, state, saveSettings, fmtPrice, fmtDate, cls, attachSearch, $, $$ } = ctx;
   const WIN = [["15d", "15 days", "15-day"], ["6m", "6 months", "6-month"], ["1y", "1 year", "1-year"]];
   const S = () => state.settings.ranges || (state.settings.ranges = {});
   const sortKey = () => S().sort || "from_hi_1y";
-  let data = null, at = 0;
+  const extras = () => S().extra || [];
+  let data = null, missing = {}, extraInfo = {}, at = 0, loadedFor = "";
 
   const pct = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(d)}%`);
   const dS = (iso) => (iso ? new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" }).format(new Date(iso + "T00:00:00")) : "");
 
   async function load(force) {
-    if (!force && data && Date.now() - at < 120e3) return draw();
-    try { data = (await api("/api/moves")).symbols || {}; at = Date.now(); } catch (e) {
+    const key = extras().join(",");
+    if (!force && data && key === loadedFor && Date.now() - at < 120e3) return draw();
+    try {
+      const r = await api(`/api/moves${key ? `?extra=${encodeURIComponent(key)}` : ""}`);
+      data = r.symbols || {}; missing = r.missing || {}; extraInfo = r.extra || {}; at = Date.now(); loadedFor = key;
+    } catch (e) {
       $("#rg-table").innerHTML = `<tbody><tr><td class="hint">${esc(e.message)}</td></tr></tbody>`; return;
     }
     draw();
@@ -28,7 +33,13 @@ window.StonksRanges = function (ctx) {
       h.value += p.value || 0;
       by.set(p.symbol, h);
     }
-    return [...by.values()].map((h) => ({ ...h, weight: total ? h.value / total * 100 : null, m: data?.[h.symbol] }));
+    const rows = [...by.values()].map((h) => ({ ...h, weight: total ? h.value / total * 100 : null }));
+    for (const sym of extras()) {
+      if (by.has(sym)) continue;
+      const x = extraInfo[sym] || {};
+      rows.push({ symbol: sym, name: x.name, ccy: x.currency, price: x.price, day: x.day, weight: null, watch: true, bad: x.ok === false });
+    }
+    return rows.map((h) => ({ ...h, m: data?.[h.symbol], miss: missing[h.symbol] }));
   }
 
   // one badge per kind, for the longest window it holds in (a 1-year high is also a 6-month and 15-day high)
@@ -47,7 +58,11 @@ window.StonksRanges = function (ctx) {
 
   function winCell(h, k, l) {
     const w = h.m?.windows?.[k];
-    if (!w) return `<td class="rgc"><span class="sub">not enough history</span></td>`;
+    if (!w) {
+      const why = h.bad ? "ticker not found" : h.miss ? (h.miss.closes ? `Yahoo has only ${h.miss.closes} closes (since ${fmtDate(h.miss.first)}) and no proxy was found` : "Yahoo returned no price history and no proxy was found")
+        : h.m ? `less than 3 closes in the last ${l}` : "loading…";
+      return `<td class="rgc"><span class="sub">${esc(why)}</span></td>`;
+    }
     const c = h.ccy, pos = Math.max(0, Math.min(1, w.pos));
     const tip = `Last ${l} (${w.n} closes)\nHighest close: ${fmtPrice(w.hi, c)} on ${fmtDate(w.hi_date)} — now ${pct(w.from_hi)}\nLowest close: ${fmtPrice(w.lo, c)} on ${fmtDate(w.lo_date)} — now ${pct(w.from_lo)}\n`
       + `Now at ${Math.round(pos * 100)}% of the range · change over the period ${pct(w.change)}\n`
@@ -57,6 +72,14 @@ window.StonksRanges = function (ctx) {
       <div class="rgl"><span class="sub">min</span> ${fmtPrice(w.lo, c)} <span class="up">${pct(w.from_lo)}</span> <span class="sub">${dS(w.lo_date)}</span></div>
       <div class="rgl"><span class="sub">max</span> ${fmtPrice(w.hi, c)} <span class="${w.from_hi < -0.0005 ? "down" : "up"}">${w.from_hi < -0.0005 ? pct(w.from_hi) : "at max"}</span> <span class="sub">${dS(w.hi_date)}</span></div>
       ${w.best ? `<div class="rgl sub">day <span class="up">${pct(w.best.ret)}</span> / <span class="down">${pct(w.worst.ret)}</span> · period <span class="${cls(w.change)}">${pct(w.change)}</span></div>` : ""}</td>`;
+  }
+
+  function proxyNote(m) {
+    const p = m?.proxy;
+    if (!p) return "";
+    const what = p.kind === "listing" ? "another listing of the same fund" : p.kind === "manual" ? "the proxy you chose in Risk" : `an ETF on the same index${p.hedged ? " (its own currency, as your fund is hedged)" : ""}`;
+    const tip = `Yahoo's history for this listing is short${p.until ? `: it starts on ${fmtDate(p.until)}` : ""}. Before that, prices come from ${p.symbol}, ${what}, scaled to join this listing's first close. Highs and lows from that part are estimates.`;
+    return `<div class="sub rg-proxy" title="${esc(tip)}">${p.until ? `before ${dS(p.until)}: ` : ""}via ${esc(p.symbol)} ⓘ</div>`;
   }
 
   const SORTS = {
@@ -82,13 +105,34 @@ window.StonksRanges = function (ctx) {
         <div class="d">${hi.length ? `<span class="up">↑ ${hi.map(esc).join(", ")}</span>` : ""}${hi.length && lo.length ? " · " : ""}${lo.length ? `<span class="down">↓ ${lo.map(esc).join(", ")}</span>` : ""}${!hi.length && !lo.length ? "none at an extreme" : ""}</div></div>`;
     }).join("");
     $("#rg-kpis").innerHTML = sum;
-    t.innerHTML = `<thead><tr><th>Holding</th><th class="num">Now</th>${WIN.map(([, l]) => `<th class="rgc">Last ${l} <span class="sub">min · max · biggest day</span></th>`).join("")}</tr></thead>
-      <tbody>${rows.map((h) => `<tr><td class="asset"><b>${esc(h.symbol)}</b><div class="sub">${esc(h.name || "")}${h.weight != null ? ` · ${h.weight.toFixed(1)}%` : ""}</div><div class="rg-badges">${badges(h.m)}</div></td>
+    t.innerHTML = `<thead><tr><th>Asset</th><th class="num">Now</th>${WIN.map(([, l]) => `<th class="rgc">Last ${l} <span class="sub">min · max · biggest day</span></th>`).join("")}</tr></thead>
+      <tbody>${rows.map((h) => `<tr><td class="asset"><b>${esc(h.symbol)}</b><div class="sub">${esc(h.name || "")}${h.weight != null ? ` · ${h.weight.toFixed(1)}%` : ""}</div><div class="rg-badges">${h.watch ? `<span class="pill" title="Not in your portfolio — added to this list">watch</span><button class="linkbtn rg-rm" data-sym="${esc(h.symbol)}" title="Remove from this list">remove</button>` : ""}${badges(h.m)}</div>${proxyNote(h.m)}</td>
         <td class="num">${h.price != null ? fmtPrice(h.price, h.ccy) : "—"}<div class="sub ${cls(h.day)}">${h.day != null ? `${h.day > 0 ? "+" : ""}${h.day.toFixed(2)}% today` : ""}</div></td>
         ${WIN.map(([k, l]) => winCell(h, k, l)).join("")}</tr>`).join("")}</tbody>`;
   }
 
   $("#rg-sort").addEventListener("change", (e) => { saveSettings({ ranges: { ...S(), sort: e.target.value } }); draw(); });
+
+  // extra tickers you don't hold
+  function setExtras(list) { S().extra = list; saveSettings({ ranges: { ...S(), extra: list } }); drawChips(); load(true); }
+  function drawChips() {
+    $("#rg-extras").innerHTML = extras().map((x) => `<span class="chip-in">${esc(x)}<button data-sym="${esc(x)}" title="Remove">×</button></span>`).join("");
+  }
+  const addInput = $("#rg-add");
+  function addSym(sym) {
+    sym = (sym || "").trim().toUpperCase();
+    addInput.value = "";
+    if (!sym || extras().includes(sym)) return;
+    if (holdings().some((h) => !h.watch && h.symbol === sym)) { $("#rg-add-note").textContent = `${sym} is already in your portfolio`; return; }
+    $("#rg-add-note").textContent = "";
+    setExtras([...extras(), sym].slice(0, 40));
+  }
+  attachSearch(addInput, (it) => addSym(it.symbol));
+  addInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && addInput.value.trim()) { e.preventDefault(); setTimeout(() => addInput.value.trim() && addSym(addInput.value), 0); } });
+  const rm = (e) => { const b = e.target.closest("button[data-sym]"); if (b) setExtras(extras().filter((x) => x !== b.dataset.sym)); };
+  $("#rg-extras").addEventListener("click", rm);
+  $("#rg-table").addEventListener("click", (e) => { if (e.target.closest(".rg-rm")) rm(e); });
+  drawChips();
   function refresh(silent) { load(!silent); }
   return { refresh };
 };
