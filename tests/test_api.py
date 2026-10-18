@@ -545,3 +545,26 @@ def test_ideas_commodities(client):
     copper = next(r for r in d["rows"] if r["name"] == "Copper")
     assert not copper["physical"] and any("futures" in f for f in copper["flags"])
     assert "Stocks" in d["asset_mix"] and d["broad"]
+
+
+def test_window_extremes(client):
+    from app import risk
+    idx = pd.date_range("2025-01-01", periods=400, freq="D")
+    s = pd.Series(100.0, index=idx)
+    s.iloc[-100] = 150.0                                  # 6-month high, ~100 days ago
+    s.iloc[-300] = 60.0                                   # 1-year low, outside 6 months
+    s.iloc[-5] = 95.0                                     # dip inside the 15-day window
+    s.iloc[-1] = 106.0                                    # today: +6%, the biggest rise of the last 15 days
+    w = risk.window_extremes(s, 15)
+    assert w["hi"] == 106.0 and w["at_hi"] and w["lo"] == 95.0 and w["lo_date"] == idx[-5].date().isoformat()
+    assert w["pos"] == pytest.approx(1.0) and w["from_hi"] == pytest.approx(0.0)
+    assert w["change"] == pytest.approx(0.06) and w["today_is_best"] and not w["today_is_worst"]
+    assert w["worst"]["ret"] == pytest.approx(-0.05) and w["best"]["ret"] == pytest.approx(0.06)
+    m6 = risk.window_extremes(s, 182)
+    assert m6["hi"] == 150.0 and m6["from_hi"] == pytest.approx(106 / 150 - 1) and not m6["at_hi"]
+    assert m6["lo"] == 95.0 and not m6["today_is_best"]   # the rebound from 150→100 (-33%) and 100→150 (+50%) dominate
+    y = risk.window_extremes(s, 365)
+    assert y["lo"] == 60.0 and y["from_lo"] == pytest.approx(106 / 60 - 1)
+    assert 0 < y["pos"] < 1 and risk.window_extremes(s.iloc[:2], 15) is None
+    d = client.get("/api/moves").json()["symbols"]
+    assert d and all(set(v["windows"]) == {"15d", "6m", "1y"} for v in d.values())

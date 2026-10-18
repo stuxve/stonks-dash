@@ -184,4 +184,38 @@ def daily_moves(s: pd.Series) -> dict | None:
                        "days": int(len(wk)),
                        "range": {"hi": float(s[s.index > end - pd.Timedelta(days=7)].max()),
                                  "lo": float(s[s.index > end - pd.Timedelta(days=7)].min())}}
+    out["windows"] = {k: window_extremes(s, d) for k, d in WINDOWS.items()}
+    return out
+
+
+WINDOWS = {"15d": 15, "6m": 182, "1y": 365}
+
+
+def window_extremes(s: pd.Series, days: int) -> dict | None:
+    """Highest and lowest close of the last `days` calendar days, where today's price sits between them,
+    and the biggest one-day rise and fall in that window."""
+    s = s.dropna()
+    end = s.index[-1]
+    w = s[s.index > end - pd.Timedelta(days=days)]
+    if len(w) < 3:
+        return None
+    r = s.pct_change()
+    rw = r[r.index > end - pd.Timedelta(days=days)].dropna()
+    hi_d, lo_d = w.idxmax(), w.idxmin()
+    hi, lo, now = float(w.loc[hi_d]), float(w.loc[lo_d]), float(s.iloc[-1])
+    first = float(s[s.index <= end - pd.Timedelta(days=days)].iloc[-1]) if (s.index <= end - pd.Timedelta(days=days)).any() else float(w.iloc[0])
+    out = {"days": days, "n": int(len(w)), "now": now,
+           "hi": hi, "hi_date": hi_d.date().isoformat(), "lo": lo, "lo_date": lo_d.date().isoformat(),
+           "from_hi": now / hi - 1 if hi else None, "from_lo": now / lo - 1 if lo else None,
+           "pos": (now - lo) / (hi - lo) if hi > lo else 0.5,
+           "change": now / first - 1 if first else None,
+           "at_hi": hi_d == end, "at_lo": lo_d == end,
+           "best": None, "worst": None}
+    if len(rw):
+        out["best"] = {"ret": float(rw.max()), "date": rw.idxmax().date().isoformat()}
+        out["worst"] = {"ret": float(rw.min()), "date": rw.idxmin().date().isoformat()}
+        today = float(r.iloc[-1])
+        out["today"] = today
+        out["today_is_best"] = rw.idxmax() == end and today > 0
+        out["today_is_worst"] = rw.idxmin() == end and today < 0
     return out

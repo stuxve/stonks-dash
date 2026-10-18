@@ -74,6 +74,7 @@
     <div class="subnav" id="p-subnav" role="tablist">
       <button data-sub="holdings" class="active">Holdings</button>
       <button data-sub="targets">Sell targets <span class="nb" id="tg-badge" hidden></span></button>
+      <button data-sub="ranges">Highs &amp; lows</button>
       <button data-sub="risk">Risk <span class="nb" id="rk-badge" hidden></span></button>
       <button data-sub="ideas">Ideas</button>
       <button data-sub="performance">Performance vs index</button>
@@ -198,6 +199,17 @@
           <li><b>P/L at target</b> is after the account's sell fee (Costs tab) and before tax. Nothing is sold automatically. In Spain sales are matched oldest buy first (FIFO), so a buy flagged <span class="pill warn">FIFO 2/3</span> can't be sold before the older ones.</li>
         </ul>
       </div>
+    </div>
+
+    <!-- highs & lows -->
+    <div id="p-sub-ranges" class="psub" hidden>
+      <div class="toolbar">
+        <label class="ctl">Sort by <select id="rg-sort"></select></label>
+        <span class="hint grow">Highest and lowest close of each window, where today sits in that range, and the biggest one-day rise and fall. Hover a cell for details.</span>
+      </div>
+      <div class="kpis small" id="rg-kpis"></div>
+      <div class="table-wrap"><table class="grid" id="rg-table"></table></div>
+      <p class="hint">Based on daily closes, not intraday highs and lows. Windows are calendar days (15 days ≈ 10–11 sessions; crypto trades every day).</p>
     </div>
 
     <!-- risk -->
@@ -592,6 +604,7 @@
 <script src="/static/telegram.js"></script>
 <script src="/static/risk.js"></script>
 <script src="/static/ideas.js"></script>
+<script src="/static/ranges.js"></script>
 <script src="/static/portfolio.js"></script>
 <script src="/static/app.js"></script>
 </body>

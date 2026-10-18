@@ -5,11 +5,12 @@ window.StonksPortfolio = function (ctx) {
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$ } = ctx;
 
-  const SUBS = ["holdings", "targets", "risk", "ideas", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
+  const SUBS = ["holdings", "targets", "ranges", "risk", "ideas", "performance", "allocation", "exposure", "costs", "taxes", "ledger"];
   const ins = window.StonksInsights(ctx);
   const tgt = window.StonksTargets({ ...ctx, feeFor: ins.feeFor, openTx });
   const tele = window.StonksTelegram(ctx);
   const rk = window.StonksRisk({ ...ctx, targets: tgt });
+  const rng = window.StonksRanges(ctx);
   const idea = window.StonksIdeas(ctx);
   let sub = "holdings";
   try { sub = localStorage.getItem("stonks.psub") || "holdings"; } catch {}
@@ -36,6 +37,7 @@ window.StonksPortfolio = function (ctx) {
     else if (sub === "ledger") loadLedger(silent);
     else if (sub === "targets") { tgt.refresh(silent); tele.refresh(); }
     else if (sub === "risk") rk.refresh(silent);
+    else if (sub === "ranges") rng.refresh(silent);
     else if (sub === "ideas") idea.refresh(silent);
     else ins.refresh(sub, silent);
   }

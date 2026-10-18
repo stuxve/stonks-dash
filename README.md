@@ -84,6 +84,13 @@ The size and group choices are saved per board. Period, range and currency are g
   3. Press **Link my Telegram** and **Start** in the bot. Only the chat that sends the one-time code is linked; messages from any other chat are ignored.
 
   Commands in the chat: `/status`, `/summary`, `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
+- **Highs & lows** shows, for each holding and for the last 15 days, 6 months and 1 year:
+  - the highest and lowest close, with dates;
+  - how far today's price is from each one, and where it sits in that range (the bar);
+  - the change over the period;
+  - the biggest one-day rise and fall.
+
+  Badges flag a new high or low and a record day. Each badge names only the longest window in which it holds, since a 1-year high is also a 6-month high. The cards at the top list which holdings are at a high or a low in each window. Everything uses daily closes, not intraday highs and lows.
 - **Risk** replays today's holdings and weights over the last 1, 3 or 5 years of prices, in your base currency. It has its own benchmark picker (MSCI World by default), and each option shows its correlation with your portfolio, with ★ on the best fit. If the benchmark used by Performance and "Vs index" fits much worse, a button lets you switch that one too. Holdings with a short price history (for example a Munich listing Yahoo barely covers) borrow the earlier part from a proxy. The app tries, in order: a ticker you type in the table, another listing of the same fund (same root ticker, currency and price), then an ETF on the same index (in its local currency if your fund is hedged). This way they're never treated as cash.
   - Volatility, max drawdown (peak, trough, recovery and how long it lasted), distance from the last peak, worst month and beta/correlation vs the benchmark, next to the same figures for the benchmark. There's also the max drawdown of the portfolio you actually held, time-weighted so contributions don't count. It starts on the first day you held at least 3 effective positions with none above 50% of cost, so a period when you owned a single stock doesn't count as a portfolio drawdown. That earlier figure is shown alongside.
   - A drawdown chart, your mix against the benchmark.
@@ -183,6 +190,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/moves` | Per held ticker: typical daily move, this week's moves, and for 15 days / 6 months / 1 year the highest and lowest close, distance from them, position in range and biggest one-day rise and fall |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |
 | GET | `/api/targets/peaks` | Peak and low close since each open, dated buy |
 | GET | `/api/portfolio?base=USD` | Positions with value, cost, P&L, day P&L and totals |

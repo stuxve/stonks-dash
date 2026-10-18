@@ -567,3 +567,13 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 #p-table td.wkcell .sub, #p-table td.typcell .sub { font-size: 10px; }
 #id-table td.etc { font-size: 11px; max-width: 300px; white-space: normal; }
 #id-table td.etc code { font-size: 10px; }
+
+/* highs & lows */
+#rg-table td.rgc, #rg-table th.rgc { min-width: 230px; font-size: 12px; vertical-align: top; }
+#rg-table th.rgc .sub { display: block; font-weight: 400; }
+.rgbar { position: relative; height: 6px; margin: 4px 6px 6px 0; border-radius: 3px; background: var(--panel-2); }
+.rgbar .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 3px; background: linear-gradient(90deg, rgba(246, 53, 56, .45), rgba(48, 204, 90, .45)); }
+.rgbar .dot { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--text); border: 2px solid var(--bg); }
+.rgl { white-space: nowrap; line-height: 1.5; }
+.rg-badges { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 3px; }
+.rg-badges .pill { font-size: 10.5px; }

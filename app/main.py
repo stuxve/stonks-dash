@@ -1709,7 +1709,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]
