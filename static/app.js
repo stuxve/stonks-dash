@@ -629,7 +629,7 @@
       <td class="num">${total && l.value ? (l.value / total * 100).toFixed(1) + "%" : "—"}</td>
       <td><div class="row-actions"><button class="sell" title="Sell from this account">Sell</button><button class="edit" title="Edit lot">Edit</button><button class="del" title="Delete lot">Delete</button></div></td></tr>`;
     t.tBodies[0].innerHTML = rows.map((p) => (p.lots ? `<tr class="merged ${open.has(p.mkey) ? "open" : ""}" data-mkey="${esc(p.mkey)}">` : `<tr data-id="${p.id}">`) + `
-      <td class="asset">${p.lots ? `<button class="exp" title="Show lots">${open.has(p.mkey) ? "▾" : "▸"}</button>` : ""}<b>${esc(p.symbol || "—")}</b>${p.quote_type === "MANUAL" ? '<span class="pill">manual</span>' : ""}${p.lots ? `<span class="pill">${p.lots.length} lots</span>` : ""}<div class="sub">${esc(p.display_name)}</div></td>
+      <td class="asset">${p.lots ? `<button class="exp" title="Show lots">${open.has(p.mkey) ? "▾" : "▸"}</button>` : ""}<b>${esc(p.symbol || "—")}</b>${p.quote_type === "MANUAL" ? '<span class="pill">manual</span>' : ""}${p.lots ? `<span class="pill">${p.lots.length} lots</span>` : ""}${p.price_source ? `<span class="pill" title="Yahoo's prices for ${esc(p.symbol)} are short or stale, so prices, charts and alerts use ${esc(p.price_source)}, another listing of the same fund (same currency and price).">via ${esc(p.price_source)}</span>` : ""}<div class="sub">${esc(p.display_name)}</div></td>
       <td>${esc(p.account || "")}${p.group_name ? `<div class="sub">${esc(p.group_name)}</div>` : ""}</td>
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>

@@ -174,6 +174,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 
 - Yahoo Finance is an unofficial source. Some exchanges are delayed by about 15 minutes, and Yahoo rate-limits aggressive clients. The app batches downloads, caches prices for 60 s and history for 6 h, and caches metadata for 24 h in SQLite. A failed metadata lookup is retried after 10 minutes and never cached as a guess.
 - Changes are price returns from closes (dividends are not included). 1D compares the latest bar with the previous close. YTD uses the last close of the previous year.
+- Yahoo's data for secondary listings of ETFs (Munich, Stuttgart and similar) is often only a few weeks long, stale, or missing intraday highs and lows. When a fund's own history is shorter than about 11 months or more than a week old, the app prices it from another listing of the same fund: same ticker root and same currency, Xetra (`.DE`) first, and the same price within 3% when Yahoo has one. This applies everywhere: price, charts, Sell targets, Risk, Highs & lows and alerts. The position keeps its own ticker and shows *via IBCF.DE* in Holdings. To override, set `price_sources` in settings, e.g. `{"IBCF.MU": "IBCF.DE"}`. An empty value keeps the listing's own prices.
 - Indices and futures have no market cap. In market-cap mode, tiles without a cap get the board's median cap; use Equal or Custom weight for those boards.
 - If Yahoo changes its API and quotes stop loading, rebuild to pick up a newer yfinance: `docker compose build --pull --no-cache && docker compose up -d`.
 

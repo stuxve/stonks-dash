@@ -82,6 +82,7 @@ window.StonksRanges = function (ctx) {
   }
 
   function proxyNote(m) {
+    if (m?.source) return `<div class="sub rg-proxy" title="${esc(`Yahoo's prices for this listing are short or stale, so everything here uses ${m.source}, another listing of the same fund (same currency and price), including intraday highs and lows.`)}">prices from ${esc(m.source)} ⓘ</div>`;
     const p = m?.proxy;
     if (!p) return "";
     const what = p.kind === "listing" ? "another listing of the same fund" : p.kind === "manual" ? "the proxy you chose in Risk" : `an ETF on the same index${p.hedged ? " (its own currency, as your fund is hedged)" : ""}`;

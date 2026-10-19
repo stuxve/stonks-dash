@@ -330,14 +330,24 @@ def test_risk_proxy_benchmark_and_actual(client):
     r = client.post("/api/positions", json={"symbol": "IBCF.MU", "quantity": 100, "avg_cost": 150, "currency": "EUR",
                                             "bought_at": "2026-08-27"})
     assert r.status_code == 201
+    # by default it's priced from the Xetra listing: full history, no proxy needed
+    row = next(p for p in client.get("/api/portfolio").json()["positions"] if p["symbol"] == "IBCF.MU")
+    assert row["price_source"] == "IBCF.DE" and row["ok"]
     d = client.get("/api/risk?years=3&bench=VWCE.DE").json()
     h = next(x for x in d["holdings"] if x["symbol"] == "IBCF.MU")
-    assert h["proxy"] and h["proxy"]["symbol"] == "IBCF.DE" and h["proxy"]["kind"] == "listing"
-    assert h["vol"] and h["vol"] > 0.05 and h["risk_share"] > 0           # no longer carried as cash
+    assert not h["proxy"] and h["vol"] and h["vol"] > 0.05 and h["risk_share"] > 0
     assert d["benchmark"]["symbol"] == "VWCE.DE"
     assert d["fit"] and d["fit"][0]["corr"] >= d["fit"][-1]["corr"]
     a = d["actual"]
     assert a and "diversified" in a and a.get("first", {}).get("top")
+    # with its own (short) prices, Risk splices the other listing in front
+    client.put("/api/settings", json={"price_sources": {"IBCF.MU": ""}})
+    row = next(p for p in client.get("/api/portfolio").json()["positions"] if p["symbol"] == "IBCF.MU")
+    assert row["price_source"] is None
+    d = client.get("/api/risk?years=3&bench=VWCE.DE").json()
+    h = next(x for x in d["holdings"] if x["symbol"] == "IBCF.MU")
+    assert h["proxy"] and h["proxy"]["symbol"] == "IBCF.DE" and h["proxy"]["kind"] == "listing"
+    assert h["vol"] and h["vol"] > 0.05 and h["risk_share"] > 0           # no longer carried as cash
     # a manual proxy wins
     client.put("/api/settings", json={"risk_proxies": {"IBCF.MU": "SPY"}})
     d2 = client.get("/api/risk?years=3").json()
@@ -574,9 +584,9 @@ def test_moves_proxy_and_extra_tickers(client):
     client.post("/api/positions", json={"symbol": "IBCF.MU", "quantity": 1, "avg_cost": 150, "currency": "EUR",
                                         "bought_at": "2026-08-27"})
     d = client.get("/api/moves?extra=aapl,MSFT,bad ticker!,AAPL").json()
-    # IBCF.MU has only a few days of Yahoo history in the mock: the earlier part comes from a proxy
+    # IBCF.MU has only a few days of Yahoo history in the mock: it's priced from the Xetra listing
     ib = d["symbols"]["IBCF.MU"]
-    assert ib["proxy"]["symbol"] == "IBCF.DE" and ib["proxy"]["kind"] == "listing" and ib["windows"]["1y"]["n"] > 200
+    assert ib["source"] == "IBCF.DE" and "proxy" not in ib and ib["windows"]["1y"]["n"] > 200 and ib["windows"]["1y"]["intra"]
     assert "AAPL" in d["symbols"] and set(d["extra"]) == {"AAPL"}          # MSFT is held; invalid one dropped
     assert d["extra"]["AAPL"]["ok"] and d["extra"]["AAPL"]["price"] > 0
 

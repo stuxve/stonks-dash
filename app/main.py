@@ -406,8 +406,45 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         idx = hist.index
         return sym, meta.get("name") or sym, hist * fx.on_index(ccy, idx), hist, ccy
 
+    _src_auto: dict[str, str] = {}
+    _src_checked: dict[str, float] = {}
+
+    def _sync_sources(syms) -> None:
+        """Price some listings from another listing of the same fund. Yahoo's data for secondary listings (Munich,
+        Stuttgart…) is often only a few weeks long, stale or without intraday highs/lows, while the main listing
+        (Xetra) has years of clean data. Auto: an ETF/fund whose own history is short or stale gets the listing
+        `_alt_listing` finds (same ticker root, same currency, Xetra first). Manual: settings.price_sources
+        {"IBCF.MU": "IBCF.DE"}; an empty value keeps the symbol's own prices."""
+        manual = {k.upper(): (v or "").strip().upper() for k, v in (db.get_settings().get("price_sources") or {}).items()}
+        now = time.time()
+        todo = [s_ for s_ in dict.fromkeys(syms) if s_ and s_.upper() not in manual and s_ not in _src_auto
+                and now - _src_checked.get(s_, 0) > 6 * 3600]
+        if todo:
+            meta = engine.meta(todo)
+            for s_ in todo:
+                _src_checked[s_] = now
+                if (meta.get(s_) or {}).get("quote_type") not in ("ETF", "MUTUALFUND"):
+                    continue
+                h = engine.history([s_], date.today() - timedelta(days=400)).get(s_)
+                if (h is not None and len(h) >= 200 and h.index[0] <= pd.Timestamp(date.today() - timedelta(days=330))
+                        and h.index[-1] >= pd.Timestamp(date.today() - timedelta(days=7))):
+                    continue
+                try:
+                    alt = _alt_listing(s_)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("price source lookup for %s failed: %s", s_, e)
+                    alt = None
+                if alt:
+                    log.info("pricing %s from %s (own Yahoo history is short or stale)", s_, alt)
+                    _src_auto[s_] = alt
+        final = {k: v for k, v in _src_auto.items() if k.upper() not in manual}
+        final.update({k: v for k, v in manual.items() if v})
+        if final != engine.sources:
+            engine.set_sources(final)
+
     def _context(base: str):
         lots = db.list_positions()
+        _sync_sources([x["symbol"] for x in lots if x["symbol"] and x["manual_price"] is None])
         txs = db.list_transactions()
         sells = [t for t in txs if t["type"] == "SELL"]
         divs = [t for t in txs if t["type"] == "DIVIDEND"]
@@ -438,7 +475,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             r = {**p, "orig_quantity": p["quantity"], "quantity": qty, "ok": False, "price": None,
                  "price_currency": p["currency"], "changes": {}, "value": None, "cost": None, "pnl": None,
                  "pnl_pct": None, "day_pnl": None, "quote_type": None, "sector": None, "industry": None,
-                 "spark": [], "display_name": p["name"] or p["symbol"]}
+                 "spark": [], "display_name": p["name"] or p["symbol"],
+                 "price_source": engine.sources.get(p["symbol"]) if p["manual_price"] is None else None}
             fx_cost = fx.get(p["currency"])
             if p["manual_price"] is not None:
                 price, pccy, prev = p["manual_price"], p["currency"], None
@@ -826,7 +864,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     def _alt_listing(sym: str) -> str | None:
         """Another listing of the same fund with a longer history: same root ticker, same currency, same price (±3%)."""
-        key = f"alt:{sym}"
+        key = f"alt2:{sym}"   # v2: Xetra first, works when our own quote is missing
         hit = db.get_meta([key], 7 * 86400).get(key)
         if hit is not None:
             return hit.get("symbol")
@@ -840,14 +878,18 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         if cands:
             q = engine.quotes([sym] + cands)
             own = q.get(sym)
+            own_ccy = (own.currency if own else None) or normalize_currency((engine.meta([sym]).get(sym) or {}).get("currency"))[0]
             hist = engine.history(cands, date.today() - timedelta(days=3 * 365))
             for c in cands:
                 qc, h = q.get(c), hist.get(c)
-                if not (own and own.ok and qc and qc.ok and qc.currency == own.currency
-                        and abs(qc.price / own.price - 1) < 0.03) or h is None or len(h) < 250:
+                if not (qc and qc.ok and qc.currency == own_ccy) or h is None or len(h) < 250:
                     continue
-                if best is None or h.index[0] < best[1]:
-                    best = (c, h.index[0])
+                # same price when ours has one (Yahoo often has none, or a stale one, for Munich listings)
+                if own and own.ok and abs(qc.price / own.price - 1) >= 0.03:
+                    continue
+                rank = (not c.upper().endswith(".DE"), h.index[0])     # Xetra first: the main, most liquid venue
+                if best is None or rank < best[1]:
+                    best = (c, rank)
         db.put_meta(key, {"symbol": best[0] if best else None})
         return best[0] if best else None
 
@@ -1487,6 +1529,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                        and x["symbol"] and x["manual_price"] is None})
         ext = [t for t in dict.fromkeys(t.strip().upper() for t in extra.split(",")) if t and SYMBOL_RE.match(t)][:40]
         ext = [t for t in ext if t not in held]
+        _sync_sources(ext)
         syms = held + ext
         if not syms:
             return {"symbols": {}, "missing": {}, "extra": {}}
@@ -1520,6 +1563,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             if m:
                 if s_ in proxies:
                     m["proxy"] = proxies[s_]
+                if s_ in engine.sources:
+                    m["source"] = engine.sources[s_]
                 out[s_] = m
             else:
                 missing[s_] = {"closes": int(len(ser)) if ser is not None else 0,

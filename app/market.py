@@ -626,10 +626,29 @@ class QuoteEngine:
         self._bars: dict[str, tuple[float, date, pd.DataFrame]] = {}       # daily high / low / close
         self._bars_recent: dict[str, tuple[float, pd.DataFrame]] = {}
         self._bars_miss: dict[str, float] = {}
+        self.sources: dict[str, str] = {}   # symbol -> another listing of the same instrument to take prices from
         self._meta_miss: dict[str, float] = {}
         self.meta_retry = 600.0
         self._lock = threading.Lock()
         self.last_update: float | None = None
+
+    # ---- price source substitution (e.g. a Munich listing priced from Xetra) ----
+    def set_sources(self, mapping: dict[str, str]) -> None:
+        """Take prices for `symbol` from `mapping[symbol]` (same instrument, same currency). Meta (name, type)
+        still comes from the symbol itself. Cached prices of symbols whose source changed are dropped."""
+        mapping = {k: v for k, v in mapping.items() if k and v and k != v}
+        with self._lock:
+            changed = {k for k in set(mapping) | set(self.sources) if mapping.get(k) != self.sources.get(k)}
+            for k in changed:
+                for c in (self._hist, self._recent, self._full, self._miss, self._bars, self._bars_recent, self._bars_miss):
+                    c.pop(k, None)
+            self.sources = mapping
+
+    def _pull(self, fn, symbols: list[str], **kw) -> dict:
+        """Call a provider price method with each symbol replaced by its price source, keyed back by symbol."""
+        src = {s: self.sources.get(s, s) for s in symbols}
+        data = fn(list(dict.fromkeys(src.values())), **kw)
+        return {s: data[v] for s, v in src.items() if v in data}
 
     # ---- raw series with TTL caches ----
     def _fetch(self, cache: dict, symbols: list[str], ttl: float, **kw) -> None:
@@ -641,7 +660,7 @@ class QuoteEngine:
             return
         for i in range(0, len(stale), 80):
             chunk = stale[i:i + 80]
-            data = self.p.closes(chunk, **kw)
+            data = self._pull(self.p.closes, chunk, **kw)
             for s in chunk:
                 if s in data:
                     cache[s] = (now, data[s])
@@ -675,7 +694,7 @@ class QuoteEngine:
                     and not (s in self._miss and now - self._miss[s] < self.recent_ttl)]
             for i in range(0, len(need), 80):
                 chunk = need[i:i + 80]
-                data = self.p.closes(chunk, start=start - timedelta(days=10))
+                data = self._pull(self.p.closes, chunk, start=start - timedelta(days=10))
                 for s in chunk:
                     if s in data:
                         self._full[s] = (now, start, data[s])
@@ -707,7 +726,7 @@ class QuoteEngine:
                     and not (s in self._bars_miss and now - self._bars_miss[s] < self.history_ttl)]
             for i in range(0, len(need), 80):
                 chunk = need[i:i + 80]
-                data = self.p.bars(chunk, start=start - timedelta(days=10))
+                data = self._pull(self.p.bars, chunk, start=start - timedelta(days=10))
                 for s in chunk:
                     if s in data:
                         self._bars[s] = (now, start, data[s])
@@ -716,7 +735,7 @@ class QuoteEngine:
             rec = [s for s in symbols if s in self._bars
                    and not (s in self._bars_recent and now - self._bars_recent[s][0] < max(self.recent_ttl, 300))]
             if rec:
-                data = self.p.bars(rec, period="5d")
+                data = self._pull(self.p.bars, rec, period="5d")
                 for s in rec:
                     if s in data:
                         self._bars_recent[s] = (now, data[s])
