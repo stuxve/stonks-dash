@@ -107,6 +107,43 @@ class YahooProvider:
                 log.debug("parse %s failed: %s", sym, e)
         return out
 
+    def bars(self, symbols: list[str], start: date | None = None, period: str | None = None) -> dict[str, pd.DataFrame]:
+        """Daily high, low and close (unadjusted), for intraday highs and lows."""
+        if not symbols:
+            return {}
+        kw = dict(interval="1d", auto_adjust=False, group_by="ticker", threads=True,
+                  progress=False, multi_level_index=True, timeout=20)
+        if start is not None:
+            kw["start"] = start.isoformat()
+        else:
+            kw["period"] = period or "5d"
+        try:
+            df = self.yf.download(list(symbols), **kw)
+        except Exception as e:  # network / rate limit
+            log.warning("bars download failed for %d symbols: %s", len(symbols), e)
+            return {}
+        out: dict[str, pd.DataFrame] = {}
+        if df is None or df.empty:
+            return out
+        for sym in symbols:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if sym in df.columns.get_level_values(0):
+                        sub = df[sym]
+                    elif sym in df.columns.get_level_values(1):
+                        sub = df.xs(sym, axis=1, level=1)
+                    else:
+                        continue
+                else:
+                    sub = df
+                cols = {k: _clean_series(sub[c]) for k, c in (("high", "High"), ("low", "Low"), ("close", "Close"))}
+                f = pd.DataFrame(cols).dropna(subset=["close"])
+                if not f.empty:
+                    out[sym] = f
+            except Exception as e:
+                log.debug("parse bars %s failed: %s", sym, e)
+        return out
+
     def info(self, symbol: str) -> dict:
         t = self.yf.Ticker(symbol)
         info: dict = {}
@@ -396,6 +433,18 @@ class MockProvider:
             out[s] = ser
         return out
 
+    def bars(self, symbols, start=None, period=None):
+        out = {}
+        for sym, c in self.closes(symbols, start=start, period=period).items():
+            r = np.random.default_rng(self._seed(sym) + 21)
+            n = len(c)
+            prev = c.shift(1).fillna(c)
+            span = np.abs(r.normal(0, 0.006, n)) + 0.001
+            hi = np.maximum(c, prev) * (1 + span * r.uniform(0.2, 1, n))
+            lo = np.minimum(c, prev) * (1 - span * r.uniform(0.2, 1, n))
+            out[sym] = pd.DataFrame({"high": hi, "low": lo, "close": c})
+        return out
+
     def info(self, symbol: str) -> dict:
         r = np.random.default_rng(self._seed(symbol) + 7)
         qt = self._quote_type(symbol)
@@ -574,6 +623,9 @@ class QuoteEngine:
         self._hist: dict[str, tuple[float, pd.Series]] = {}
         self._full: dict[str, tuple[float, date, pd.Series]] = {}   # long history since an arbitrary start
         self._miss: dict[str, float] = {}   # negative cache for symbols with no data
+        self._bars: dict[str, tuple[float, date, pd.DataFrame]] = {}       # daily high / low / close
+        self._bars_recent: dict[str, tuple[float, pd.DataFrame]] = {}
+        self._bars_miss: dict[str, float] = {}
         self._meta_miss: dict[str, float] = {}
         self.meta_retry = 600.0
         self._lock = threading.Lock()
@@ -640,6 +692,45 @@ class QuoteEngine:
             ser = ser[~ser.index.duplicated(keep="last")].sort_index()
             _, div = normalize_currency((meta.get(s) or {}).get("currency"))
             out[s] = ser / div
+        return out
+
+    def bars(self, symbols: list[str], start: date) -> dict[str, pd.DataFrame]:
+        """Daily high / low / close since `start` in MAJOR currency units. Long part cached like `history`;
+        the last few days refresh every few minutes so today's high and low stay current."""
+        symbols = [s for s in dict.fromkeys(symbols) if s]
+        if not symbols or not hasattr(self.p, "bars"):
+            return {}
+        now = time.time()
+        with self._lock:
+            need = [s for s in symbols
+                    if not (s in self._bars and self._bars[s][1] <= start and now - self._bars[s][0] < self.history_ttl)
+                    and not (s in self._bars_miss and now - self._bars_miss[s] < self.history_ttl)]
+            for i in range(0, len(need), 80):
+                chunk = need[i:i + 80]
+                data = self.p.bars(chunk, start=start - timedelta(days=10))
+                for s in chunk:
+                    if s in data:
+                        self._bars[s] = (now, start, data[s])
+                    else:
+                        self._bars_miss[s] = now
+            rec = [s for s in symbols if s in self._bars
+                   and not (s in self._bars_recent and now - self._bars_recent[s][0] < max(self.recent_ttl, 300))]
+            if rec:
+                data = self.p.bars(rec, period="5d")
+                for s in rec:
+                    if s in data:
+                        self._bars_recent[s] = (now, data[s])
+        meta = self.meta(symbols)
+        out = {}
+        for s in symbols:
+            hit = self._bars.get(s)
+            if not hit:
+                continue
+            parts = [hit[2]] + ([self._bars_recent[s][1]] if s in self._bars_recent else [])
+            f = pd.concat(parts)
+            f = f[~f.index.duplicated(keep="last")].sort_index()
+            _, div = normalize_currency((meta.get(s) or {}).get("currency"))
+            out[s] = f / div
         return out
 
     def funds(self, symbols: list[str], ttl: float = 7 * 86400) -> dict[str, dict]:

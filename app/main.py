@@ -1512,10 +1512,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 used = {}
             if s_ in used:
                 proxies[s_] = used[s_]
+        bars = engine.bars([s_ for s_ in syms if s_ in px], since - timedelta(days=20))
         out, missing = {}, {}
         for s_ in syms:
             ser = px.get(s_)
-            m = risk.daily_moves(levels.clean(ser)) if ser is not None and len(ser) else None
+            m = risk.daily_moves(levels.clean(ser), bars.get(s_)) if ser is not None and len(ser) else None
             if m:
                 if s_ in proxies:
                     m["proxy"] = proxies[s_]

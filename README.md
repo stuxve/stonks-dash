@@ -85,14 +85,14 @@ The size and group choices are saved per board. Period, range and currency are g
 
   Commands in the chat: `/status`, `/summary`, `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
 - **Highs & lows** shows, for each holding and for the last 15 days, 6 months and 1 year:
-  - the highest and lowest close, with dates;
+  - the lowest and highest price (intraday or closing), with dates;
   - how far today's price is from each one, and where it sits in that range (the bar);
   - the change over the period;
   - the biggest one-day rise and fall.
 
   You can add tickers you don't hold (search box at the top). They're saved with your settings and marked *watch*. When Yahoo's history for a listing is short (common with Munich and other secondary listings), the earlier part comes from another listing of the same fund or an ETF on the same index, as in Risk. The row then says *via SYMBOL*, and highs and lows from that part are estimates.
 
-  Badges flag a new high or low and a record day. Each badge names only the longest window in which it holds, since a 1-year high is also a 6-month high. The cards at the top list which holdings are at a high or a low in each window. Everything uses daily closes, not intraday highs and lows.
+  Badges flag a new high or low and a record day. Each badge names only the longest window in which it holds, since a 1-year high is also a 6-month high. The cards at the top list which holdings are at a high or a low in each window. The **Intraday / Close** switch picks what min and max mean. *Intraday* (the default) uses each day's lowest low and highest high from Yahoo, as charts do. Bad ticks, meaning a high or low far beyond both that day's and the previous close, fall back to the close. *Close* uses closing prices only. The biggest one-day rise and fall are always close to close.
 - **Risk** replays today's holdings and weights over the last 1, 3 or 5 years of prices, in your base currency. It has its own benchmark picker (MSCI World by default), and each option shows its correlation with your portfolio, with ★ on the best fit. If the benchmark used by Performance and "Vs index" fits much worse, a button lets you switch that one too. Holdings with a short price history (for example a Munich listing Yahoo barely covers) borrow the earlier part from a proxy. The app tries, in order: a ticker you type in the table, another listing of the same fund (same root ticker, currency and price), then an ETF on the same index (in its local currency if your fund is hedged). This way they're never treated as cash.
   - Volatility, max drawdown (peak, trough, recovery and how long it lasted), distance from the last peak, worst month and beta/correlation vs the benchmark, next to the same figures for the benchmark. There's also the max drawdown of the portfolio you actually held, time-weighted so contributions don't count. It starts on the first day you held at least 3 effective positions with none above 50% of cost, so a period when you owned a single stock doesn't count as a portfolio drawdown. That earlier figure is shown alongside.
   - A drawdown chart, your mix against the benchmark.

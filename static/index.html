@@ -204,15 +204,16 @@
     <!-- highs & lows -->
     <div id="p-sub-ranges" class="psub" hidden>
       <div class="toolbar">
+        <span class="ctl">Min / max <span class="seg" id="rg-basis"><button data-v="intra" title="Lowest low and highest high of the day, as charts show">Intraday</button><button data-v="close" title="Daily closing prices only">Close</button></span></span>
         <label class="ctl">Sort by <select id="rg-sort"></select></label>
         <div class="field symbol-search rg-addbox"><input id="rg-add" type="text" autocomplete="off" placeholder="Add a ticker you don't hold — e.g. AAPL, Inditex, IE00B5BMR087"><ul class="suggest" hidden></ul></div>
         <span id="rg-extras" class="rg-extras"></span>
         <span class="hint" id="rg-add-note"></span>
       </div>
-      <p class="hint">Highest and lowest close of each window, where today sits in that range, and the biggest one-day rise and fall. Hover a cell for details.</p>
+      <p class="hint">Lowest and highest price of each window, where today sits in that range, and the biggest one-day rise and fall. <span id="rg-basis-note"></span> Hover a cell for details.</p>
       <div class="kpis small" id="rg-kpis"></div>
       <div class="table-wrap"><table class="grid" id="rg-table"></table></div>
-      <p class="hint">Based on daily closes, not intraday highs and lows. Windows are calendar days (15 days ≈ 10–11 sessions; crypto trades every day).</p>
+      <p class="hint">Windows are calendar days (15 days ≈ 10–11 sessions; crypto trades every day). Intraday highs and lows come from Yahoo; obvious bad ticks (far beyond both that day's and the previous close) fall back to the close.</p>
     </div>
 
     <!-- risk -->

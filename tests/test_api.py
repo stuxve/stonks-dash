@@ -579,3 +579,19 @@ def test_moves_proxy_and_extra_tickers(client):
     assert ib["proxy"]["symbol"] == "IBCF.DE" and ib["proxy"]["kind"] == "listing" and ib["windows"]["1y"]["n"] > 200
     assert "AAPL" in d["symbols"] and set(d["extra"]) == {"AAPL"}          # MSFT is held; invalid one dropped
     assert d["extra"]["AAPL"]["ok"] and d["extra"]["AAPL"]["price"] > 0
+
+
+def test_intraday_highs_lows(client):
+    from app import risk
+    idx = pd.bdate_range("2026-01-01", periods=60)
+    close = pd.Series(100.0, index=idx)
+    close.iloc[-1] = 101.0
+    bars = pd.DataFrame({"high": close * 1.004, "low": close * 0.996}, index=idx)
+    bars.iloc[-3, bars.columns.get_loc("low")] = 98.5            # a real intraday dip, closed back at 100
+    bars.iloc[-6, bars.columns.get_loc("high")] = 160.0          # a bad tick: +60% with closes flat
+    w = risk.window_extremes(close, 15, risk.intraday_hilo(close, bars))
+    assert w["lo"] == 100.0 and w["intra"]["lo"] == 98.5 and w["intra"]["lo_date"] == idx[-3].date().isoformat()
+    assert w["intra"]["hi"] == pytest.approx(101 * 1.004) and w["intra"]["at_hi"]   # the 160 tick was dropped
+    assert w["intra"]["from_lo"] == pytest.approx(101 / 98.5 - 1)
+    m = client.get("/api/moves").json()["symbols"]
+    assert all(v["windows"]["1y"]["intra"]["lo"] <= v["windows"]["1y"]["lo"] for v in m.values())

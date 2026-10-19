@@ -147,7 +147,7 @@ def window_return(s: pd.Series | None, start: str, end: str) -> float | None:
     return float(pb.iloc[-1] / pa.iloc[-1] - 1)
 
 
-def daily_moves(s: pd.Series) -> dict | None:
+def daily_moves(s: pd.Series, bars: pd.DataFrame | None = None) -> dict | None:
     """How much a price moves in a day: last-year distribution of daily returns, records, this week's best/worst day.
     Works on the asset's own currency (its moves, not your FX). `s` should be cleaned of bad ticks."""
     s = s.dropna()
@@ -184,14 +184,39 @@ def daily_moves(s: pd.Series) -> dict | None:
                        "days": int(len(wk)),
                        "range": {"hi": float(s[s.index > end - pd.Timedelta(days=7)].max()),
                                  "lo": float(s[s.index > end - pd.Timedelta(days=7)].min())}}
-    out["windows"] = {k: window_extremes(s, d) for k, d in WINDOWS.items()}
+    hl = intraday_hilo(s, bars)
+    out["windows"] = {k: window_extremes(s, d, hl) for k, d in WINDOWS.items()}
     return out
 
 
 WINDOWS = {"15d": 15, "6m": 182, "1y": 365}
 
 
-def window_extremes(s: pd.Series, days: int) -> dict | None:
+def intraday_hilo(close: pd.Series, bars: pd.DataFrame | None) -> pd.DataFrame | None:
+    """Daily intraday high and low aligned to `close` (already cleaned). Yahoo's highs and lows carry bad ticks more
+    often than its closes, so a high (low) that overshoots both the day's and the previous close by more than
+    max(5%, 8x the typical overshoot) is dropped back to that close. Days with no intraday data (or covered by a
+    proxy) use the close. `real` marks days whose high/low are actual intraday data."""
+    if bars is None or bars.empty or close is None or close.empty:
+        return None
+    b = bars.reindex(close.index)
+    prev = close.shift(1).fillna(close)
+    top, bot = np.maximum(close, prev), np.minimum(close, prev)
+    hi = pd.to_numeric(b.get("high"), errors="coerce").where(lambda x: x > 0)
+    lo = pd.to_numeric(b.get("low"), errors="coerce").where(lambda x: x > 0)
+    real = hi.notna() & lo.notna()
+    hi = np.maximum(hi.fillna(close), close)
+    lo = np.minimum(lo.fillna(close), close)
+    ex_h = (hi / top - 1).clip(lower=0)
+    ex_l = (1 - lo / bot).clip(lower=0)
+    lim_h = max(0.05, 8 * float(ex_h[real].median() or 0)) if real.any() else 0.05
+    lim_l = max(0.05, 8 * float(ex_l[real].median() or 0)) if real.any() else 0.05
+    hi = hi.where(ex_h <= lim_h, top)
+    lo = lo.where(ex_l <= lim_l, bot)
+    return pd.DataFrame({"high": hi, "low": lo, "real": real})
+
+
+def window_extremes(s: pd.Series, days: int, hl: pd.DataFrame | None = None) -> dict | None:
     """Highest and lowest close of the last `days` calendar days, where today's price sits between them,
     and the biggest one-day rise and fall in that window."""
     s = s.dropna()
@@ -218,4 +243,14 @@ def window_extremes(s: pd.Series, days: int) -> dict | None:
         out["today"] = today
         out["today_is_best"] = rw.idxmax() == end and today > 0
         out["today_is_worst"] = rw.idxmin() == end and today < 0
+    if hl is not None:
+        h = hl[(hl.index > end - pd.Timedelta(days=days)) & (hl.index <= end)]
+        if len(h) and h["real"].any():
+            ih_d, il_d = h["high"].idxmax(), h["low"].idxmin()
+            ih, il = float(h["high"].loc[ih_d]), float(h["low"].loc[il_d])
+            out["intra"] = {"hi": ih, "hi_date": ih_d.date().isoformat(), "lo": il, "lo_date": il_d.date().isoformat(),
+                            "from_hi": now / ih - 1 if ih else None, "from_lo": now / il - 1 if il else None,
+                            "pos": (now - il) / (ih - il) if ih > il else 0.5,
+                            "at_hi": ih_d == end, "at_lo": il_d == end,
+                            "real_days": int(h["real"].sum()), "days": int(len(h))}
     return out

@@ -7,6 +7,9 @@ window.StonksRanges = function (ctx) {
   const S = () => state.settings.ranges || (state.settings.ranges = {});
   const sortKey = () => S().sort || "from_hi_1y";
   const extras = () => S().extra || [];
+  const intra = () => (S().basis || "intra") === "intra";
+  // the min/max view of a window: intraday highs and lows, or closes (falls back to closes when Yahoo has no intraday data)
+  const V = (w) => (w && intra() && w.intra ? w.intra : w);
   let data = null, missing = {}, extraInfo = {}, at = 0, loadedFor = "";
 
   const pct = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(d)}%`);
@@ -44,14 +47,14 @@ window.StonksRanges = function (ctx) {
 
   // one badge per kind, for the longest window it holds in (a 1-year high is also a 6-month and 15-day high)
   const KINDS = [
-    ["at_hi", "ok-s", (l, a) => `${a} high`, (l) => `Today's close is the highest of the last ${l}`],
-    ["at_lo", "bad-s", (l, a) => `${a} low`, (l) => `Today's close is the lowest of the last ${l}`],
+    ["at_hi", "ok-s", (l, a) => `${a} high`, (l) => intra() ? `Today's intraday high is the highest price of the last ${l}` : `Today's close is the highest of the last ${l}`],
+    ["at_lo", "bad-s", (l, a) => `${a} low`, (l) => intra() ? `Today's intraday low is the lowest price of the last ${l}` : `Today's close is the lowest of the last ${l}`],
     ["today_is_best", "ok-s", (l) => `best day in ${l}`, (l) => `Today's rise is the biggest one-day rise of the last ${l}`],
     ["today_is_worst", "bad-s", (l) => `worst day in ${l}`, (l) => `Today's fall is the biggest one-day fall of the last ${l}`],
   ];
   function badges(m) {
     return KINDS.map(([key, c, txt, tip]) => {
-      const hit = [...WIN].reverse().find(([k]) => m?.windows?.[k]?.[key]);
+      const hit = [...WIN].reverse().find(([k]) => (key.startsWith("at_") ? V(m?.windows?.[k]) : m?.windows?.[k])?.[key]);
       return hit ? `<span class="pill ${c}" title="${esc(tip(hit[1]))}">${txt(hit[1], hit[2])}</span>` : "";
     }).join("");
   }
@@ -63,14 +66,18 @@ window.StonksRanges = function (ctx) {
         : h.m ? `less than 3 closes in the last ${l}` : "loading…";
       return `<td class="rgc"><span class="sub">${esc(why)}</span></td>`;
     }
-    const c = h.ccy, pos = Math.max(0, Math.min(1, w.pos));
-    const tip = `Last ${l} (${w.n} closes)\nHighest close: ${fmtPrice(w.hi, c)} on ${fmtDate(w.hi_date)} — now ${pct(w.from_hi)}\nLowest close: ${fmtPrice(w.lo, c)} on ${fmtDate(w.lo_date)} — now ${pct(w.from_lo)}\n`
-      + `Now at ${Math.round(pos * 100)}% of the range · change over the period ${pct(w.change)}\n`
+    const c = h.ccy, x = V(w), pos = Math.max(0, Math.min(1, x.pos));
+    const it = w.intra;
+    const tip = `Last ${l} (${w.n} sessions)\n`
+      + (it ? `Intraday high: ${fmtPrice(it.hi, c)} on ${fmtDate(it.hi_date)} — now ${pct(it.from_hi)}\nIntraday low: ${fmtPrice(it.lo, c)} on ${fmtDate(it.lo_date)} — now ${pct(it.from_lo)}\n`
+        + (it.real_days < it.days ? `(${it.days - it.real_days} of ${it.days} days have no intraday data and use the close)\n` : "") : "No intraday highs and lows from Yahoo for this window\n")
+      + `Highest close: ${fmtPrice(w.hi, c)} on ${fmtDate(w.hi_date)} — now ${pct(w.from_hi)}\nLowest close: ${fmtPrice(w.lo, c)} on ${fmtDate(w.lo_date)} — now ${pct(w.from_lo)}\n`
+      + `Now at ${Math.round(pos * 100)}% of the ${x === it ? "intraday" : "closing"} range · change over the period ${pct(w.change)}\n`
       + (w.best ? `Biggest one-day rise: ${pct(w.best.ret)} on ${fmtDate(w.best.date)}\nBiggest one-day fall: ${pct(w.worst.ret)} on ${fmtDate(w.worst.date)}\nToday: ${pct(w.today)}` : "");
     return `<td class="rgc" title="${esc(tip)}">
       <div class="rgbar"><i class="fill" style="width:${(pos * 100).toFixed(1)}%"></i><i class="dot" style="left:${(pos * 100).toFixed(1)}%"></i></div>
-      <div class="rgl"><span class="sub">min</span> ${fmtPrice(w.lo, c)} <span class="up">${pct(w.from_lo)}</span> <span class="sub">${dS(w.lo_date)}</span></div>
-      <div class="rgl"><span class="sub">max</span> ${fmtPrice(w.hi, c)} <span class="${w.from_hi < -0.0005 ? "down" : "up"}">${w.from_hi < -0.0005 ? pct(w.from_hi) : "at max"}</span> <span class="sub">${dS(w.hi_date)}</span></div>
+      <div class="rgl"><span class="sub">min</span> ${fmtPrice(x.lo, c)} <span class="up">${pct(x.from_lo)}</span> <span class="sub">${dS(x.lo_date)}</span></div>
+      <div class="rgl"><span class="sub">max</span> ${fmtPrice(x.hi, c)} <span class="${x.from_hi < -0.0005 ? "down" : "up"}">${x.from_hi < -0.0005 ? pct(x.from_hi) : "at max"}</span> <span class="sub">${dS(x.hi_date)}</span>${intra() && !it ? ` <span class="sub" title="Yahoo has no intraday highs and lows here">(close)</span>` : ""}</div>
       ${w.best ? `<div class="rgl sub">day <span class="up">${pct(w.best.ret)}</span> / <span class="down">${pct(w.worst.ret)}</span> · period <span class="${cls(w.change)}">${pct(w.change)}</span></div>` : ""}</td>`;
   }
 
@@ -83,9 +90,9 @@ window.StonksRanges = function (ctx) {
   }
 
   const SORTS = {
-    from_hi_1y: ["Furthest below 1-year max", (h) => h.m?.windows?.["1y"]?.from_hi ?? 9, 1],
-    pos_6m: ["Lowest in 6-month range", (h) => h.m?.windows?.["6m"]?.pos ?? 9, 1],
-    from_lo_1y: ["Highest above 1-year min", (h) => -(h.m?.windows?.["1y"]?.from_lo ?? -9), 1],
+    from_hi_1y: ["Furthest below 1-year max", (h) => V(h.m?.windows?.["1y"])?.from_hi ?? 9, 1],
+    pos_6m: ["Lowest in 6-month range", (h) => V(h.m?.windows?.["6m"])?.pos ?? 9, 1],
+    from_lo_1y: ["Highest above 1-year min", (h) => -(V(h.m?.windows?.["1y"])?.from_lo ?? -9), 1],
     chg_15d: ["15-day change", (h) => h.m?.windows?.["15d"]?.change ?? -9, -1],
     weight: ["Weight", (h) => h.weight ?? 0, -1],
   };
@@ -98,7 +105,9 @@ window.StonksRanges = function (ctx) {
     const [, f, dir] = SORTS[sortKey()];
     rows.sort((a, c) => (f(a) - f(c)) * dir);
     // summary: what's at a high / low right now
-    const cnt = (k, key) => rows.filter((h) => h.m?.windows?.[k]?.[key]).map((h) => h.symbol);
+    const cnt = (k, key) => rows.filter((h) => V(h.m?.windows?.[k])?.[key]).map((h) => h.symbol);
+    $$("#rg-basis button").forEach((b) => b.classList.toggle("active", (b.dataset.v === "intra") === intra()));
+    $("#rg-basis-note").textContent = intra() ? "Min and max are intraday lows and highs (what charts show). Biggest day is close to close." : "Min and max are daily closes. Biggest day is close to close.";
     const sum = WIN.map(([k, l]) => {
       const hi = cnt(k, "at_hi"), lo = cnt(k, "at_lo");
       return `<div class="kpi"><div class="k">Last ${l}</div><div class="v"><span class="up">${hi.length}</span> <small>at max</small> · <span class="down">${lo.length}</span> <small>at min</small></div>
@@ -111,6 +120,7 @@ window.StonksRanges = function (ctx) {
         ${WIN.map(([k, l]) => winCell(h, k, l)).join("")}</tr>`).join("")}</tbody>`;
   }
 
+  $$("#rg-basis button").forEach((b) => b.addEventListener("click", () => { saveSettings({ ranges: { ...S(), basis: b.dataset.v } }); draw(); }));
   $("#rg-sort").addEventListener("change", (e) => { saveSettings({ ranges: { ...S(), sort: e.target.value } }); draw(); });
 
   // extra tickers you don't hold
