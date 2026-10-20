@@ -220,6 +220,7 @@ window.StonksPortfolio = function (ctx) {
   };
   const bucketOf = (p, dim) => (dim === "symbol" ? p.symbol || p.display_name || "?" : autoGroup(p, dim) || "Other");
   const planned = () => A().planned || {};
+  const buyOnly = () => A().buy_only ?? true;
 
   function currentBuckets(dim, basis = allocBasis()) {
     const m = new Map();
@@ -260,13 +261,19 @@ window.StonksPortfolio = function (ctx) {
     sumEl.classList.toggle("warn-t", sumT > 0 && Math.abs(sumT - 100) > 0.01);
     const t = $("#alloc-table");
     t.tHead.innerHTML = `<tr><th>Bucket</th><th class="num">${basisLbl}</th><th class="num">Current</th><th class="num">Target</th><th class="num">Drift</th><th class="num">To reach target</th><th class="barcol">Current vs target</th></tr>`;
+    $$("#alloc-mode button").forEach((x) => x.classList.toggle("active", (x.dataset.v === "buy") === buyOnly()));
+    // buy only: the smallest total at which no targeted bucket is above its target, i.e. you only add money
+    // (the most overweight bucket sets it); every other targeted bucket is topped up to its target % of that total
+    const totalB = Math.max(total, ...keys.filter((k) => targets[k] > 0).map((k) => (cur.get(k)?.value || 0) / (targets[k] / 100)));
+    let buyTotal = 0;
     const maxPct = Math.max(1, ...keys.map((k) => Math.max(total ? (cur.get(k)?.value || 0) / total * 100 : 0, targets[k] || 0)));
     t.tBodies[0].innerHTML = keys.map((k) => {
       const v = cur.get(k)?.value || 0;
       const pc = total ? (v / total) * 100 : 0;
       const tg = targets[k];
       const drift = tg == null ? null : pc - tg;
-      const delta = tg == null ? null : (tg / 100) * total - v;
+      const delta = tg == null ? null : buyOnly() ? Math.max(0, (tg / 100) * totalB - v) : (tg / 100) * total - v;
+      if (delta > 0) buyTotal += delta;
       const severe = drift != null && Math.abs(drift) >= 5;
       const driftTxt = drift == null ? "—" : Math.abs(drift) < 0.05 ? "on target" : `${fmtPP(drift)} ${drift > 0 ? "over" : "under"}`;
       return `<tr data-k="${esc(k)}">
@@ -275,17 +282,22 @@ window.StonksPortfolio = function (ctx) {
         <td class="num">${pc.toFixed(1)}%</td>
         <td class="num"><input class="tgt" type="number" min="0" max="100" step="0.5" value="${tg ?? ""}" placeholder="—"> %</td>
         <td class="num ${severe ? "warn-t" : ""}" ${severe ? 'title="More than 5 pp away from target"' : ""}>${severe ? "⚠ " : ""}${driftTxt}</td>
-        <td class="num">${delta == null ? "—" : Math.abs(delta) < 0.005 ? "on target" : `${delta > 0 ? "buy" : "sell"} ${fmtMoney(Math.abs(delta), b)}`}</td>
+        <td class="num">${delta == null ? "—" : Math.abs(delta) < 0.005 ? (buyOnly() && drift > 0.05 ? `<span class="sub" title="Above target: no new money here; the others catch up">hold</span>` : "on target") : `${delta > 0 ? "buy" : "sell"} ${fmtMoney(Math.abs(delta), b)}`}</td>
         <td class="barcol"><div class="abar"><span class="cur" style="width:${(pc / maxPct) * 100}%"></span>${tg != null ? `<i class="tgt-mark" style="left:${(tg / maxPct) * 100}%" title="target ${tg}%"></i>` : ""}</div></td>
       </tr>`;
     }).join("") || `<tr><td colspan="7" class="hint">No positions yet.</td></tr>`;
-    t.tFoot.innerHTML = keys.length ? `<tr><td>Total</td><td class="num">${fmtMoney(total, b)}</td><td class="num">100%</td><td class="num">${+sumT.toFixed(2)}%</td><td></td><td></td><td></td></tr>` : "";
+    t.tFoot.innerHTML = keys.length ? `<tr><td>Total</td><td class="num">${fmtMoney(total, b)}</td><td class="num">100%</td><td class="num">${+sumT.toFixed(2)}%</td><td></td><td class="num" title="${buyOnly() ? "New money needed to reach every target without selling" : "Total to buy (sales would fund part of it)"}">${buyTotal > 0.005 ? `buy ${fmtMoney(buyTotal, b)}` : ""}</td><td></td></tr>` : "";
     drawPlan();
   }
 
   $("#alloc-dim").addEventListener("change", (e) => {
     saveAlloc({ dim: e.target.value });
     resetPick();
+    drawAlloc();
+  });
+  $("#alloc-mode").addEventListener("click", (e) => {
+    const x = e.target.closest("button"); if (!x) return;
+    saveAlloc({ buy_only: x.dataset.v === "buy" });
     drawAlloc();
   });
   $("#alloc-basis").addEventListener("click", (e) => {
