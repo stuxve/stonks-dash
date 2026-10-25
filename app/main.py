@@ -1579,6 +1579,51 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                               "quote_type": q.quote_type if q else None}
         return {"symbols": out, "missing": missing, "extra": extra_info, "as_of": time.time()}
 
+    # ------------------------------------------------------------------ technical analysis
+    @app.get("/api/ta")
+    def ta_view(symbol: str, years: int = 10):
+        """Daily OHLCV for the Analysis tab (indicators are computed in the browser), plus the support /
+        resistance zones and volatility the Sell targets tab uses. Bad ticks are cleaned like everywhere else:
+        closes by the Hampel filter, highs/lows that overshoot both closes by far fall back to the close, and an
+        open outside the day's range is clipped into it (missing opens use the previous close)."""
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.match(sym):
+            raise HTTPException(400, "Invalid ticker")
+        years = max(1, min(int(years), 30))
+        _sync_sources([sym])
+        start = date.today() - timedelta(days=int(365.25 * years) + 10)
+        b = engine.bars([sym], start).get(sym)
+        meta = engine.meta([sym]).get(sym) or {}
+        q = engine.quotes([sym]).get(sym)
+        if b is None or b.empty or b["close"].dropna().empty:
+            raise HTTPException(404, f"No price history for {sym}")
+        b = b[b.index >= pd.Timestamp(start)]
+        close = levels.clean(b["close"].dropna())
+        hl = risk.intraday_hilo(close, b)
+        hi = hl["high"] if hl is not None else close
+        lo = hl["low"] if hl is not None else close
+        prev = close.shift(1).fillna(close)
+        op = pd.to_numeric(b["open"], errors="coerce").reindex(close.index) if "open" in b else prev
+        op = op.where((op > 0) & (op <= hi * 1.5) & (op >= lo / 1.5), prev)
+        op = np.minimum(np.maximum(op, lo), hi)
+        vol = (pd.to_numeric(b["volume"], errors="coerce").reindex(close.index).fillna(0)
+               if "volume" in b else pd.Series(0.0, index=close.index))
+        r6 = lambda x: float(f"{float(x):.6g}")  # noqa: E731
+        rows = [[d.date().isoformat(), r6(o), r6(h), r6(l_), r6(c), int(v)]
+                for d, o, h, l_, c, v in zip(close.index, op, hi, lo, close, vol)]
+        an = levels.analyze(close[close.index >= close.index[-1] - pd.Timedelta(days=levels.LOOKBACK_DAYS)],
+                            q.price if q and q.ok else None)
+        zones = None
+        if an:
+            zones = {"resistance": an["resistance"], "support": an["support"], "breakout": an["breakout"],
+                     "breakdown": an["breakdown"], "vol": an["vol"]}
+        ccy = normalize_currency(meta.get("currency") or (q.currency if q else None))[0]
+        return {"symbol": sym, "name": meta.get("long_name") or meta.get("name") or sym, "currency": ccy,
+                "quote_type": meta.get("quote_type"), "exchange": meta.get("exchange"),
+                "sector": meta.get("sector"), "source": engine.sources.get(sym),
+                "price": q.price if q and q.ok else rows[-1][4], "day": (q.changes or {}).get("1D") if q and q.ok else None,
+                "has_volume": bool((vol > 0).sum() > len(vol) * 0.5), "bars": rows, "zones": zones, "as_of": time.time()}
+
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():
@@ -1795,7 +1840,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

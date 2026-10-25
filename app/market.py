@@ -108,7 +108,7 @@ class YahooProvider:
         return out
 
     def bars(self, symbols: list[str], start: date | None = None, period: str | None = None) -> dict[str, pd.DataFrame]:
-        """Daily high, low and close (unadjusted), for intraday highs and lows."""
+        """Daily open, high, low, close (unadjusted) and volume."""
         if not symbols:
             return {}
         kw = dict(interval="1d", auto_adjust=False, group_by="ticker", threads=True,
@@ -136,7 +136,8 @@ class YahooProvider:
                         continue
                 else:
                     sub = df
-                cols = {k: _clean_series(sub[c]) for k, c in (("high", "High"), ("low", "Low"), ("close", "Close"))}
+                cols = {k: _clean_series(sub[c]) for k, c in (("open", "Open"), ("high", "High"), ("low", "Low"),
+                                                               ("close", "Close"), ("volume", "Volume")) if c in sub}
                 f = pd.DataFrame(cols).dropna(subset=["close"])
                 if not f.empty:
                     out[sym] = f
@@ -442,7 +443,10 @@ class MockProvider:
             span = np.abs(r.normal(0, 0.006, n)) + 0.001
             hi = np.maximum(c, prev) * (1 + span * r.uniform(0.2, 1, n))
             lo = np.minimum(c, prev) * (1 - span * r.uniform(0.2, 1, n))
-            out[sym] = pd.DataFrame({"high": hi, "low": lo, "close": c})
+            op = prev * (1 + r.normal(0, 0.003, n))
+            vol = np.exp(r.normal(np.log(1e6), 0.4, n)) * (1 + 20 * np.abs(c.pct_change().fillna(0)))
+            out[sym] = pd.DataFrame({"open": op, "high": np.maximum(hi, op), "low": np.minimum(lo, op), "close": c,
+                                     "volume": np.round(vol)})
         return out
 
     def info(self, symbol: str) -> dict:
@@ -714,7 +718,7 @@ class QuoteEngine:
         return out
 
     def bars(self, symbols: list[str], start: date) -> dict[str, pd.DataFrame]:
-        """Daily high / low / close since `start` in MAJOR currency units. Long part cached like `history`;
+        """Daily open / high / low / close (MAJOR currency units) and volume since `start`. Long part cached like `history`;
         the last few days refresh every few minutes so today's high and low stay current."""
         symbols = [s for s in dict.fromkeys(symbols) if s]
         if not symbols or not hasattr(self.p, "bars"):
@@ -749,7 +753,11 @@ class QuoteEngine:
             f = pd.concat(parts)
             f = f[~f.index.duplicated(keep="last")].sort_index()
             _, div = normalize_currency((meta.get(s) or {}).get("currency"))
-            out[s] = f / div
+            if div != 1:
+                f = f.copy()
+                px = [c for c in ("open", "high", "low", "close") if c in f]
+                f[px] = f[px] / div
+            out[s] = f
         return out
 
     def funds(self, symbols: list[str], ttl: float = 7 * 86400) -> dict[str, dict]:

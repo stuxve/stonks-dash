@@ -116,7 +116,7 @@ window.StonksRanges = function (ctx) {
     }).join("");
     $("#rg-kpis").innerHTML = sum;
     t.innerHTML = `<thead><tr><th>Asset</th><th class="num">Now</th>${WIN.map(([, l]) => `<th class="rgc">Last ${l} <span class="sub">min · max · biggest day</span></th>`).join("")}</tr></thead>
-      <tbody>${rows.map((h) => `<tr><td class="asset"><b>${esc(h.symbol)}</b><div class="sub">${esc(h.name || "")}${h.weight != null ? ` · ${h.weight.toFixed(1)}%` : ""}</div><div class="rg-badges">${h.watch ? `<span class="pill" title="Not in your portfolio — added to this list">watch</span><button class="linkbtn rg-rm" data-sym="${esc(h.symbol)}" title="Remove from this list">remove</button>` : ""}${badges(h.m)}</div>${proxyNote(h.m)}</td>
+      <tbody>${rows.map((h) => `<tr><td class="asset"><b>${esc(h.symbol)}</b> <button class="linkbtn rg-chart" data-sym="${esc(h.symbol)}" title="Open in Analysis">chart</button><div class="sub">${esc(h.name || "")}${h.weight != null ? ` · ${h.weight.toFixed(1)}%` : ""}</div><div class="rg-badges">${h.watch ? `<span class="pill" title="Not in your portfolio — added to this list">watch</span><button class="linkbtn rg-rm" data-sym="${esc(h.symbol)}" title="Remove from this list">remove</button>` : ""}${badges(h.m)}</div>${proxyNote(h.m)}</td>
         <td class="num">${h.price != null ? fmtPrice(h.price, h.ccy) : "—"}<div class="sub ${cls(h.day)}">${h.day != null ? `${h.day > 0 ? "+" : ""}${h.day.toFixed(2)}% today` : ""}</div></td>
         ${WIN.map(([k, l]) => winCell(h, k, l)).join("")}</tr>`).join("")}</tbody>`;
   }
@@ -142,7 +142,11 @@ window.StonksRanges = function (ctx) {
   addInput.addEventListener("keydown", (e) => { if (e.key === "Enter" && addInput.value.trim()) { e.preventDefault(); setTimeout(() => addInput.value.trim() && addSym(addInput.value), 0); } });
   const rm = (e) => { const b = e.target.closest("button[data-sym]"); if (b) setExtras(extras().filter((x) => x !== b.dataset.sym)); };
   $("#rg-extras").addEventListener("click", rm);
-  $("#rg-table").addEventListener("click", (e) => { if (e.target.closest(".rg-rm")) rm(e); });
+  $("#rg-table").addEventListener("click", (e) => {
+    const c = e.target.closest(".rg-chart");
+    if (c) return window.dispatchEvent(new CustomEvent("stonks:chart", { detail: c.dataset.sym }));
+    if (e.target.closest(".rg-rm")) rm(e);
+  });
   drawChips();
   function refresh(silent) { load(!silent); }
   return { refresh };

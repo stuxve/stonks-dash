@@ -5,11 +5,11 @@ A self-hosted market heatmap in the style of TradingView and finviz. The two hea
 - **Markets**: boards for world indices, index funds and ETFs, US mega caps, Europe, IBEX 35, macro (commodities, FX, rates) and crypto. You can create, rename, reorder and delete boards and add any Yahoo Finance symbol to them.
 - **My portfolio**: your own positions with market value, invested amount, unrealized P&L and today's P&L. Each position is a tile sized by value and colored by total P&L % or by price change over a period.
 
-A third section, **Market hours**, shows which exchanges are open right now, with countdowns to the next open or close, a 24-hour session timeline, lunch breaks, holidays and early closes.
+**Analysis** is an interactive technical-analysis chart for any ticker. **Market hours** shows which exchanges are open right now, with countdowns to the next open or close, a 24-hour session timeline, lunch breaks, holidays and early closes.
 
 All values can be shown in **EUR or USD**. Positions in other currencies are converted at live FX rates, and GBp/ZAc/ILA quotes are normalized to their major unit.
 
-The backend is FastAPI with yfinance and SQLite. The frontend is vanilla JS with d3 (vendored, so no CDN is needed at runtime). Everything ships as a single Docker container.
+The backend is FastAPI with yfinance and SQLite. The frontend is vanilla JS with d3 and TradingView Lightweight Charts (both vendored, so no CDN is needed at runtime). Everything ships as a single Docker container.
 
 ## Run it
 
@@ -162,6 +162,30 @@ The size and group choices are saved per board. Period, range and currency are g
   - The app won't save a sale (or an edit or deletion of a buy) that would leave you selling more than you held on that date.
   - Hacienda applies FIFO across all your brokers for the same security. If you hold the same ISIN in two accounts, check the result.
 
+**Analysis.** A candlestick chart for any ticker: search one, or pick from your holdings, your Highs & lows watch list or recent tickers. **Chart** in Holdings and *chart* in Highs & lows open the ticker here.
+
+- **Chart:**
+  - **Bars and types:** daily, weekly or monthly bars; candles, Heikin-Ashi, OHLC bars, line or area; optional log scale.
+  - **Ranges:** 1M to All, the full history Yahoo has.
+  - **Navigation:** scroll to zoom and drag to pan. Pane borders can be dragged.
+  - **Legend:** shows open, high, low, close, change and every indicator's value at the crosshair.
+- **Indicators**, each with editable parameters and saved with your settings:
+  - **Overlays:**
+    - 4 moving averages (SMA, EMA, WMA or HMA);
+    - Bollinger, Keltner and Donchian channels;
+    - Ichimoku, including the cloud projected ahead;
+    - Parabolic SAR, Supertrend and anchored VWAP.
+  - **Levels:** the Sell targets support/resistance zones, previous-period pivot points, auto-Fibonacci over the visible range, the 52-week high and low, and golden/death cross markers.
+  - **Your own data:** your buys, average cost, stop and target.
+  - **Panes:** volume, RSI, MACD, Stochastic, ADX/DMI, ATR, OBV, MFI, CMF, CCI, Williams %R and rate of change.
+- **Drawing tools**, saved per ticker:
+  - **Lines:** horizontal line; trend line, extended to today; Fibonacci retracement between two clicks.
+  - **Measure:** the % change, bars and days between two points.
+  - **⚓ VWAP:** sets the anchor date for the anchored VWAP.
+  - **Escape** leaves a tool.
+- **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast.
+- **Data:** indicators are computed in the browser from daily OHLCV from Yahoo, with bad ticks cleaned. Weekly and monthly bars are built from the daily ones. Listings with short Yahoo history are priced from their main listing, as everywhere else in the app.
+
 **Market hours.** Each row shows the exchange's status (open, lunch break, pre-market or after-hours, closed or holiday), a live countdown, today's session times and its main index's 1D change. The timeline covers your day (or the next 24 hours), with a line marking the current time.
 
 - **Times** switches the session times between your time zone and the exchange's local time.
@@ -195,6 +219,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/ta?symbol=NVDA&years=10` | Daily OHLCV (cleaned) for the Analysis tab, plus support/resistance zones and volatility |
 | GET | `/api/moves?extra=AAPL,ITX.MC` | Per held ticker (plus `extra`): typical daily move, this week's moves, and for 15 days / 6 months / 1 year the highest and lowest close, distance from them, position in range and biggest one-day rise and fall |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |
 | GET | `/api/targets/peaks` | Peak and low close since each open, dated buy |
@@ -222,6 +247,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q
 node tests/js/planner.test.js
+node tests/js/ta.test.js       # indicator math vs reference values from the Python `ta` library
 STONKS_PROVIDER=mock STONKS_DATA_DIR=./data uvicorn app.main:app --reload
 ```
 # stonks-dash

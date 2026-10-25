@@ -582,3 +582,46 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .rg-extras { display: inline-flex; flex-wrap: wrap; gap: 4px; }
 .rg-proxy { margin-top: 3px; cursor: help; }
 .rg-badges .linkbtn { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 11px; text-decoration: underline; }
+
+/* analysis (technical analysis) */
+.ta-top { align-items: center; }
+.ta-searchbox { position: relative; min-width: 320px; flex: 0 1 420px; }
+.ta-searchbox input { width: 100%; }
+.ta-chips { flex: 1 1 300px; }
+.ta-chips .chip.watch { border-style: dashed; }
+.ta-chips .chip.recent { opacity: .75; }
+.ta-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 4px 0 8px; min-height: 26px; }
+.ta-head .ta-sym { font-size: 20px; color: var(--text-strong); }
+.ta-head .ta-px { font-size: 18px; color: var(--text-strong); font-variant-numeric: tabular-nums; }
+.ta-tools button.active { background: var(--accent-soft); color: var(--text-strong); box-shadow: 0 0 0 1px var(--accent) inset; }
+.ta-hint { min-height: 18px; margin: 0 0 4px; }
+.ta-chart { position: relative; width: 100%; height: 680px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.ta-chart.drawing { cursor: crosshair; }
+.ta-legend { position: absolute; left: 8px; z-index: 3; pointer-events: none; font-size: 11.5px; line-height: 1.5; color: var(--muted); font-variant-numeric: tabular-nums; max-width: calc(100% - 90px); }
+.ta-legend.main { top: 6px; }
+.ta-legend .lh { display: flex; flex-wrap: wrap; gap: 2px 10px; color: var(--text); font-size: 12.5px; }
+.ta-legend .lh b { color: var(--text-strong); font-weight: 600; }
+.ta-legend .lr, .ta-legend.pane { display: flex; flex-wrap: wrap; gap: 0 10px; }
+.ta-legend .li { white-space: nowrap; }
+.ta-legend .li i { display: inline-block; width: 8px; height: 2px; vertical-align: middle; margin-right: 4px; }
+.ta-legend .li b { color: var(--text); font-weight: 500; }
+.ta-legend .lt { color: var(--text); font-weight: 600; margin-right: 4px; }
+.ta-drawings { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 6px 0; min-height: 4px; }
+.ta-drawings .linkbtn, .ta-indbox .linkbtn, .ta-hint .linkbtn { background: none; border: 0; padding: 0 4px; color: var(--muted); cursor: pointer; font-size: 12px; text-decoration: underline; }
+.ta-indbox { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; margin: 8px 0 14px; }
+.ta-indbox summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.ta-ind { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 6px 18px; margin-top: 8px; }
+.ta-gh { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 0; }
+.ta-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 3px 0; font-size: 12.5px; border-bottom: 1px solid rgba(255,255,255,.03); }
+.ta-on { display: inline-flex; align-items: center; gap: 6px; min-width: 190px; cursor: pointer; }
+.ta-on i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; }
+.ta-p { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11.5px; }
+.ta-p input, .ta-row select { width: 62px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 2px 4px; font-size: 12px; }
+.ta-row select { width: auto; }
+.ta-sig td { font-size: 12.5px; }
+@media (max-width: 700px) {
+  .ta-searchbox { min-width: 0; flex: 1 1 100%; }
+  .ta-chart { height: 560px; }
+  .ta-ind { grid-template-columns: 1fr; }
+}
+.asset .rg-chart { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font-size: 11px; text-decoration: underline; }

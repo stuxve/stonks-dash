@@ -641,8 +641,8 @@
       <td class="num ${cls(p.pnl_pct)}">${fmtPct(p.pnl_pct)}</td>
       ${vsCell(p)}
       <td class="num">${p.weight == null ? "—" : p.weight.toFixed(1) + "%"}</td>
-      <td>${p.lots ? `<div class="row-actions"><button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
-        : `<div class="row-actions"><button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
+      <td>${p.lots ? `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
+        : `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
     </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map(lotRow).join("") : "")).join("");
     const tt = d.totals;
     t.tFoot.innerHTML = rows.length ? `<tr><td>Total</td><td></td><td></td><td></td><td></td><td></td>
@@ -657,6 +657,8 @@
       state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (k === "display_name" || k === "account" ? 1 : -1) };
       return renderTable(state.port, shownPositions(state.port, pView()));
     }
+    const chartBtn = e.target.closest("button.chart");
+    if (chartBtn) { openChart(chartBtn.dataset.sym); e.stopPropagation(); return; }
     const sellBtn = e.target.closest(".sell");
     if (sellBtn) {
       const row = sellBtn.closest("tr");
@@ -724,6 +726,7 @@
 
   function redraw() {
     if (state.view === "hours") return hours.draw();
+    if (state.view === "ta") return;
     state.view === "markets" ? drawMarkets() : drawPortfolio();
   }
   async function reload(silent = false) {
@@ -734,6 +737,7 @@
     try {
       if (state.view === "markets") await loadMarkets(silent);
       else if (state.view === "hours") await hours.load(silent);
+      else if (state.view === "ta") await ta.refresh(silent);
       else await loadPortfolio(silent);
     } catch (err) {
       console.error(err);
@@ -767,8 +771,10 @@
     $("#view-markets").hidden = v !== "markets";
     $("#view-portfolio").hidden = v !== "portfolio";
     $("#view-hours").hidden = v !== "hours";
+    $("#view-ta").hidden = v !== "ta";
     try { localStorage.setItem("stonks.view", v); } catch {}
     hideTip();
+    if (v === "ta") { ta.show(); return; }
     if (v === "hours") {
       if (hours.loaded()) hours.draw();
       reload(hours.loaded());
@@ -1049,6 +1055,15 @@
     CURRENCIES, TYPE_LABEL, $, $$,
   });
 
+  // ================================================================== technical analysis (static/ta.js)
+  const ta = window.StonksTA({ api, esc, state, saveSettings, base, fmtDate, attachSearch, $, $$ });
+  function openChart(sym) {
+    state.settings.ta = { ...(state.settings.ta || {}), symbol: sym };
+    switchView("ta");
+    window.scrollTo(0, 0);
+  }
+  window.addEventListener("stonks:chart", (e) => openChart(e.detail));
+
   // ================================================================== boot
   (async function boot() {
     setupPeriodSegs();
@@ -1068,6 +1083,7 @@
     let v = "markets";
     try { v = localStorage.getItem("stonks.view") || "markets"; } catch {}
     if (location.hash === "#portfolio") v = "portfolio";
+    if (location.hash.startsWith("#ta")) { v = "ta"; const q = decodeURIComponent(location.hash.split("/")[1] || ""); if (q) state.settings.ta = { ...(state.settings.ta || {}), symbol: q.toUpperCase() }; }
     switchView(v);
   })();
 })();

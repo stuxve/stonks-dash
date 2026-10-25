@@ -605,3 +605,15 @@ def test_intraday_highs_lows(client):
     assert w["intra"]["from_lo"] == pytest.approx(101 / 98.5 - 1)
     m = client.get("/api/moves").json()["symbols"]
     assert all(v["windows"]["1y"]["intra"]["lo"] <= v["windows"]["1y"]["lo"] for v in m.values())
+
+
+def test_ta_endpoint(client):
+    d = client.get("/api/ta?symbol=nvda&years=3").json()
+    assert d["symbol"] == "NVDA" and d["currency"] == "USD" and d["has_volume"]
+    bars = d["bars"]
+    assert len(bars) > 700 and bars[0][0] < bars[-1][0]
+    assert all(l_ <= min(o, c) and h >= max(o, c) and v >= 0 for _, o, h, l_, c, v in bars)   # coherent OHLC
+    assert d["zones"] and "resistance" in d["zones"] and d["zones"]["vol"]
+    ib = client.get("/api/ta?symbol=IBCF.MU").json()           # short Munich history → priced from Xetra
+    assert ib["source"] == "IBCF.DE" and len(ib["bars"]) > 1000
+    assert client.get("/api/ta?symbol=bad%20one").status_code == 400
