@@ -166,24 +166,51 @@ The size and group choices are saved per board. Period, range and currency are g
 
 - **Chart:**
   - **Bars and types:** daily, weekly or monthly bars; candles, Heikin-Ashi, OHLC bars, line or area; optional log scale.
+  - **Other chart types:**
+    - Renko, Kagi (thick yang / thin yin) and Three Line Break.
+    - Point & Figure, using the high/low method with an ATR, fixed or % box. It marks double and triple top breakouts and bottom breakdowns, with a vertical-count price objective.
+    - CandleVolume and EquiVolume, where bar width is proportional to volume.
+    - Seasonality: average and median return by calendar month, the % of years each month was up, and a year × month table.
   - **Ranges:** 1M to All, the full history Yahoo has.
   - **Navigation:** scroll to zoom and drag to pan. Pane borders can be dragged.
   - **Legend:** shows open, high, low, close, change and every indicator's value at the crosshair.
 - **Indicators**, each with editable parameters and saved with your settings:
   - **Overlays:**
-    - 4 moving averages (SMA, EMA, WMA or HMA);
+    - 4 moving averages (SMA, EMA, WMA, HMA, DEMA, TEMA or KAMA);
+    - MA Envelopes, the Guppy MA ribbon and the Williams Alligator;
+    - Chandelier Exit and ATR trailing stop;
+    - linear regression forecast and channel, and ZigZag;
+    - Volume-by-price for the bars on screen, with the point of control marked;
+    - Elder Impulse bar colours;
     - Bollinger, Keltner and Donchian channels;
     - Ichimoku, including the cloud projected ahead;
     - Parabolic SAR, Supertrend and anchored VWAP.
   - **Levels:** the Sell targets support/resistance zones, previous-period pivot points, auto-Fibonacci over the visible range, the 52-week high and low, and golden/death cross markers.
   - **Your own data:** your buys, average cost, stop and target.
+  - **Patterns:**
+    - About 40 candlestick patterns: doji types, hammer and hanging man, stars, engulfing, harami, piercing / dark cloud, tweezers, kickers, soldiers and crows, three inside/outside, tasuki gaps, rising/falling three methods and others.
+    - Gaps, shaded until they're filled.
+    - Chart patterns, detected from ZigZag swings (experimental: check them by eye):
+      - double and triple tops and bottoms;
+      - head & shoulders and inverse head & shoulders;
+      - ascending, descending and symmetrical triangles;
+      - rising and falling wedges, and rectangles;
+      - flags and pennants.
+
+      Each one shows its neckline or boundaries, whether it's still forming or confirmed, and a measured-move target.
   - **Panes:** volume, RSI, MACD, Stochastic, ADX/DMI, ATR, OBV, MFI, CMF, CCI, Williams %R and rate of change.
 - **Drawing tools**, saved per ticker:
   - **Lines:** horizontal line; trend line, extended to today; Fibonacci retracement between two clicks.
+  - **More:** Andrews' Pitchfork (3 clicks); Fibonacci fan, arcs and time zones; Raff regression channel; speed resistance lines; cycle lines. A preview follows the mouse while you place them.
   - **Measure:** the % change, bars and days between two points.
   - **⚓ VWAP:** sets the anchor date for the anchored VWAP.
   - **Escape** leaves a tool.
-- **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast.
+- **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast. The **Patterns** group adds:
+  - Elder impulse;
+  - candlesticks on the last 3 bars, and recent chart patterns with their targets;
+  - the nearest unfilled gaps;
+  - the last ZigZag swing and the regression slope with R²;
+  - the Point & Figure signal and objective, and the Kagi state.
 - **Data:** indicators are computed in the browser from daily OHLCV from Yahoo, with bad ticks cleaned. Weekly and monthly bars are built from the daily ones. Listings with short Yahoo history are priced from their main listing, as everywhere else in the app.
 
 **Market hours.** Each row shows the exchange's status (open, lunch break, pre-market or after-hours, closed or holiday), a live countdown, today's session times and its main index's 1D change. The timeline covers your day (or the next 24 hours), with a line marking the current time.
@@ -248,6 +275,7 @@ pip install -r requirements-dev.txt
 pytest -q
 node tests/js/planner.test.js
 node tests/js/ta.test.js       # indicator math vs reference values from the Python `ta` library
+node tests/js/ta-ext.test.js   # extra overlays, Renko/Kagi/Line Break/P&F, candlestick, gap and chart-pattern detection
 STONKS_PROVIDER=mock STONKS_DATA_DIR=./data uvicorn app.main:app --reload
 ```
 # stonks-dash

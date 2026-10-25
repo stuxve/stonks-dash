@@ -425,16 +425,25 @@
     <div class="toolbar">
       <span class="seg" id="ta-iv" title="Bar size"><button data-v="D">Daily</button><button data-v="W">Weekly</button><button data-v="M">Monthly</button></span>
       <span class="seg" id="ta-range"><button data-v="1M">1M</button><button data-v="3M">3M</button><button data-v="6M">6M</button><button data-v="YTD">YTD</button><button data-v="1Y">1Y</button><button data-v="2Y">2Y</button><button data-v="5Y">5Y</button><button data-v="10Y">10Y</button><button data-v="All">All</button></span>
-      <label class="ctl"><select id="ta-type"><option value="candles">Candles</option><option value="heikin">Heikin-Ashi</option><option value="bars">OHLC bars</option><option value="line">Line</option><option value="area">Area</option></select></label>
+      <label class="ctl"><select id="ta-type">
+        <optgroup label="Time-based"><option value="candles">Candles</option><option value="heikin">Heikin-Ashi</option><option value="bars">OHLC bars</option><option value="line">Line</option><option value="area">Area</option></optgroup>
+        <optgroup label="Price-only (no time axis)"><option value="renko">Renko</option><option value="kagi">Kagi</option><option value="lb">Three Line Break</option><option value="pnf">Point &amp; Figure</option></optgroup>
+        <optgroup label="Volume-width"><option value="cvol">CandleVolume</option><option value="evol">EquiVolume</option></optgroup>
+        <optgroup label="Other"><option value="season">Seasonality</option></optgroup>
+      </select></label>
       <label class="ctl check"><input type="checkbox" id="ta-log"> Log scale</label>
       <span class="seg ta-tools" id="ta-tools">
-        <button data-tool="hline" title="Horizontal line">─ Line</button><button data-tool="trend" title="Trend line (extends to today)">╱ Trend</button><button data-tool="fib" title="Fibonacci retracement between two clicks">Fib</button><button data-tool="measure" title="Measure % change and bars between two points">⇔ Measure</button><button data-tool="vwap" title="Anchor the VWAP at a bar">⚓ VWAP</button><button id="ta-fit" title="Show all data">⤢ Fit</button><button id="ta-reload" title="Reload prices">↻</button>
+        <button data-tool="hline" title="Horizontal line">─ Line</button><button data-tool="trend" title="Trend line (extends to today)">╱ Trend</button><button data-tool="fib" title="Fibonacci retracement between two clicks">Fib</button><button data-tool="measure" title="Measure % change and bars between two points">⇔ Measure</button><button data-tool="vwap" title="Anchor the VWAP at a bar">⚓ VWAP</button>
+        <button data-tool="pitchfork" title="Andrews' Pitchfork (3 clicks: pivot A, then B and C)">⋔ Pitchfork</button><button data-tool="fibfan" title="Fibonacci fan (2 clicks)">Fib fan</button><button data-tool="fibarc" title="Fibonacci arcs (2 clicks)">Fib arcs</button><button data-tool="fibtime" title="Fibonacci time zones (1 click)">Fib time</button><button data-tool="raff" title="Raff regression channel (2 clicks: start and end of the period)">Raff</button><button data-tool="speed" title="Speed resistance lines (2 clicks)">Speed</button><button data-tool="cycle" title="Cycle lines (2 clicks: one cycle length)">Cycles</button>
+        <button id="ta-fit" title="Show all data">⤢ Fit</button><button id="ta-reload" title="Reload prices">↻</button>
       </span>
     </div>
     <div id="ta-hint" class="hint ta-hint"></div>
+    <div id="ta-altp" class="ta-altp" hidden></div>
     <div id="ta-chart" class="ta-chart"></div>
+    <div id="ta-alt" class="ta-alt" hidden></div>
     <div id="ta-drawings" class="ta-drawings"></div>
-    <details class="ta-indbox" open>
+    <details class="ta-indbox" id="ta-indbox" open>
       <summary>Indicators &amp; parameters <button id="ta-reset" class="linkbtn" type="button">reset to defaults</button></summary>
       <div id="ta-ind" class="ta-ind"></div>
     </details>
@@ -634,6 +643,7 @@
 <script src="/static/vendor/d3.min.js"></script>
 <script src="/static/vendor/lightweight-charts.js"></script>
 <script src="/static/ta-ind.js"></script>
+<script src="/static/ta-ext.js"></script>
 <script src="/static/ta.js"></script>
 <script src="/static/hours.js"></script>
 <script src="/static/planner.js"></script>
