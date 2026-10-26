@@ -641,8 +641,8 @@
       <td class="num ${cls(p.pnl_pct)}">${fmtPct(p.pnl_pct)}</td>
       ${vsCell(p)}
       <td class="num">${p.weight == null ? "—" : p.weight.toFixed(1) + "%"}</td>
-      <td>${p.lots ? `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
-        : `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
+      <td>${p.lots ? `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart-btn" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
+        : `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart-btn" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
     </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map(lotRow).join("") : "")).join("");
     const tt = d.totals;
     t.tFoot.innerHTML = rows.length ? `<tr><td>Total</td><td></td><td></td><td></td><td></td><td></td>
@@ -657,7 +657,7 @@
       state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (k === "display_name" || k === "account" ? 1 : -1) };
       return renderTable(state.port, shownPositions(state.port, pView()));
     }
-    const chartBtn = e.target.closest("button.chart");
+    const chartBtn = e.target.closest("button.chart-btn");
     if (chartBtn) { openChart(chartBtn.dataset.sym); e.stopPropagation(); return; }
     const sellBtn = e.target.closest(".sell");
     if (sellBtn) {
