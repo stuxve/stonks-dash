@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import alerts, exposure, ideas, ledger, levels, risk, seeds, tax, valuation
+from . import alerts, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -1739,6 +1739,73 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 "quarterly": f.get("quarterly"), "annual": f.get("annual"), "surprises": hist[-8:],
                 "next": (earn.get("next") or [None])[0], "eps_est": earn.get("eps_est"), "rev_est": earn.get("rev_est"),
                 "as_of": time.time()}
+
+    # ------------------------------------------------------------------ revenue vs net income, long history (Analysis tab)
+    def _sec_history(sym: str, name: str | None) -> dict | None:
+        """SEC EDGAR history for companies that file with the SEC (cached a week; misses cached a day)."""
+        key, miss = f"sec:hist:{sym}", f"sec:none:{sym}"
+        got = db.get_meta([key, miss], 7 * 86400)
+        if key in got:
+            return got[key]
+        if db.get_meta([miss], 86400).get(miss):
+            return None
+        try:
+            tick = db.get_meta(["sec:tickers"], 30 * 86400).get("sec:tickers")
+            if not tick:
+                tick = sec.fetch_json(sec.TICKERS_URL)
+                db.put_meta("sec:tickers", tick)
+            cik = sec.find_cik(sym, name, tick)
+            if cik is None:
+                db.put_meta(miss, {"reason": "not an SEC filer"})
+                return None
+            h = sec.extract(sec.fetch_json(sec.FACTS_URL.format(cik=cik)))
+            h["cik"] = cik
+        except Exception as e:  # noqa: BLE001 — network / format problems: fall back to Yahoo
+            log.info("SEC history for %s failed: %s", sym, e)
+            db.put_meta(miss, {"reason": str(e)[:200]})
+            return {"error": str(e)[:200]}
+        if not h.get("annual") and not h.get("quarterly"):
+            db.put_meta(miss, {"reason": "no revenue facts"})
+            return None
+        db.put_meta(key, h)
+        return h
+
+    @app.get("/api/fin_history")
+    def fin_history_view(symbol: str):
+        """Annual and quarterly revenue, net income and operating income over as many years as available: SEC filings
+        for SEC filers (~15 years), otherwise Yahoo's statements (~4 years + recent quarters)."""
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.match(sym):
+            raise HTTPException(400, "Invalid ticker")
+        meta = engine.meta([sym]).get(sym) or {}
+        if meta.get("quote_type") and meta["quote_type"] != "EQUITY":
+            return {"symbol": sym, "applicable": False, "reason": "Revenue and profit only exist for individual companies."}
+        h, note = None, None
+        if hasattr(prov, "long_financials"):                  # demo data
+            try:
+                h, src = prov.long_financials(sym), "demo data"
+            except LookupError:
+                h = None
+        else:
+            h = _sec_history(sym, meta.get("long_name") or meta.get("name"))
+            src = "SEC EDGAR filings (10-K / 10-Q / 20-F)"
+            if h and h.get("error"):
+                note = ("The SEC didn't answer (" + h["error"] + "). If it says 403, set STONKS_SEC_UA in .env to "
+                        "\"Your Name your@email.com\" (the SEC asks API users to identify themselves).")
+                h = None
+        if not h:
+            f = engine.financials(sym)
+            if not f:
+                return {"symbol": sym, "applicable": False, "reason": "No financial statements available for this company.", "note": note}
+            h = {"currency": f.get("currency"), "annual": [], "quarterly": []}
+            for freq in ("annual", "quarterly"):
+                d = f.get(freq) or {}
+                rows = d.get("rows") or {}
+                h[freq] = [[p, (rows.get("revenue") or [None] * 99)[i], (rows.get("net") or [None] * 99)[i], (rows.get("operating") or [None] * 99)[i]]
+                           for i, p in enumerate(d.get("periods") or [])]
+            src = "Yahoo Finance statements (last ~4 years; long history needs an SEC filer)"
+        return {"symbol": sym, "applicable": True, "source": src, "note": note, "currency": h.get("currency") or meta.get("currency"),
+                "annual": h.get("annual") or [], "quarterly": h.get("quarterly") or [], "as_of": time.time()}
 
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")

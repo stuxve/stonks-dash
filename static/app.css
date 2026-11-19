@@ -661,3 +661,5 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .ta-fintab td, .ta-fintab th { font-size: 12.5px; white-space: nowrap; }
 .ta-fintab .ta-last { background: rgba(57,135,229,.08); font-weight: 600; }
 .ta-val .seg button[disabled] { opacity: .35; cursor: default; }
+.ta-rnchart { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; margin-bottom: 8px; }
+.ta-rntip { position: absolute; z-index: 3; pointer-events: none; background: rgba(21,24,32,.95); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.5; min-width: 200px; }

@@ -15,6 +15,7 @@ services:
       STONKS_HISTORY_TTL: ${STONKS_HISTORY_TTL:-21600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}   # optional: Telegram alerts bot (or paste it in Sell targets)
+      STONKS_SEC_UA: ${STONKS_SEC_UA:-stonks-dash personal portfolio dashboard}   # SEC EDGAR asks for "Name email@example.com"
     volumes:
       - stonks-data:/data
     read_only: true

@@ -38,6 +38,7 @@ The base image `python:3.12-slim` is multi-arch, so the same compose file also b
 | `STONKS_PROVIDER` | `yahoo` | `yahoo` for live data, or `mock` for offline demo data |
 | `STONKS_QUOTE_TTL` | `60` | Seconds to cache the latest prices |
 | `STONKS_HISTORY_TTL` | `21600` | Seconds to cache the 13-month daily history used for 1W…1Y changes |
+| `STONKS_SEC_UA` | `stonks-dash personal portfolio dashboard` | User-Agent for SEC EDGAR (long revenue / net income history). The SEC asks for a name and email, e.g. `Jane Doe jane@example.com`; set it if the chart reports a 403. |
 | `TZ` | `Europe/Madrid` | Container timezone |
 
 Data lives in the named volume `stonks-data` (`/data/stonks.db`). To back it up, use **Settings → Export JSON** in the UI or `docker cp stonks-dash:/data/stonks.db .`.
@@ -218,6 +219,14 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Earnings release:** the EPS as announced (usually adjusted), the analysts' estimate and the surprise.
   - **Cash flow and balance sheet:** operating cash flow, capex, free cash flow (FCF) and its margin, cash, debt, net debt, share count.
   - **On screen:** a revenue and margin chart with beat/miss dots, plain-language notes (growth, margin trend in percentage points, beat/miss track record, cash conversion, buybacks or dilution), the next report date and a glossary.
+- **Revenue vs net income:** area chart of revenue and net income, with optional operating income.
+  - **Views:** TTM (trailing twelve months: each point adds up the last 4 quarters), annual or quarterly. Losses show in red below zero.
+  - **Hover:** values and margins for that period.
+  - **Summary:** revenue CAGR (compound annual growth rate) over the whole period and over the last 5 years, net margin now vs its average and range, and the periods with losses.
+  - **Where the data comes from:**
+    - **SEC filers** (US companies, plus foreign ones filing 20-F/40-F, such as TSM or ASML): about 15 years from the 10-K/10-Q filings in SEC EDGAR's XBRL API. Q4 is derived as the full year minus Q1–Q3, and the history is cached for a week.
+    - **Other companies:** Yahoo's last ~4 years and recent quarters.
+    - **If the SEC refuses with a 403 error:** set `STONKS_SEC_UA` in `.env` to your name and email; the SEC asks API users to identify themselves.
 - **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast. The **Patterns** group adds:
   - Elder impulse;
   - candlesticks on the last 3 bars, and recent chart patterns with their targets;
@@ -259,6 +268,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/fin_history?symbol=MU` | Annual / quarterly revenue, net income and operating income (SEC EDGAR for SEC filers, else Yahoo) |
 | GET | `/api/financials?symbol=MSFT` | Last quarterly / annual results (income, cash flow, balance sheet), EPS surprises and next report date |
 | GET | `/api/valuation?symbol=MSFT` | Trailing / forward P/E and other multiples, P/E history from reported EPS, sector-peer and market comparisons |
 | GET | `/api/ta?symbol=NVDA&years=10` | Daily OHLCV (cleaned) for the Analysis tab, plus support/resistance zones and volatility |

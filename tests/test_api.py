@@ -658,3 +658,77 @@ def test_financials_endpoint(client):
     assert d["surprises"] and all("eps_est" in h for h in d["surprises"])
     assert not client.get("/api/financials?symbol=VWCE.DE").json()["applicable"]      # funds have no statements
     assert client.get("/api/financials?symbol=bad%20one").status_code == 400
+
+
+def test_sec_extract_and_cik():
+    from app import sec
+
+    def e(start, end, val, form="10-Q", filed="2019-01-01"):
+        return {"start": start, "end": end, "val": val, "form": form, "filed": filed, "accn": "x", "fy": 2018, "fp": "Q1"}
+    facts = {"entityName": "MICRON TECHNOLOGY INC", "facts": {"us-gaap": {
+        # revenue reported under SalesRevenueNet until FY2017 and RevenueFromContract... from FY2018 (ASC 606)
+        "SalesRevenueNet": {"units": {"USD": [e("2016-09-02", "2017-08-31", 20000, "10-K", "2017-10-26")]}},
+        "RevenueFromContractWithCustomerExcludingAssessedTax": {"units": {"USD": [
+            e("2017-09-01", "2017-11-30", 6000), e("2017-12-01", "2018-03-01", 7000),
+            e("2017-09-01", "2018-03-01", 13000),                                  # six-month year-to-date: ignored
+            e("2018-03-02", "2018-05-31", 8000), e("2017-09-01", "2018-05-31", 21000),
+            e("2017-09-01", "2018-08-30", 30000, "10-K", "2018-10-15")]}},
+        "NetIncomeLoss": {"units": {"USD": [
+            e("2017-09-01", "2017-11-30", 2000), e("2017-12-01", "2018-03-01", 3000), e("2018-03-02", "2018-05-31", 3500),
+            e("2017-09-01", "2018-08-30", 14000, "10-K", "2018-10-15"),
+            e("2017-09-01", "2018-08-30", 14100, "10-K/A", "2019-02-01"),          # restated: the latest filing wins
+            e("2016-09-02", "2017-08-31", 5000, "10-K", "2017-10-26")]}},
+    }}}
+    h = sec.extract(facts)
+    assert h["currency"] == "USD"
+    assert h["annual"] == [["2017-08-31", 20000.0, 5000.0, None], ["2018-08-30", 30000.0, 14100.0, None]]
+    q = {r[0]: r for r in h["quarterly"]}
+    assert [r[0] for r in h["quarterly"]] == ["2017-11-30", "2018-03-01", "2018-05-31", "2018-08-30"]
+    assert q["2018-08-30"][1] == 30000 - 21000 and q["2018-08-30"][2] == 14100 - 8500     # derived fourth quarter
+    tick = {"0": {"cik_str": 723125, "ticker": "MU", "title": "MICRON TECHNOLOGY INC"},
+            "1": {"cik_str": 937966, "ticker": "ASML", "title": "ASML HOLDING NV"},
+            "2": {"cik_str": 1067983, "ticker": "BRK-B", "title": "BERKSHIRE HATHAWAY INC"},
+            "3": {"cik_str": 1, "ticker": "SAN", "title": "BANCO SANTANDER SA"}}
+    assert sec.find_cik("MU", "Micron", tick) == 723125 and sec.find_cik("BRK-B", None, tick) == 1067983
+    assert sec.find_cik("ASML.AS", "ASML Holding N.V.", tick) == 937966      # foreign listing, same company name
+    assert sec.find_cik("SAN.PA", "Sanofi", tick) is None                   # same letters, different company
+    assert sec.find_cik("ZZZZ", None, tick) is None
+
+
+def test_fin_history_endpoint(client):
+    d = client.get("/api/fin_history?symbol=MSFT").json()
+    assert d["applicable"] and len(d["annual"]) >= 10 and len(d["quarterly"]) >= 40
+    assert all(len(r) == 4 for r in d["annual"]) and [r[0] for r in d["annual"]] == sorted(r[0] for r in d["annual"])
+    assert any(r[2] < 0 for r in d["quarterly"])          # the demo business has loss-making quarters
+    assert not client.get("/api/fin_history?symbol=VWCE.DE").json()["applicable"]
+
+
+def test_fin_history_sec_path_and_fallback(client, monkeypatch):
+    from app import sec
+    from app.market import MockProvider
+    monkeypatch.delattr(MockProvider, "long_financials")          # behave like the real (Yahoo) provider
+    q = [("2023-01-01", "2023-03-31"), ("2023-04-01", "2023-06-30"), ("2023-07-01", "2023-09-30")]
+    facts = {"entityName": "NVDA Corp", "facts": {"us-gaap": {
+        "Revenues": {"units": {"USD": [{"start": a, "end": b, "val": 100 + k, "form": "10-Q", "filed": "2024-01-01"} for k, (a, b) in enumerate(q)]
+                               + [{"start": "2023-01-01", "end": "2023-12-31", "val": 420, "form": "10-K", "filed": "2024-02-01"}]}},
+        "NetIncomeLoss": {"units": {"USD": [{"start": "2023-01-01", "end": "2023-12-31", "val": 50, "form": "10-K", "filed": "2024-02-01"}]}}}}}
+    calls = []
+
+    def fake(url, timeout=40):
+        calls.append(url)
+        if url == sec.TICKERS_URL:
+            return {"0": {"cik_str": 1045810, "ticker": "NVDA", "title": "NVIDIA CORP"}, "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"}}
+        assert url.endswith("CIK0001045810.json")
+        return facts
+    monkeypatch.setattr(sec, "fetch_json", fake)
+    d = client.get("/api/fin_history?symbol=NVDA").json()
+    assert d["applicable"] and d["source"].startswith("SEC") and d["annual"] == [["2023-12-31", 420.0, 50.0, None]]
+    assert d["quarterly"][-1] == ["2023-12-31", 420.0 - 303.0, None, None]          # derived Q4 revenue
+    client.get("/api/fin_history?symbol=NVDA")
+    assert len(calls) == 2                                                          # cached after the first time
+
+    def boom(url, timeout=40):
+        raise OSError("HTTP Error 403: Forbidden")
+    monkeypatch.setattr(sec, "fetch_json", boom)
+    d = client.get("/api/fin_history?symbol=MSFT").json()                          # SEC refuses → Yahoo statements
+    assert d["applicable"] and d["source"].startswith("Yahoo") and "STONKS_SEC_UA" in d["note"] and len(d["annual"]) >= 3

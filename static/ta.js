@@ -1366,6 +1366,125 @@ window.StonksTA = function (ctx) {
     }
   }
 
+  // ------------------------------------------------------------------ revenue vs net income, long history
+  let rnFor = null, rnData = null;
+  async function loadRevNi(sym) {
+    rnFor = sym; rnData = null;
+    const el = $("#ta-revni");
+    el.innerHTML = '<h3 class="sub-h">Revenue vs net income</h3><p class="hint">Loading filings…</p>';
+    let d;
+    try { d = await api(`/api/fin_history?symbol=${encodeURIComponent(sym)}`); } catch (e) { if (rnFor === sym) el.innerHTML = `<h3 class="sub-h">Revenue vs net income</h3><p class="hint">${esc(e.message)}</p>`; return; }
+    if (rnFor !== sym) return;
+    rnData = d;
+    renderRevNi();
+  }
+  // trailing twelve months: sum of 4 consecutive quarters (each ~3 months apart)
+  function ttmRows(q) {
+    const out = [];
+    for (let k = 3; k < q.length; k++) {
+      const w = q.slice(k - 3, k + 1);
+      const ok = w.every((r, j) => !j || (new Date(r[0]) - new Date(w[j - 1][0])) / 864e5 < 110);
+      if (!ok) continue;
+      const sum = (c) => (w.every((r) => r[c] != null) ? w.reduce((a, r) => a + r[c], 0) : null);
+      out.push([w[3][0], sum(1), sum(2), sum(3)]);
+    }
+    return out;
+  }
+  function renderRevNi() {
+    const el = $("#ta-revni"), d = rnData, d3 = window.d3;
+    if (!d) return;
+    if (!d.applicable) { el.innerHTML = `<h3 class="sub-h">Revenue vs net income</h3><p class="hint">${esc(d.reason)}</p>${d.note ? `<p class="hint">${esc(d.note)}</p>` : ""}`; return; }
+    const ttm = ttmRows(d.quarterly);
+    let mode = S().rn_mode || (ttm.length >= 8 ? "ttm" : "annual");
+    const avail = { ttm: ttm.length >= 2, annual: d.annual.length >= 2, quarterly: d.quarterly.length >= 2 };
+    if (!avail[mode]) mode = ["ttm", "annual", "quarterly"].find((m) => avail[m]);
+    if (!mode) { el.innerHTML = '<h3 class="sub-h">Revenue vs net income</h3><p class="hint">Not enough reported periods.</p>'; return; }
+    const rows = (mode === "ttm" ? ttm : mode === "annual" ? d.annual : d.quarterly).filter((r) => r[1] != null || r[2] != null);
+    const showOp = !!S().rn_op && rows.some((r) => r[3] != null), smooth = S().rn_smooth !== false, ccy = d.currency || "";
+    const lbl = (iso) => (mode === "annual" ? `fiscal year to ${mY(iso)}` : mode === "ttm" ? `12 months to ${mY(iso)}` : `quarter to ${mY(iso)}`);
+    // summary: growth (CAGR = compound annual growth rate), margins, losses
+    const ann = d.annual.filter((r) => r[1] > 0), yrs = (a, b) => (new Date(b[0]) - new Date(a[0])) / 864e5 / 365.25;
+    const cagr = (a, b) => (a && b && a[1] > 0 && b[1] > 0 && yrs(a, b) >= 1 ? (b[1] / a[1]) ** (1 / yrs(a, b)) - 1 : null);
+    const full = ann.length >= 2 ? cagr(ann[0], ann[ann.length - 1]) : null;
+    const a5 = ann.length >= 6 ? cagr(ann[ann.length - 6], ann[ann.length - 1]) : null;
+    const margins = rows.filter((r) => r[1] > 0 && r[2] != null).map((r) => r[2] / r[1]);
+    const lastR = rows[rows.length - 1], lastM = lastR && lastR[1] > 0 && lastR[2] != null ? lastR[2] / lastR[1] : null;
+    const avgM = margins.length ? margins.reduce((a, b) => a + b, 0) / margins.length : null;
+    const losses = rows.filter((r) => r[2] != null && r[2] < 0);
+    const unit = mode === "annual" ? "years" : mode === "ttm" ? "12-month periods" : "quarters";
+    const sum = [
+      full != null ? `Revenue grew <b class="${full >= 0 ? "up" : "down"}">${pc(full, 1)} a year</b> from ${mY(ann[0][0])} to ${mY(ann[ann.length - 1][0])} (CAGR, compound annual growth rate)${a5 != null ? `; ${pc(a5, 1)} a year over the last 5 years` : ""}.` : "",
+      lastM != null ? `Net margin (net income ÷ revenue) in the latest ${mode === "quarterly" ? "quarter" : "12 months"}: <b class="${lastM >= 0 ? "up" : "down"}">${pp(lastM, 1)}</b>, vs an average of ${pp(avgM, 1)} over the period shown (range ${pp(Math.min(...margins), 1)} to ${pp(Math.max(...margins), 1)}).` : "",
+      losses.length ? `Losses in ${losses.length} of ${rows.length} ${unit}${losses.length <= 6 ? ` (${losses.map((r) => mY(r[0])).join(", ")})` : ""} — a sign of a cyclical or still-unprofitable business.` : `Profitable in every one of the ${rows.length} ${unit} shown.`,
+    ].filter(Boolean);
+    el.innerHTML = `<div class="ta-finhead"><h3 class="sub-h">Revenue vs net income <span class="sub">· ${esc(mY(rows[0][0]))} → ${esc(mY(lastR[0]))}</span></h3>
+        <span class="seg" id="ta-rnmode">${[["ttm", "TTM", "Trailing twelve months: each point adds up the last 4 quarters (smooths seasonality)"], ["annual", "Annual", "Fiscal years"], ["quarterly", "Quarterly", "Single quarters"]].map(([k, t, tip]) => `<button data-v="${k}" title="${tip}" class="${k === mode ? "active" : ""}" ${avail[k] ? "" : "disabled"}>${t}</button>`).join("")}</span>
+        <label class="ctl check"><input type="checkbox" id="ta-rnop" ${showOp ? "checked" : ""} ${rows.some((r) => r[3] != null) ? "" : "disabled"}> Operating income</label>
+        <label class="ctl check"><input type="checkbox" id="ta-rnsmooth" ${smooth ? "checked" : ""}> Smooth</label></div>
+      <div class="ta-rnchart" id="ta-rnchart"><div class="ta-rntip" hidden></div></div>
+      <ul class="ta-valnotes">${sum.map((x) => `<li>${x}</li>`).join("")}</ul>
+      <p class="hint">Source: ${esc(d.source)}. Amounts in ${esc(ccy || "the reporting currency")}. Net income = profit attributable to shareholders after all costs, interest and taxes.${d.note ? ` ${esc(d.note)}` : ""}</p>`;
+
+    const box = $("#ta-rnchart"), W = Math.max(320, box.clientWidth || 900), Hh = window.innerWidth < 700 ? 280 : 360, M = { l: 10, r: 74, t: 14, b: 26 };
+    const pts = rows.map((r) => ({ t: new Date(r[0] + "T00:00:00"), iso: r[0], rev: r[1], net: r[2], op: r[3] }));
+    const X = d3.scaleTime().domain(d3.extent(pts, (p) => p.t)).range([M.l, W - M.r]);
+    const lo = Math.min(0, d3.min(pts, (p) => Math.min(p.net ?? 0, showOp ? p.op ?? 0 : 0)));
+    const hi = Math.max(1, d3.max(pts, (p) => Math.max(p.rev ?? 0, p.net ?? 0)));
+    const Y = d3.scaleLinear().domain([lo * 1.1, hi * 1.08]).nice().range([Hh - M.b, M.t]);
+    const curve = smooth ? d3.curveMonotoneX : d3.curveLinear;
+    const sv = d3.select(box).append("svg").attr("width", W).attr("height", Hh).attr("class", "ta-svg");
+    const uid = `rn${Math.random().toString(36).slice(2, 8)}`;
+    const defs = sv.append("defs");
+    defs.append("clipPath").attr("id", `${uid}a`).append("rect").attr("x", 0).attr("y", 0).attr("width", W).attr("height", Y(0));
+    defs.append("clipPath").attr("id", `${uid}b`).append("rect").attr("x", 0).attr("y", Y(0)).attr("width", W).attr("height", Hh);
+    sv.append("g").selectAll("line").data(Y.ticks(6)).join("line").attr("x1", M.l).attr("x2", W - M.r).attr("y1", Y).attr("y2", Y).attr("stroke", "rgba(255,255,255,.05)");
+    sv.append("g").attr("transform", `translate(${W - M.r},0)`).call(d3.axisRight(Y).ticks(6).tickFormat((x) => fm(x).replace(/<[^>]+>/g, ""))).call((g) => g.selectAll("text").attr("fill", "var(--muted)")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    sv.append("g").attr("transform", `translate(0,${Hh - M.b})`).call(d3.axisBottom(X).ticks(Math.max(3, Math.floor(W / 100)))).call((g) => g.selectAll("text").attr("fill", "var(--muted)")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    const area = (key) => d3.area().defined((p) => p[key] != null).curve(curve).x((p) => X(p.t)).y0(Y(0)).y1((p) => Y(p[key]));
+    const line = (key) => d3.line().defined((p) => p[key] != null).curve(curve).x((p) => X(p.t)).y((p) => Y(p[key]));
+    sv.append("path").datum(pts).attr("fill", "rgba(239,83,80,.30)").attr("d", area("rev"));
+    sv.append("path").datum(pts).attr("fill", "none").attr("stroke", "#e57373").attr("stroke-width", 1.6).attr("d", line("rev"));
+    for (const [clip, fill, stroke] of [[`${uid}a`, "rgba(102,187,106,.45)", "#81c784"], [`${uid}b`, "rgba(229,57,53,.55)", "#ef5350"]]) {
+      sv.append("path").datum(pts).attr("clip-path", `url(#${clip})`).attr("fill", fill).attr("d", area("net"));
+      sv.append("path").datum(pts).attr("clip-path", `url(#${clip})`).attr("fill", "none").attr("stroke", stroke).attr("stroke-width", 1.6).attr("d", line("net"));
+    }
+    if (showOp) sv.append("path").datum(pts).attr("fill", "none").attr("stroke", "#ffd54f").attr("stroke-width", 1.4).attr("stroke-dasharray", "5 4").attr("d", line("op"));
+    sv.append("line").attr("x1", M.l).attr("x2", W - M.r).attr("y1", Y(0)).attr("y2", Y(0)).attr("stroke", "rgba(255,255,255,.35)");
+    // last-value badges on the axis, like the example
+    const last = pts[pts.length - 1];
+    const badge = (v, color, txt) => {
+      if (v == null) return;
+      const g = sv.append("g").attr("transform", `translate(${W - M.r + 1},${Y(v)})`);
+      g.append("rect").attr("x", 0).attr("y", -9).attr("width", M.r - 2).attr("height", 18).attr("rx", 3).attr("fill", color);
+      g.append("text").attr("x", 4).attr("y", 4).attr("font-size", 10.5).attr("fill", "#fff").text(txt);
+    };
+    badge(last.rev, "#c62828", `R ${fm(last.rev).replace(/<[^>]+>/g, "")}`);
+    badge(last.net, last.net >= 0 ? "#2e7d32" : "#b71c1c", `NI ${fm(last.net).replace(/<[^>]+>/g, "")}`);
+    // legend
+    const lg = sv.append("g").attr("transform", `translate(${M.l + 4},${M.t + 4})`);
+    [["#e57373", "Revenue"], ["#81c784", "Net income (red below zero = loss)"], ...(showOp ? [["#ffd54f", "Operating income"]] : [])].forEach(([c, t], k) => {
+      lg.append("rect").attr("x", 0).attr("y", k * 15).attr("width", 10).attr("height", 10).attr("fill", c);
+      lg.append("text").attr("x", 15).attr("y", k * 15 + 9).attr("font-size", 11).attr("fill", "var(--text)").text(t);
+    });
+    // hover read-out
+    const tip = box.querySelector(".ta-rntip"), hl = sv.append("line").attr("y1", M.t).attr("y2", Hh - M.b).attr("stroke", "rgba(255,255,255,.35)").style("display", "none");
+    const dot = sv.append("g").style("display", "none");
+    const dr = dot.append("circle").attr("r", 3.5).attr("fill", "#e57373"), dn = dot.append("circle").attr("r", 3.5).attr("fill", "#81c784");
+    sv.append("rect").attr("x", M.l).attr("y", M.t).attr("width", W - M.r - M.l).attr("height", Hh - M.t - M.b).attr("fill", "transparent")
+      .on("mousemove", (e) => {
+        const [mx] = d3.pointer(e), t = X.invert(mx);
+        let i = d3.bisector((p) => p.t).center(pts, t);
+        const p = pts[i], x = X(p.t);
+        hl.attr("x1", x).attr("x2", x).style("display", null);
+        dot.style("display", null); dr.attr("cx", x).attr("cy", Y(p.rev ?? 0)); dn.attr("cx", x).attr("cy", Y(p.net ?? 0));
+        const m = p.rev > 0 && p.net != null ? p.net / p.rev : null, om = p.rev > 0 && p.op != null ? p.op / p.rev : null;
+        tip.innerHTML = `<b>${esc(lbl(p.iso))}</b><br>Revenue ${fm(p.rev, ccy)}<br>Net income <span class="${p.net >= 0 ? "up" : "down"}">${fm(p.net, ccy)}</span>${m != null ? ` · margin ${pp(m, 1)}` : ""}${p.op != null ? `<br>Operating income ${fm(p.op, ccy)}${om != null ? ` · margin ${pp(om, 1)}` : ""}` : ""}`;
+        tip.hidden = false;
+        tip.style.left = `${Math.min(x + 12, W - 230)}px`; tip.style.top = `${M.t + 30}px`;
+      })
+      .on("mouseleave", () => { hl.style("display", "none"); dot.style("display", "none"); tip.hidden = true; });
+  }
+
   // ------------------------------------------------------------------ header, symbol chips, indicator panel
   function header() {
     const x = raw;
@@ -1417,6 +1536,7 @@ window.StonksTA = function (ctx) {
     build(true);
     loadVal(sym);
     loadFin(sym);
+    loadRevNi(sym);
   }
 
   // ------------------------------------------------------------------ events
@@ -1442,6 +1562,11 @@ window.StonksTA = function (ctx) {
     if (raw) build();
   });
   $("#ta-reset").addEventListener("click", () => { saveTA({ ind: {} }); panel(); if (raw) build(); });
+  $("#ta-revni").addEventListener("click", (e) => { const b = e.target.closest("#ta-rnmode button"); if (b && !b.disabled) { saveTA({ rn_mode: b.dataset.v }); renderRevNi(); } });
+  $("#ta-revni").addEventListener("change", (e) => {
+    if (e.target.id === "ta-rnop") { saveTA({ rn_op: e.target.checked }); renderRevNi(); }
+    if (e.target.id === "ta-rnsmooth") { saveTA({ rn_smooth: e.target.checked }); renderRevNi(); }
+  });
   $("#ta-fin").addEventListener("click", (e) => {
     const b = e.target.closest("#ta-finfreq button");
     if (b && !b.disabled) { saveTA({ fin_freq: b.dataset.v }); renderFin(); }

@@ -620,6 +620,31 @@ class MockProvider:
             return {"periods": [e.isoformat() for e in ends], "rows": rows}
         return {"currency": self._currency(symbol), "quarterly": make(6, 3, 1.0), "annual": make(4, 12, 4.0)}
 
+    def long_financials(self, symbol: str) -> dict:
+        """Stand-in for the SEC history: ~16 years of a cyclical business (revenue booms, profits swing into losses)."""
+        if self._quote_type(symbol) != "EQUITY":
+            raise LookupError("no filings")
+        r = np.random.default_rng(self._seed(symbol) + 53)
+        q_end = date(date.today().year, ((date.today().month - 1) // 3) * 3 + 1, 1) - timedelta(days=1)
+        ends = []
+        d = q_end
+        for _ in range(64):
+            ends.append(d)
+            m0 = date(d.year, d.month, 1)
+            d = (date(m0.year - (1 if m0.month <= 3 else 0), (m0.month - 4) % 12 + 1, 1) + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+        ends.sort()
+        rev, q = float(r.uniform(1e9, 6e9)), []
+        for k, e in enumerate(ends):
+            cyc = np.sin(k / 5.5) * 0.6 + float(r.normal(0, 0.05))
+            rev *= 1 + 0.02 + 0.06 * cyc
+            margin = 0.08 + 0.22 * cyc
+            q.append([e.isoformat(), rev, rev * margin, rev * (margin + 0.04)])
+        annual = []
+        for k in range(3, len(q), 4):
+            w = q[k - 3:k + 1]
+            annual.append([w[-1][0], sum(x[1] for x in w), sum(x[2] for x in w), sum(x[3] for x in w)])
+        return {"currency": self._currency(symbol), "name": symbol + " Corp", "annual": annual, "quarterly": q}
+
     MOCK_INDEX_PE = {"SPY": (27.0, 22.5), "VGK": (15.5, 13.8), "EWP": (12.0, 11.0), "QQQ": (34.0, 28.0), "URTH": (23.0, 19.5),
                      "VT": (21.0, 18.0), "IEMG": (14.0, 12.0), "EZU": (16.0, 14.0)}
 
