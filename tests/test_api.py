@@ -732,3 +732,16 @@ def test_fin_history_sec_path_and_fallback(client, monkeypatch):
     monkeypatch.setattr(sec, "fetch_json", boom)
     d = client.get("/api/fin_history?symbol=MSFT").json()                          # SEC refuses → Yahoo statements
     assert d["applicable"] and d["source"].startswith("Yahoo") and "STONKS_SEC_UA" in d["note"] and len(d["annual"]) >= 3
+
+
+def test_portfolio_intraday_pnl(client):
+    tot = client.get("/api/portfolio").json()["totals"]
+    d = client.get("/api/portfolio/intraday?range=1d").json()
+    assert d["points"] and d["points"] == sorted(d["points"], key=lambda p: p[0])
+    assert d["now"] == pytest.approx(tot["day_pnl"], abs=1e-6) and d["points"][-1][1] == pytest.approx(tot["day_pnl"], abs=1e-6)
+    assert sum(m["pnl"] for m in d["movers"]) == pytest.approx(tot["day_pnl"], abs=1e-6)      # movers add up to Today
+    assert all(set(m) >= {"symbol", "pnl", "live"} for m in d["movers"])
+    w = client.get("/api/portfolio/intraday?range=5d").json()
+    assert len(w["points"]) > 50 and w["points"][0][1] == pytest.approx(0, abs=1e-9)          # measured from the start
+    assert sum(m["pnl"] for m in w["movers"]) == pytest.approx(w["now"], abs=1e-6)
+    assert client.get("/api/portfolio/intraday?range=1y").status_code == 422

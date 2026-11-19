@@ -491,7 +491,10 @@
   }
 
   function renderKpis(t) {
-    const b = base();
+    const b = base(), chartView = state.settings.p_kpi_view === "chart";
+    $$("#kpi-view button").forEach((x) => x.classList.toggle("active", (x.dataset.v === "chart") === chartView));
+    if (chartView) return pnl.render(t);
+    $("#kpis").classList.remove("pnl-mode");
     $("#kpis").innerHTML = [
       ["Market value", fmtMoney(t.value, b), `${t.count} position${t.count === 1 ? "" : "s"}${t.missing ? ` · <span class="down">${t.missing} without price</span>` : ""}`],
       ["Invested", fmtMoney(t.cost, b), "cost basis at current FX"],
@@ -1057,6 +1060,13 @@
 
   // ================================================================== technical analysis (static/ta.js)
   const ta = window.StonksTA({ api, esc, state, saveSettings, base, fmtDate, attachSearch, $, $$ });
+  // portfolio summary: boxes or a live P&L chart (static/pnlchart.js)
+  const pnl = window.StonksPnl({ api, esc, state, saveSettings, base, fmtMoney, fmtSigned, fmtPct, cls, $ });
+  $("#kpi-view").addEventListener("click", (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    saveSettings({ p_kpi_view: b.dataset.v });
+    if (state.port) renderKpis(state.port.totals);
+  });
   function openChart(sym) {
     state.settings.ta = { ...(state.settings.ta || {}), symbol: sym };
     switchView("ta");

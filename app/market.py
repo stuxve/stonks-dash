@@ -9,7 +9,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -233,6 +233,40 @@ class YahooProvider:
                 "ps": ("priceToSalesTrailing12Months",), "pb": ("priceToBook",), "ev_ebitda": ("enterpriseToEbitda",),
                 "ev_rev": ("enterpriseToRevenue",), "eps_g": ("earningsGrowth",), "eps_qg": ("earningsQuarterlyGrowth",),
                 "rev_g": ("revenueGrowth",)}
+
+    def intraday(self, symbols: list[str], period: str = "1d", interval: str = "5m") -> dict[str, pd.Series]:
+        """Intraday closes (UTC, tz-naive index), regular session only."""
+        if not symbols:
+            return {}
+        try:
+            df = self.yf.download(list(symbols), period=period, interval=interval, group_by="ticker", threads=True,
+                                  progress=False, auto_adjust=False, prepost=False, multi_level_index=True, timeout=20)
+        except Exception as e:  # noqa: BLE001
+            log.warning("intraday download failed: %s", e)
+            return {}
+        out = {}
+        if df is None or df.empty:
+            return out
+        for sym in symbols:
+            try:
+                if isinstance(df.columns, pd.MultiIndex):
+                    if sym in df.columns.get_level_values(0):
+                        col = df[sym]["Close"]
+                    elif sym in df.columns.get_level_values(1):
+                        col = df.xs(sym, axis=1, level=1)["Close"]
+                    else:
+                        continue
+                else:
+                    col = df["Close"]
+                col = pd.to_numeric(col, errors="coerce").dropna()
+                idx = pd.DatetimeIndex(col.index)
+                col.index = idx.tz_convert("UTC").tz_localize(None) if idx.tz is not None else idx
+                col = col[~col.index.duplicated(keep="last")].sort_index()
+                if not col.empty:
+                    out[sym] = col.astype(float)
+            except Exception as e:  # noqa: BLE001
+                log.debug("intraday parse %s failed: %s", sym, e)
+        return out
 
     # statement rows: our key -> (statement, Yahoo field names in order of preference)
     FIN_ROWS = {"revenue": ("inc", ("TotalRevenue", "OperatingRevenue")), "gross": ("inc", ("GrossProfit",)),
@@ -619,6 +653,52 @@ class MockProvider:
                 rows["equity"].append(rev * float(r.uniform(2, 4)))
             return {"periods": [e.isoformat() for e in ends], "rows": rows}
         return {"currency": self._currency(symbol), "quarterly": make(6, 3, 1.0), "annual": make(4, 12, 4.0)}
+
+    def _session(self, sym: str, day: date) -> tuple[datetime, datetime] | None:
+        """Regular session in UTC for the mock: crypto all day, Europe 08:00–16:30, US 13:30–20:00 (weekdays)."""
+        qt = self._quote_type(sym)
+        start = datetime(day.year, day.month, day.day)
+        if qt == "CRYPTOCURRENCY":
+            return start, start + timedelta(hours=24)
+        if day.weekday() >= 5:
+            return None
+        if "." in sym and not sym.endswith("=X"):
+            return start + timedelta(hours=8), start + timedelta(hours=16, minutes=30)
+        return start + timedelta(hours=13, minutes=30), start + timedelta(hours=20)
+
+    def intraday(self, symbols, period="1d", interval="5m"):
+        step = {"5m": 5, "15m": 15, "30m": 30}.get(interval, 5)
+        ndays = 5 if period == "5d" else 1
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        out = {}
+        for s in symbols:
+            if s in self.fail or self._quote_type(s) in ("INDEX", "FUTURE"):
+                continue
+            daily = self._series(self.ALIAS.get(s, s), date.today() - timedelta(days=20))
+            r = np.random.default_rng(self._seed(s) ^ int(now.timestamp() // 86400))
+            sessions, d = [], now.date()
+            while len(sessions) < ndays and d > now.date() - timedelta(days=14):
+                ses = self._session(s, d)
+                if ses and ses[0] <= now:
+                    sessions.append((d, ses[0], min(ses[1], now)))
+                d -= timedelta(days=1)
+            pts = {}
+            for d, a, b in reversed(sessions):
+                closes = daily[daily.index <= pd.Timestamp(d)]
+                if len(closes) < 2:
+                    continue
+                p0, p1 = float(closes.iloc[-2]), float(closes.iloc[-1])
+                times = pd.date_range(a, b, freq=f"{step}min")
+                if len(times) < 2:
+                    continue
+                walk = np.cumsum(r.normal(0, abs(p1) * 0.0015, len(times)))
+                bridge = walk - np.linspace(0, 1, len(times)) * walk[-1]          # ends where the day ends
+                path = p0 + (p1 - p0) * np.linspace(0, 1, len(times)) + bridge
+                for t, v in zip(times, path):
+                    pts[t] = float(v)
+            if pts:
+                out[s] = pd.Series(pts).sort_index()
+        return out
 
     def long_financials(self, symbol: str) -> dict:
         """Stand-in for the SEC history: ~16 years of a cyclical business (revenue booms, profits swing into losses)."""
@@ -1034,6 +1114,27 @@ class QuoteEngine:
                     threading.Thread(target=work, args=(todo,), daemon=True).start()
         pending = len(getattr(self, "_fund_job", set()) & set(symbols))
         return have, {"have": len(have), "total": len(symbols), "pending": pending}
+
+    def intraday(self, symbols: list[str], period: str = "1d", interval: str = "5m", ttl: float = 90) -> dict[str, pd.Series]:
+        """Intraday bars for the P&L chart, cached ~90 s (prices are delayed anyway)."""
+        symbols = [s for s in dict.fromkeys(symbols) if s]
+        if not symbols or not hasattr(self.p, "intraday"):
+            return {}
+        key = (tuple(sorted(symbols)), period, interval)
+        cache = getattr(self, "_intra", None)
+        if cache is None:
+            cache = self._intra = {}
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        data = self._pull(self.p.intraday, symbols, period=period, interval=interval)
+        meta = self.meta(symbols)
+        out = {}
+        for s, ser in data.items():
+            _, div = normalize_currency((meta.get(s) or {}).get("currency"))
+            out[s] = ser / div
+        cache[key] = (time.time(), out)
+        return out
 
     def financials(self, symbol: str, ttl: float = 24 * 3600) -> dict | None:
         """Quarterly and annual statements for one stock (cached a day). None when Yahoo has none."""

@@ -663,3 +663,27 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .ta-val .seg button[disabled] { opacity: .35; cursor: default; }
 .ta-rnchart { position: relative; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px; margin-bottom: 8px; }
 .ta-rntip { position: absolute; z-index: 3; pointer-events: none; background: rgba(21,24,32,.95); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.5; min-width: 200px; }
+
+/* portfolio summary as a live P&L chart */
+#kpis.pnl-mode { display: block; }
+.pnl-card { display: grid; grid-template-columns: 250px minmax(0, 1fr) 300px; gap: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+.pnl-card .k { color: var(--muted); font-size: 12px; }
+.pnl-big { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.2; margin-top: 2px; }
+.pnl-stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 12px 0 0; font-size: 12.5px; }
+.pnl-stats dt { color: var(--muted); white-space: nowrap; }
+.pnl-stats dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pnl-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-bottom: 4px; font-size: 12px; }
+.pnl-chart { position: relative; min-height: 168px; }
+.pnl-tip { position: absolute; top: 4px; z-index: 3; pointer-events: none; background: rgba(21,24,32,.95); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; font-size: 12px; white-space: nowrap; }
+.pnl-live { animation: pnlpulse 2s ease-in-out infinite; }
+@keyframes pnlpulse { 50% { opacity: .35; } }
+.pnl-movers { font-size: 12.5px; }
+.pnl-mv { display: grid; grid-template-columns: 104px minmax(40px, 1fr) 88px; align-items: center; gap: 8px; padding: 3px 0; }
+.pnl-mv .pnl-sym { font-weight: 600; color: var(--text-strong); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pnl-mv .pnl-bar { display: block; height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+.pnl-mv .pnl-bar i { display: block; height: 100%; }
+.pnl-mv .pnl-bar i.pnl-pos { background: var(--up); }
+.pnl-mv .pnl-bar i.pnl-neg { background: var(--down); }
+.kpi-view button { font-size: 12px; }
+@media (max-width: 900px) { .pnl-card { grid-template-columns: 1fr; } }
+.pnl-mv .pnl-num { text-align: right; min-width: 0; font-variant-numeric: tabular-nums; }

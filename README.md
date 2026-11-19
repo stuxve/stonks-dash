@@ -70,6 +70,13 @@ The size and group choices are saved per board. Period, range and currency are g
 
 **Portfolio sub-tabs.**
 
+- **Summary at the top: Boxes or Chart** (switch next to **+ Buy**). *Boxes* are the totals as tiles. *Chart* is a live P&L (profit and loss) chart:
+  - **1D:** today's P&L through the day from 5-minute prices, measured against each asset's previous close. Its last point is always the "Today" figure.
+    - Assets whose market hasn't opened yet today count their last session's change from the start, and are marked "closed".
+    - If crypto is a small part of the portfolio, the chart starts an hour before the first stock market opens.
+  - **5D:** the value change of today's holdings over the last 5 sessions, from 15-minute prices. Buys and sells during those days aren't counted.
+  - **Alongside the chart:** market value, unrealized and realized P&L, the comparison with the index, and the holdings that moved the total most.
+  - **Refresh:** every minute with the rest of the page.
 - **Holdings** is the heatmap and table. Each row has **Sell**, **Edit** and **Delete**. A **Vs index** column shows each position's return minus the benchmark's return over the same dates, in percentage points. It only appears for buys that have a purchase date.
 - **Sell targets** monitors every open buy (lot) separately. You always type your own **target**, **stop loss** and **trailing stop** (as a price or a % of the buy price); everything else is a clickable suggestion:
   - **Resistance and support zones** from daily closes of the last 3 years, with bad ticks removed (Hampel filter plus one-day spikes that revert). Turning points are found with 5-, 10- and 20-day look-backs and kept only if at least two agree. They are grouped into zones as wide as the asset's typical daily move, and ranked by touches, with recent touches weighted more (half-life one year). Chips under the target show the strongest zones above the price with their touch count (`3×`). Chips under the stop sit half a daily move below the strongest supports. Closes are the prices as traded (not adjusted for dividends).
@@ -268,6 +275,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/portfolio/intraday?range=1d\|5d` | P&L of the current holdings through today (5-minute bars) or the last 5 sessions (15-minute bars), plus the biggest movers |
 | GET | `/api/fin_history?symbol=MU` | Annual / quarterly revenue, net income and operating income (SEC EDGAR for SEC filers, else Yahoo) |
 | GET | `/api/financials?symbol=MSFT` | Last quarterly / annual results (income, cash flow, balance sheet), EPS surprises and next report date |
 | GET | `/api/valuation?symbol=MSFT` | Trailing / forward P/E and other multiples, P/E history from reported EPS, sector-peer and market comparisons |

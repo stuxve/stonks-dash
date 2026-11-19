@@ -502,6 +502,77 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             rows.append(r)
         return rows, tot, fx
 
+    @app.get("/api/portfolio/intraday")
+    def portfolio_intraday(range: str = Query("1d", pattern="^(1d|5d)$"), base: str | None = None):  # noqa: A002
+        """P&L of the current holdings through the day (1d, 5-minute bars) or the last 5 sessions (5d, 15-minute bars),
+        in the base currency at today's FX. 1d is measured against each asset's previous close, exactly like the
+        "Today" figure: assets whose market hasn't opened yet today count their last session's change from the start.
+        The last point uses the live prices, so it always equals the Today figure."""
+        base = base_or_default(base)
+        lots, _sells, _divs, fr = _context(base)
+        rows, tot, fx = _open_rows(base, lots, fr)
+        pos = {}
+        for r in rows:
+            if not r["ok"] or r.get("quote_type") == "MANUAL" or not r.get("symbol") or not fx.get(r["price_currency"]):
+                continue
+            p = pos.setdefault(r["symbol"], {"qty": 0.0, "fx": fx[r["price_currency"]], "price": r["price"], "day_pnl": 0.0,
+                                             "value": 0.0, "name": r["display_name"]})
+            p["qty"] += r["quantity"]
+            p["day_pnl"] += r["day_pnl"] or 0.0
+            p["value"] += r["value"] or 0.0
+        out = {"range": range, "base": base, "points": [], "movers": [], "closed": [], "as_of": time.time()}
+        if not pos:
+            return out
+        quotes = engine.quotes(list(pos))
+        now = pd.Timestamp.now("UTC").tz_localize(None)
+        iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        if range == "1d":
+            bars = engine.intraday(list(pos), "1d", "5m")
+            day = max((ser.index[-1].normalize() for ser in bars.values() if len(ser)), default=None)
+            live, offset = {}, 0.0
+            for s_, p in pos.items():
+                q, ser = quotes.get(s_), bars.get(s_)
+                prev = q.prev_close if q and q.ok else None
+                if prev and ser is not None and len(ser) and day is not None and ser.index[-1].normalize() == day:
+                    live[s_] = (ser[ser.index >= day], prev)
+                else:
+                    offset += p["day_pnl"]
+                    out["closed"].append(s_)
+            pnl_now, base_val = tot["day_pnl"], tot["value"] - tot["day_pnl"]
+            if live:
+                df = pd.DataFrame({s_: v[0] for s_, v in live.items()}).sort_index().ffill()
+                contrib = sum(((df[s_] - prev) * pos[s_]["qty"] * pos[s_]["fx"]).fillna(0.0) for s_, (_, prev) in live.items())
+                # crypto trades all night; when it's a small part of the portfolio, start an hour before the first
+                # stock market opens instead of showing hours of an almost flat line
+                crypto = {s_ for s_ in live if (quotes.get(s_) and quotes[s_].quote_type == "CRYPTOCURRENCY")}
+                stock_starts = [live[s_][0].index[0] for s_ in live if s_ not in crypto]
+                crypto_val = sum(pos[s_]["value"] for s_ in crypto)
+                if crypto and stock_starts and crypto_val < 0.2 * (tot["value"] or 1):
+                    contrib = contrib[contrib.index >= min(stock_starts) - pd.Timedelta(hours=1)]
+                out["points"] = [[iso(t), float(v) + offset] for t, v in contrib.items()]
+            elif offset:
+                out["points"] = [[iso(day if day is not None else now.normalize()), offset]]
+            movers = [(s_, p["day_pnl"], p) for s_, p in pos.items()]
+        else:
+            bars = engine.intraday(list(pos), "5d", "15m")
+            df = pd.DataFrame({s_: ser for s_, ser in bars.items() if s_ in pos and len(ser)}).sort_index().ffill()
+            p0 = {s_: float(df[s_].dropna().iloc[0]) for s_ in df.columns}
+            contrib = sum(((df[s_] - p0[s_]) * pos[s_]["qty"] * pos[s_]["fx"]).fillna(0.0) for s_ in df.columns) if p0 else pd.Series(dtype=float)
+            out["points"] = [[iso(t), float(v)] for t, v in contrib.items()]
+            ch = {s_: (pos[s_]["price"] - p0[s_]) * pos[s_]["qty"] * pos[s_]["fx"] for s_ in p0}
+            pnl_now = sum(ch.values())
+            base_val = sum(p0[s_] * pos[s_]["qty"] * pos[s_]["fx"] for s_ in p0) or None
+            movers = [(s_, ch.get(s_, 0.0), p) for s_, p in pos.items()]
+            out["closed"] = [s_ for s_ in pos if s_ not in p0]
+        out["points"].append([iso(now), float(pnl_now)])
+        out["now"] = float(pnl_now)
+        out["pct"] = float(pnl_now / base_val * 100) if base_val else None
+        out["value"] = tot["value"]
+        out["movers"] = sorted(({"symbol": s_, "name": p["name"], "pnl": float(v),
+                                 "pct": float(v / (p["value"] - v) * 100) if p["value"] - v else None,
+                                 "live": s_ not in out["closed"]} for s_, v, p in movers), key=lambda m: -abs(m["pnl"]))
+        return out
+
     @app.get("/api/portfolio")
     def portfolio(base: str | None = None):
         base = base_or_default(base)
@@ -2031,7 +2102,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlchart.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]
