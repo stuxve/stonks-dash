@@ -234,6 +234,53 @@ class YahooProvider:
                 "ev_rev": ("enterpriseToRevenue",), "eps_g": ("earningsGrowth",), "eps_qg": ("earningsQuarterlyGrowth",),
                 "rev_g": ("revenueGrowth",)}
 
+    # statement rows: our key -> (statement, Yahoo field names in order of preference)
+    FIN_ROWS = {"revenue": ("inc", ("TotalRevenue", "OperatingRevenue")), "gross": ("inc", ("GrossProfit",)),
+                "operating": ("inc", ("OperatingIncome", "EBIT")), "net": ("inc", ("NetIncomeCommonStockholders", "NetIncome")),
+                "eps": ("inc", ("DilutedEPS", "BasicEPS")), "ebitda": ("inc", ("EBITDA", "NormalizedEBITDA")),
+                "rnd": ("inc", ("ResearchAndDevelopment",)), "shares": ("inc", ("DilutedAverageShares", "BasicAverageShares")),
+                "ocf": ("cf", ("OperatingCashFlow",)), "capex": ("cf", ("CapitalExpenditure",)), "fcf": ("cf", ("FreeCashFlow",)),
+                "cash": ("bs", ("CashCashEquivalentsAndShortTermInvestments", "CashAndCashEquivalents")),
+                "debt": ("bs", ("TotalDebt",)), "equity": ("bs", ("StockholdersEquity",))}
+
+    def financials(self, symbol: str) -> dict:
+        """Last reported quarters and fiscal years: revenue, margins' inputs, profit, EPS, cash flow, cash and debt."""
+        t = self.yf.Ticker(symbol)
+        out = {"currency": None}
+        try:
+            out["currency"] = (t.get_info() or {}).get("financialCurrency")
+        except Exception:  # noqa: BLE001
+            pass
+        for freq, key in (("quarterly", "quarterly"), ("yearly", "annual")):
+            frames = {}
+            for st, fn in (("inc", t.get_income_stmt), ("cf", t.get_cash_flow), ("bs", t.get_balance_sheet)):
+                try:
+                    frames[st] = fn(pretty=False, freq=freq)
+                except Exception as e:  # noqa: BLE001
+                    log.info("%s %s %s failed: %s", symbol, st, freq, e)
+                    frames[st] = None
+            inc = frames.get("inc")
+            if inc is None or inc.empty:
+                out[key] = None
+                continue
+            periods = sorted({pd.Timestamp(c) for df in frames.values() if df is not None and not df.empty for c in df.columns})
+            periods = [p for p in periods if p in set(pd.Timestamp(c) for c in inc.columns)][-8:]
+            rows = {}
+            for k, (st, names) in self.FIN_ROWS.items():
+                df = frames.get(st)
+                if df is None or df.empty:
+                    continue
+                name = next((n for n in names if n in df.index and df.loc[n].notna().any()), None)
+                if not name:
+                    continue
+                ser = df.loc[name]
+                ser.index = [pd.Timestamp(c) for c in ser.index]
+                rows[k] = [None if p not in ser.index or pd.isna(ser[p]) else float(ser[p]) for p in periods]
+            out[key] = {"periods": [p.date().isoformat() for p in periods], "rows": rows}
+        if not out.get("quarterly") and not out.get("annual"):
+            raise LookupError(f"no statements for {symbol}")
+        return out
+
     def valuation(self, symbol: str) -> dict:
         """Valuation ratios plus the quarterly reported EPS history (for a historical P/E). Fields Yahoo lacks are None."""
         t = self.yf.Ticker(symbol)
@@ -538,6 +585,40 @@ class MockProvider:
                 "div_yield": y, "payout": float(r.uniform(0.1, 1.2)) if y else None, "beta": float(r.uniform(0.4, 1.8)),
                 "target": px * float(r.uniform(0.9, 1.4)), "n": int(r.integers(0, 40)), "rec": float(r.uniform(1.3, 3.2)),
                 "rec_key": str(r.choice(["buy", "hold", "strong_buy"])), "hi52": px * float(r.uniform(1.0, 1.4))}
+
+    def financials(self, symbol: str) -> dict:
+        if self._quote_type(symbol) != "EQUITY":
+            raise LookupError("no statements")
+        r = np.random.default_rng(self._seed(symbol) + 41)
+        today = date.today()
+        q_end = date(today.year, ((today.month - 1) // 3) * 3 + 1, 1) - timedelta(days=1)       # end of last quarter
+        def make(n, step_months, scale):
+            ends, d = [], q_end
+            for _ in range(n):
+                ends.append(d)
+                m = d.month - step_months
+                y = d.year + (m - 1) // 12
+                m = (m - 1) % 12 + 1
+                d = date(y, m, 1) + timedelta(days=32)
+                d = date(d.year, d.month, 1) - timedelta(days=1)
+            ends = sorted(ends)
+            rev0, g = float(r.uniform(5e9, 6e10)) * scale, float(r.uniform(-0.02, 0.06))
+            gm, om, nm = float(r.uniform(0.35, 0.7)), float(r.uniform(0.12, 0.4)), 0.0
+            rows = {k: [] for k in ("revenue", "gross", "operating", "net", "eps", "ebitda", "rnd", "shares", "ocf", "capex", "fcf", "cash", "debt", "equity")}
+            shares = float(r.uniform(5e8, 7e9))
+            for k in range(n):
+                rev = rev0 * (1 + g) ** k * float(r.uniform(0.95, 1.06))
+                gmk, omk = gm + float(r.normal(0, 0.015)), om + float(r.normal(0, 0.02))
+                net = rev * omk * 0.8
+                capex = -rev * float(r.uniform(0.04, 0.12))
+                ocf = net * float(r.uniform(1.0, 1.5))
+                rows["revenue"].append(rev); rows["gross"].append(rev * gmk); rows["operating"].append(rev * omk)
+                rows["net"].append(net); rows["eps"].append(round(net / shares, 2)); rows["ebitda"].append(rev * (omk + 0.06))
+                rows["rnd"].append(rev * 0.12); rows["shares"].append(shares); rows["ocf"].append(ocf); rows["capex"].append(capex)
+                rows["fcf"].append(ocf + capex); rows["cash"].append(rev * float(r.uniform(0.5, 1.5))); rows["debt"].append(rev * float(r.uniform(0.3, 1.2)))
+                rows["equity"].append(rev * float(r.uniform(2, 4)))
+            return {"periods": [e.isoformat() for e in ends], "rows": rows}
+        return {"currency": self._currency(symbol), "quarterly": make(6, 3, 1.0), "annual": make(4, 12, 4.0)}
 
     MOCK_INDEX_PE = {"SPY": (27.0, 22.5), "VGK": (15.5, 13.8), "EWP": (12.0, 11.0), "QQQ": (34.0, 28.0), "URTH": (23.0, 19.5),
                      "VT": (21.0, 18.0), "IEMG": (14.0, 12.0), "EZU": (16.0, 14.0)}
@@ -928,6 +1009,23 @@ class QuoteEngine:
                     threading.Thread(target=work, args=(todo,), daemon=True).start()
         pending = len(getattr(self, "_fund_job", set()) & set(symbols))
         return have, {"have": len(have), "total": len(symbols), "pending": pending}
+
+    def financials(self, symbol: str, ttl: float = 24 * 3600) -> dict | None:
+        """Quarterly and annual statements for one stock (cached a day). None when Yahoo has none."""
+        key = f"fin:{symbol}"
+        hit = self.db.get_meta([key], ttl).get(key)
+        if hit is not None:
+            return hit or None
+        if time.time() - self._meta_miss.get(key, 0) < self.meta_retry or not hasattr(self.p, "financials"):
+            return self.db.get_meta([key], max_age=90 * 86400).get(key) or None
+        try:
+            v = self.p.financials(symbol)
+        except Exception as e:  # noqa: BLE001
+            log.info("financials %s failed: %s", symbol, e)
+            self._meta_miss[key] = time.time()
+            return self.db.get_meta([key], max_age=90 * 86400).get(key) or None
+        self.db.put_meta(key, v)
+        return v
 
     def valuation(self, symbol: str, ttl: float = 12 * 3600) -> dict | None:
         """Valuation ratios + EPS history for one symbol (cached 12 h). None when Yahoo has nothing."""

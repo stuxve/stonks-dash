@@ -212,6 +212,12 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Against the market:** the P/E of the S&P 500 and Europe, plus the home market for Spanish, Japanese and UK stocks, taken from index ETFs.
   - **Funds** without their own P/E use the ETF on the same index.
   - **Summary:** plain-language notes and a glossary of the ratios.
+- **Latest results** (quarterly or annual):
+  - **What it compares:** the last reported period against the 3 before it, and against the same quarter a year earlier (YoY, year over year) where Yahoo has it.
+  - **Income statement:** revenue, gross profit and margin, operating income and margin, EBITDA, net income and margin, diluted EPS (accounting), R&D.
+  - **Earnings release:** the EPS as announced (usually adjusted), the analysts' estimate and the surprise.
+  - **Cash flow and balance sheet:** operating cash flow, capex, free cash flow (FCF) and its margin, cash, debt, net debt, share count.
+  - **On screen:** a revenue and margin chart with beat/miss dots, plain-language notes (growth, margin trend in percentage points, beat/miss track record, cash conversion, buybacks or dilution), the next report date and a glossary.
 - **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast. The **Patterns** group adds:
   - Elder impulse;
   - candlesticks on the last 3 bars, and recent chart patterns with their targets;
@@ -253,6 +259,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/financials?symbol=MSFT` | Last quarterly / annual results (income, cash flow, balance sheet), EPS surprises and next report date |
 | GET | `/api/valuation?symbol=MSFT` | Trailing / forward P/E and other multiples, P/E history from reported EPS, sector-peer and market comparisons |
 | GET | `/api/ta?symbol=NVDA&years=10` | Daily OHLCV (cleaned) for the Analysis tab, plus support/resistance zones and volatility |
 | GET | `/api/moves?extra=AAPL,ITX.MC` | Per held ticker (plus `extra`): typical daily move, this week's moves, and for 15 days / 6 months / 1 year the highest and lowest close, distance from them, position in range and biggest one-day rise and fall |

@@ -1713,6 +1713,33 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 out["markets"].append({"label": label, "symbol": etf, "pe": mv.get("pe"), "fpe": mv.get("fpe")})
         return out
 
+    # ------------------------------------------------------------------ latest results vs the previous ones (Analysis tab)
+    @app.get("/api/financials")
+    def financials_view(symbol: str):
+        """Last quarterly and annual results from the income, cash-flow and balance-sheet statements, plus the EPS
+        surprises (reported vs analysts' estimate) and the next report date from the earnings calendar."""
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.match(sym):
+            raise HTTPException(400, "Invalid ticker")
+        meta = engine.meta([sym]).get(sym) or {}
+        qt = meta.get("quote_type")
+        if qt and qt != "EQUITY":
+            return {"symbol": sym, "applicable": False,
+                    "reason": "Company results only exist for individual stocks (not for funds, crypto, currencies or indices)."}
+        f = engine.financials(sym)
+        if not f:
+            return {"symbol": sym, "applicable": False, "reason": "Yahoo has no financial statements for this ticker."}
+        try:
+            earn = engine.earnings([sym]).get(sym) or {}
+        except Exception as e:  # noqa: BLE001 — optional
+            log.info("earnings for financials %s failed: %s", sym, e)
+            earn = {}
+        hist = sorted((h for h in earn.get("history") or [] if h.get("eps") is not None), key=lambda h: h["date"])
+        return {"symbol": sym, "applicable": True, "currency": f.get("currency") or meta.get("currency"),
+                "quarterly": f.get("quarterly"), "annual": f.get("annual"), "surprises": hist[-8:],
+                "next": (earn.get("next") or [None])[0], "eps_est": earn.get("eps_est"), "rev_est": earn.get("rev_est"),
+                "as_of": time.time()}
+
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():

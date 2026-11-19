@@ -646,3 +646,15 @@ def test_valuation_endpoint(client):
     c = client.get("/api/valuation?symbol=BTC-USD").json()
     assert not c["applicable"] and "crypto" in c["reason"]
     assert client.get("/api/valuation?symbol=bad%20one").status_code == 400
+
+
+def test_financials_endpoint(client):
+    d = client.get("/api/financials?symbol=MSFT").json()
+    assert d["applicable"] and d["currency"]
+    q, a = d["quarterly"], d["annual"]
+    assert len(q["periods"]) >= 4 and q["periods"] == sorted(q["periods"]) and len(a["periods"]) >= 3
+    for k in ("revenue", "operating", "net", "eps", "fcf"):
+        assert len(q["rows"][k]) == len(q["periods"]) and q["rows"][k][-1] is not None
+    assert d["surprises"] and all("eps_est" in h for h in d["surprises"])
+    assert not client.get("/api/financials?symbol=VWCE.DE").json()["applicable"]      # funds have no statements
+    assert client.get("/api/financials?symbol=bad%20one").status_code == 400

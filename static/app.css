@@ -656,3 +656,8 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .ta-gloss dd { margin: 0; color: var(--muted); }
 .ta-peer { background: none; border: 0; padding: 0; color: var(--text-strong); cursor: pointer; font-weight: 600; text-decoration: underline; }
 @media (max-width: 800px) { .ta-valgrid { grid-template-columns: 1fr; } .ta-gloss dl { grid-template-columns: 1fr; } }
+.ta-finhead { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; }
+.ta-finhead h3 { margin-right: auto; }
+.ta-fintab td, .ta-fintab th { font-size: 12.5px; white-space: nowrap; }
+.ta-fintab .ta-last { background: rgba(57,135,229,.08); font-weight: 600; }
+.ta-val .seg button[disabled] { opacity: .35; cursor: default; }

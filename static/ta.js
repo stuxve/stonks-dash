@@ -1194,6 +1194,178 @@ window.StonksTA = function (ctx) {
     el.insertAdjacentHTML("beforeend", `<p class="hint">Built from ${esc(H.basis)}, so it can differ a little from Yahoo's trailing P/E, which uses accounting (GAAP/IFRS) EPS.${s10 && s10.years === 10 ? ` 10-year median: ${fn(s10.median, 1)}.` : ""}</p>`);
   }
 
+  // ------------------------------------------------------------------ latest results vs the previous three
+  let finFor = null, finData = null;
+  async function loadFin(sym) {
+    finFor = sym; finData = null;
+    const el = $("#ta-fin");
+    el.innerHTML = '<h3 class="sub-h">Latest results</h3><p class="hint">Loading financial statements…</p>';
+    let f;
+    try { f = await api(`/api/financials?symbol=${encodeURIComponent(sym)}`); } catch (e) { if (finFor === sym) el.innerHTML = `<h3 class="sub-h">Latest results</h3><p class="hint">${esc(e.message)}</p>`; return; }
+    if (finFor !== sym) return;
+    finData = f;
+    renderFin();
+  }
+  const finFreq = () => (S().fin_freq === "annual" ? "annual" : "quarterly");
+  function fm(x, ccy) {      // compact money: 1.23B USD
+    if (x == null || !isFinite(x)) return "—";
+    const a = Math.abs(x), sgn = x < 0 ? "−" : "";
+    const v = a >= 1e12 ? `${(a / 1e12).toFixed(2)}T` : a >= 1e9 ? `${(a / 1e9).toFixed(2)}B` : a >= 1e6 ? `${(a / 1e6).toFixed(1)}M` : a >= 1e3 ? `${(a / 1e3).toFixed(1)}K` : a.toFixed(2);
+    return `${sgn}${v}${ccy ? ` <span class="sub">${esc(ccy)}</span>` : ""}`;
+  }
+  const mY = (iso) => new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" }).format(new Date(iso + "T00:00:00"));
+  function renderFin() {
+    const el = $("#ta-fin"), f = finData;
+    if (!f) return;
+    if (!f.applicable) { el.innerHTML = `<h3 class="sub-h">Latest results</h3><p class="hint">${esc(f.reason)}</p>`; return; }
+    let fr = finFreq(), d = f[fr];
+    if (!d || d.periods.length < 2) { fr = fr === "annual" ? "quarterly" : "annual"; d = f[fr]; }
+    if (!d || d.periods.length < 2) { el.innerHTML = '<h3 class="sub-h">Latest results</h3><p class="hint">Yahoo has too few reported periods for this company.</p>'; return; }
+    const Q = fr === "quarterly", n = d.periods.length, L = n - 1, ccy = f.currency || "";
+    const R = d.rows, get = (k, i) => (R[k] && i >= 0 ? R[k][i] : null);
+    const ratio = (a, b) => (a == null || b == null || !b ? null : a / b);
+    // derived rows
+    const der = {
+      gm: (i) => ratio(get("gross", i), get("revenue", i)), om: (i) => ratio(get("operating", i), get("revenue", i)),
+      nm: (i) => ratio(get("net", i), get("revenue", i)), fcfm: (i) => ratio(get("fcf", i), get("revenue", i)),
+      netdebt: (i) => (get("debt", i) == null && get("cash", i) == null ? null : (get("debt", i) || 0) - (get("cash", i) || 0)),
+    };
+    // EPS estimate / surprise: the report that came out within ~100 days after the period end
+    const sur = (i) => {
+      if (!Q) return null;
+      const end = new Date(d.periods[i] + "T00:00:00");
+      return (f.surprises || []).find((h) => { const t = new Date(h.date + "T00:00:00"); return t > end && t - end <= 100 * 864e5; }) || null;
+    };
+    const val = (key, i) => (key in der ? der[key](i) : key === "eps_rep" ? sur(i)?.eps ?? null : key === "eps_est" ? sur(i)?.eps_est ?? null : key === "surprise" ? (sur(i)?.surprise != null ? sur(i).surprise / 100 : null) : get(key, i));
+    const prev3 = [L - 1, L - 2, L - 3].filter((i) => i >= 0);
+    const avg = (key) => { const xs = prev3.map((i) => val(key, i)).filter((x) => x != null && isFinite(x)); return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null; };
+    const yoyI = Q ? L - 4 : null;
+    // [key, label, kind (money | pct | eps | shares), better (1 higher is better, -1 lower is better, 0 neutral), tooltip]
+    const ROWS = [
+      ["revenue", "Revenue", "money", 1, "Total sales in the period."],
+      ["gross", "Gross profit", "money", 1, "Revenue minus the direct cost of what was sold."],
+      ["gm", "Gross margin", "pct", 1, "Gross profit ÷ revenue."],
+      ["operating", "Operating income", "money", 1, "Profit from the business itself, before interest and taxes."],
+      ["om", "Operating margin", "pct", 1, "Operating income ÷ revenue: how much of each sale is operating profit."],
+      ["ebitda", "EBITDA", "money", 1, "Earnings before interest, taxes, depreciation and amortisation."],
+      ["net", "Net income", "money", 1, "Profit attributable to shareholders after everything."],
+      ["nm", "Net margin", "pct", 1, "Net income ÷ revenue."],
+      ["eps", "Diluted EPS (accounting)", "eps", 1, "Earnings per share from the income statement (GAAP/IFRS accounting rules), counting all shares that options and convertibles could create."],
+      ["eps_rep", "EPS as announced", "eps", 1, "EPS in the earnings release, usually adjusted (excludes one-off items). This is the figure analysts forecast (quarters only)."],
+      ["eps_est", "EPS estimate", "eps", 0, "Analysts' average forecast of the announced EPS before the report (quarters only)."],
+      ["surprise", "EPS surprise", "pct", 1, "Announced EPS vs the estimate: positive = beat, negative = miss."],
+      ["rnd", "R&D", "money", 0, "Research and development spending."],
+      ["ocf", "Operating cash flow", "money", 1, "Cash generated by the business in the period."],
+      ["capex", "Capex", "money", 0, "Capital expenditure: cash spent on equipment, buildings, etc. (shown negative)."],
+      ["fcf", "Free cash flow", "money", 1, "Operating cash flow minus capex: cash left for dividends, buybacks or debt."],
+      ["fcfm", "FCF margin", "pct", 1, "Free cash flow ÷ revenue."],
+      ["cash", "Cash & short-term investments", "money", 1, "At the end of the period."],
+      ["debt", "Total debt", "money", -1, "At the end of the period."],
+      ["netdebt", "Net debt", "delta", -1, "Debt minus cash. Negative = more cash than debt (net cash). Changes are shown as amounts, since % changes of a figure that can cross zero mislead."],
+      ["shares", "Diluted shares", "shares", -1, "Average share count; falling = buybacks."],
+    ].filter(([k]) => d.periods.some((_, i) => val(k, i) != null));
+    const show = (kind, x) => (x == null || !isFinite(x) ? "—" : kind === "money" || kind === "delta" ? fm(x) : kind === "pct" ? pp(x, 1) : kind === "eps" ? fn(x, 2) : fv(x));
+    // change cells: % for amounts, percentage points (pp) for margins
+    const chg = (kind, better, a, b) => {
+      if (a == null || b == null || !isFinite(a) || !isFinite(b)) return '<td class="num sub">—</td>';
+      let txt, delta;
+      if (kind === "pct") { delta = a - b; txt = `${delta > 0 ? "+" : delta < 0 ? "−" : ""}${Math.abs(delta * 100).toFixed(1)} pp`; }
+      else if (kind === "delta") { delta = a - b; txt = `${delta > 0 ? "+" : ""}${fm(delta)}`; }
+      else { if (!b) return '<td class="num sub">—</td>'; delta = (a - b) / Math.abs(b); txt = pc(delta, 1); }
+      const cls = !better || Math.abs(delta) < 0.0005 ? "" : delta * better > 0 ? "v-cheap" : "v-dear";
+      return `<td class="num ${cls}">${txt}</td>`;
+    };
+    const cols = [L - 3, L - 2, L - 1, L].filter((i) => i >= 0);
+    const head = `<tr><th></th>${cols.map((i) => `<th class="num${i === L ? " ta-last" : ""}">${mY(d.periods[i])}${i === L ? '<div class="sub">latest</div>' : ""}</th>`).join("")}
+      <th class="num" title="Latest vs the period just before">vs previous</th><th class="num" title="Latest vs the average of the 3 periods before it">vs avg of previous ${prev3.length}</th>${Q && yoyI >= 0 ? `<th class="num" title="Latest quarter vs the same quarter a year earlier (year over year)">vs year ago</th>` : ""}</tr>`;
+    const body = ROWS.map(([k, lbl, kind, better, tip]) => `<tr title="${esc(tip)}"><td>${esc(lbl)}</td>${cols.map((i) => `<td class="num${i === L ? " ta-last" : ""}">${show(kind, val(k, i))}</td>`).join("")}
+      ${k === "eps_est" || k === "surprise" ? '<td class="num sub">—</td><td class="num sub">—</td>' : chg(kind, better, val(k, L), val(k, L - 1)) + chg(kind, better, val(k, L), avg(k))}${Q && yoyI >= 0 ? (k === "eps_est" || k === "surprise" ? '<td class="num sub">—</td>' : chg(kind, better, val(k, L), val(k, yoyI))) : ""}</tr>`).join("");
+    const beatTxt = (h) => `announced ${fn(h.eps, 2)} vs estimate ${fn(h.eps_est, 2)}: <b class="${h.surprise >= 0 ? "up" : "down"}">${h.surprise >= 0 ? "beat" : "missed"} by ${Math.abs(h.surprise).toFixed(1)}%</b>`;
+
+    // tiles
+    const pct1 = (a, b) => (a == null || b == null || !b ? null : (a - b) / Math.abs(b));
+    const ppd = (a, b) => (a == null || b == null ? null : a - b);
+    const tag = (x, kind = "pc", better = 1) => (x == null || !isFinite(x) ? "" : `<b class="${x * better > 0.0005 ? "up" : x * better < -0.0005 ? "down" : ""}">${kind === "pp" ? `${x > 0 ? "+" : x < 0 ? "−" : ""}${Math.abs(x * 100).toFixed(1)} pp` : pc(x, 1)}</b>`);
+    const tl = (k, v2, a, b, c2) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v2}</div><div class="d">${[a, b, c2].filter(Boolean).join("<br>")}</div></div>`;
+    const qn = Q ? "quarter" : "year";
+    const s0 = sur(L);
+    const tiles = [
+      val("revenue", L) != null ? tl("Revenue", fm(val("revenue", L), ccy), `${tag(pct1(val("revenue", L), val("revenue", L - 1)))} vs previous ${qn}`, avg("revenue") != null ? `${tag(pct1(val("revenue", L), avg("revenue")))} vs avg of previous ${prev3.length}` : "", Q && yoyI >= 0 && val("revenue", yoyI) != null ? `${tag(pct1(val("revenue", L), val("revenue", yoyI)))} vs same quarter last year` : "") : "",
+      val("om", L) != null ? tl("Operating margin", pp(val("om", L), 1), `${tag(ppd(val("om", L), val("om", L - 1)), "pp")} vs previous ${qn}`, avg("om") != null ? `${tag(ppd(val("om", L), avg("om")), "pp")} vs avg of previous ${prev3.length}` : "") : "",
+      val("net", L) != null ? tl("Net income", fm(val("net", L), ccy), val("nm", L) != null ? `net margin ${pp(val("nm", L), 1)}` : "", `${tag(pct1(val("net", L), val("net", L - 1)))} vs previous ${qn}`, Q && yoyI >= 0 && val("net", yoyI) != null ? `${tag(pct1(val("net", L), val("net", yoyI)))} vs same quarter last year` : "") : "",
+      val("eps", L) != null ? tl("Diluted EPS", fn(val("eps", L), 2), `${tag(pct1(val("eps", L), val("eps", L - 1)))} vs previous ${qn}`, s0 && s0.eps_est != null && s0.surprise != null ? beatTxt(s0) : "", Q && yoyI >= 0 && val("eps", yoyI) != null ? `${tag(pct1(val("eps", L), val("eps", yoyI)))} vs same quarter last year` : "") : "",
+      val("fcf", L) != null ? tl("Free cash flow", fm(val("fcf", L), ccy), val("fcfm", L) != null ? `${pp(val("fcfm", L), 1)} of revenue` : "", `${tag(pct1(val("fcf", L), val("fcf", L - 1)))} vs previous ${qn}`) : "",
+      val("netdebt", L) != null ? tl(val("netdebt", L) <= 0 ? "Net cash" : "Net debt", fm(Math.abs(val("netdebt", L)), ccy), val("netdebt", L) <= 0 ? "more cash than debt" : "debt minus cash", val("ebitda", L) && val("netdebt", L) > 0 ? `${fn(val("netdebt", L) / (val("ebitda", L) * (Q ? 4 : 1)), 1)}× annualised EBITDA` : "") : "",
+    ].join("");
+
+    // plain-language summary
+    const notes = [];
+    const p1 = (x) => (x == null ? null : pc(x, 1));
+    const rv = val("revenue", L), rp = pct1(rv, val("revenue", L - 1)), ry = Q && yoyI >= 0 ? pct1(rv, val("revenue", yoyI)) : null, ra = pct1(rv, avg("revenue"));
+    if (rv != null) notes.push(`<b>Revenue</b> ${fm(rv, ccy)}: ${p1(rp)} vs the previous ${qn}${ry != null ? `, ${p1(ry)} vs the same quarter last year` : ""}${ra != null ? ` and ${p1(ra)} vs the average of the previous ${prev3.length}` : ""}.`);
+    const om0 = val("om", L), omp = val("om", L - 1), oma = avg("om");
+    if (om0 != null) notes.push(`<b>Operating margin</b> ${pp(om0, 1)}: ${ppd(om0, omp) >= 0 ? "up" : "down"} ${Math.abs((ppd(om0, omp) || 0) * 100).toFixed(1)} pp (percentage points) vs the previous ${qn}${oma != null ? `, ${ppd(om0, oma) >= 0 ? "above" : "below"} its recent average of ${pp(oma, 1)}` : ""}. ${ppd(om0, oma) > 0.01 ? "Each sale is turning into more profit." : ppd(om0, oma) < -0.01 ? "Costs are growing faster than sales, or prices came down." : "Profitability is stable."}`);
+    const e0 = val("eps", L);
+    if (e0 != null) notes.push(`<b>EPS</b> (earnings per share) ${fn(e0, 2)}: ${p1(pct1(e0, val("eps", L - 1)))} vs the previous ${qn}${Q && yoyI >= 0 && val("eps", yoyI) != null ? `, ${p1(pct1(e0, val("eps", yoyI)))} year over year` : ""}${s0 && s0.eps_est != null && s0.surprise != null ? `. The EPS announced in the earnings release (usually adjusted for one-off items) was ${fn(s0.eps, 2)} against an analysts' estimate of ${fn(s0.eps_est, 2)}: it ${s0.surprise >= 0 ? "beat" : "missed"} by ${Math.abs(s0.surprise).toFixed(1)}%` : ""}.`);
+    if (Q) {
+      const beats = (f.surprises || []).slice(-4).filter((h) => h.surprise != null);
+      if (beats.length >= 2) notes.push(`<b>Track record:</b> beat the EPS estimate in ${beats.filter((h) => h.surprise > 0).length} of the last ${beats.length} reports (average surprise ${pc(beats.reduce((a, h) => a + h.surprise, 0) / beats.length / 100, 1)}).`);
+    }
+    const fc = val("fcf", L);
+    if (fc != null) notes.push(`<b>Free cash flow</b> (cash left after investments) ${fm(fc, ccy)}${val("fcfm", L) != null ? `, ${pp(val("fcfm", L), 1)} of revenue` : ""}${val("net", L) ? ` — ${fn(fc / val("net", L), 2)}× net income${fc / val("net", L) < 0.7 ? " (profit is not fully turning into cash this period)" : ""}` : ""}.`);
+    const sh0 = val("shares", L), shA = val("shares", Math.max(0, L - (Q ? 4 : 1)));
+    if (sh0 && shA && Math.abs(sh0 / shA - 1) > 0.005) notes.push(`<b>Share count</b> ${sh0 < shA ? "down" : "up"} ${Math.abs((sh0 / shA - 1) * 100).toFixed(1)}% in a year (${sh0 < shA ? "buybacks raise each share's slice of the profit" : "new shares dilute existing holders"}).`);
+    if (Q) notes.push("Many businesses are seasonal, so the comparison with the same quarter last year is usually fairer than with the previous quarter.");
+
+    el.innerHTML = `<div class="ta-finhead"><h3 class="sub-h">Latest results — ${Q ? "quarter" : "fiscal year"} ended ${dS(d.periods[L])} vs the previous ${prev3.length}</h3>
+        <span class="seg" id="ta-finfreq"><button data-v="quarterly" class="${Q ? "active" : ""}" ${f.quarterly ? "" : "disabled"}>Quarterly</button><button data-v="annual" class="${Q ? "" : "active"}" ${f.annual ? "" : "disabled"}>Annual</button></span>
+        ${f.next ? `<span class="sub">next report: <b>${dS(f.next)}</b>${f.eps_est != null ? ` · EPS estimate ${fn(f.eps_est, 2)}` : ""}</span>` : ""}</div>
+      <div class="kpis small">${tiles}</div>
+      <div class="ta-valgrid"><div class="ta-pechart" id="ta-finchart"></div><div><ul class="ta-valnotes">${notes.map((x) => `<li>${x}</li>`).join("")}</ul></div></div>
+      <div class="table-wrap"><table class="grid ta-fintab"><thead>${head}</thead><tbody>${body}</tbody></table></div>
+      <p class="hint">Amounts in ${esc(ccy || "the company's reporting currency")}, as reported (from Yahoo). <span class="v-cheap">Green</span> = better, <span class="v-dear">red</span> = worse (for debt and share count, lower is better). Margins change in pp (percentage points). Hover a row for what it means.</p>
+      <details class="ta-gloss"><summary>What do these terms mean?</summary><dl>
+        <dt>QoQ / vs previous</dt><dd>Quarter over quarter: the latest period vs the one just before.</dd>
+        <dt>YoY / vs year ago</dt><dd>Year over year: the latest quarter vs the same quarter a year earlier (removes seasonal effects).</dd>
+        <dt>pp (percentage points)</dt><dd>The difference between two percentages: a margin going from 30% to 32% is +2 pp (and +6.7%).</dd>
+        <dt>EPS</dt><dd>Earnings per share: net income ÷ number of shares. “Diluted” counts shares that options and convertibles could create.</dd>
+        <dt>Accounting vs announced EPS</dt><dd>The diluted EPS follows accounting rules (GAAP in the US, IFRS in Europe). The EPS announced in the earnings release is usually “adjusted” (excludes one-off items) and is the one analysts estimate, so beats and misses are measured on it.</dd>
+        <dt>EBITDA</dt><dd>Earnings before interest, taxes, depreciation and amortisation: an approximation of operating cash earnings.</dd>
+        <dt>Capex</dt><dd>Capital expenditure: money spent on long-lived assets (factories, data centres, equipment).</dd>
+        <dt>FCF (free cash flow)</dt><dd>Operating cash flow minus capex: the cash the company can return to shareholders or use to pay debt.</dd>
+        <dt>R&amp;D</dt><dd>Research and development spending.</dd>
+        <dt>Net debt / net cash</dt><dd>Total debt minus cash. “× annualised EBITDA” = years of current EBITDA needed to repay it; above ~3× is usually considered high.</dd>
+      </dl></details>`;
+    finChart(d, Q, val, sur, ccy);
+  }
+  // revenue bars with operating margin line, and reported vs estimated EPS (quarters)
+  function finChart(d, Q, val, sur, ccy) {
+    const el = $("#ta-finchart"), d3 = window.d3;
+    const idx = d.periods.map((_, i) => i).slice(-8);
+    const W = Math.max(300, el.clientWidth || 520), Hh = 230, M = { l: 50, r: 44, t: 24, b: 22 };
+    const sv = d3.select(el).append("svg").attr("width", W).attr("height", Hh).attr("class", "ta-svg");
+    const X = d3.scaleBand().domain(idx).range([M.l, W - M.r]).padding(0.3);
+    const rev = idx.map((i) => val("revenue", i)), om = idx.map((i) => val("om", i));
+    const Y = d3.scaleLinear().domain([0, (d3.max(rev) || 1) * 1.1]).range([Hh - M.b, M.t]);
+    const okOm = om.filter((x) => x != null);
+    const Y2 = d3.scaleLinear().domain([Math.min(0, d3.min(okOm) ?? 0), Math.max(0.05, (d3.max(okOm) ?? 0.1) * 1.25)]).range([Hh - M.b, M.t]);
+    sv.append("text").attr("x", 8).attr("y", 13).attr("font-size", 11).attr("fill", "var(--muted)").text(`Revenue (bars, ${ccy}) and operating margin (line, right axis)${Q ? " — dots above bars: EPS beat (green) / miss (red)" : ""}`);
+    sv.append("g").attr("transform", `translate(${M.l},0)`).call(d3.axisLeft(Y).ticks(5).tickFormat((x) => fm(x).replace(/<[^>]+>/g, ""))).call((g) => g.selectAll("text").attr("fill", "var(--muted)")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    sv.append("g").attr("transform", `translate(${W - M.r},0)`).call(d3.axisRight(Y2).ticks(5).tickFormat((x) => `${(x * 100).toFixed(0)}%`)).call((g) => g.selectAll("text").attr("fill", "#ffd54f")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    sv.append("g").attr("transform", `translate(0,${Hh - M.b})`).call(d3.axisBottom(X).tickFormat((i) => mY(d.periods[i]))).call((g) => g.selectAll("text").attr("fill", "var(--muted)").attr("font-size", 10)).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    const last = idx[idx.length - 1];
+    sv.append("g").selectAll("rect").data(idx).join("rect").attr("x", (i) => X(i)).attr("width", X.bandwidth()).attr("y", (i) => Y(val("revenue", i) || 0)).attr("height", (i) => Y(0) - Y(val("revenue", i) || 0))
+      .attr("fill", (i) => (i === last ? "#3987e5" : "rgba(57,135,229,.45)")).append("title").text((i) => `${mY(d.periods[i])}: revenue ${fm(val("revenue", i)).replace(/<[^>]+>/g, "")}, operating margin ${pp(val("om", i), 1)}`);
+    const line = d3.line().defined((i) => val("om", i) != null).x((i) => X(i) + X.bandwidth() / 2).y((i) => Y2(val("om", i)));
+    sv.append("path").datum(idx).attr("fill", "none").attr("stroke", "#ffd54f").attr("stroke-width", 2).attr("d", line);
+    sv.append("g").selectAll("circle").data(idx.filter((i) => val("om", i) != null)).join("circle").attr("cx", (i) => X(i) + X.bandwidth() / 2).attr("cy", (i) => Y2(val("om", i))).attr("r", 3).attr("fill", "#ffd54f");
+    if (Q) {
+      sv.append("g").selectAll("circle").data(idx.filter((i) => sur(i) && sur(i).surprise != null)).join("circle")
+        .attr("cx", (i) => X(i) + X.bandwidth() / 2).attr("cy", (i) => Y(val("revenue", i) || 0) - 8).attr("r", 4).attr("fill", (i) => (sur(i).surprise >= 0 ? C.up : C.down))
+        .append("title").text((i) => `EPS ${fn(sur(i).eps, 2)} vs estimate ${fn(sur(i).eps_est, 2)} (${sur(i).surprise >= 0 ? "+" : ""}${sur(i).surprise.toFixed(1)}%)`);
+    }
+  }
+
   // ------------------------------------------------------------------ header, symbol chips, indicator panel
   function header() {
     const x = raw;
@@ -1244,6 +1416,7 @@ window.StonksTA = function (ctx) {
     header(); controls();
     build(true);
     loadVal(sym);
+    loadFin(sym);
   }
 
   // ------------------------------------------------------------------ events
@@ -1269,6 +1442,10 @@ window.StonksTA = function (ctx) {
     if (raw) build();
   });
   $("#ta-reset").addEventListener("click", () => { saveTA({ ind: {} }); panel(); if (raw) build(); });
+  $("#ta-fin").addEventListener("click", (e) => {
+    const b = e.target.closest("#ta-finfreq button");
+    if (b && !b.disabled) { saveTA({ fin_freq: b.dataset.v }); renderFin(); }
+  });
   $("#ta-val").addEventListener("click", (e) => { const b = e.target.closest(".ta-peer"); if (b) { open(b.dataset.sym); window.scrollTo(0, 0); } });
   $("#ta-altp").addEventListener("change", (e) => {
     const t2 = e.target, k = t2.dataset.alt, f = t2.dataset.f;
