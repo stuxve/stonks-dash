@@ -112,3 +112,33 @@ def test_page_and_alerts_share_the_portfolio_snapshot(client):
     assert {j["name"] for j in st["jobs"]} >= {"portfolio", "alerts", "boards"} and "busy" in st
     assert client.post("/api/worker/run?job=nope").status_code == 404
     assert "crosses" in client.get("/api/alerts").json()
+
+
+def test_short_yahoo_history_is_retried_soon(tmp_path):
+    """A batch answer with only a few days for one ticker must not be cached for hours."""
+    from datetime import date, timedelta
+    from app.db import DB
+    from app.market import QuoteEngine
+
+    calls = []
+
+    class P:
+        name = "fake"
+
+        def closes(self, symbols, start=None, period=None):
+            calls.append(tuple(symbols))
+            n = 5 if len(calls) == 1 else 300
+            idx = pd.bdate_range(end=pd.Timestamp(date.today()), periods=n)
+            return {s: pd.Series(100.0, index=idx) for s in symbols}
+
+        def meta(self, symbols):
+            return {}
+
+    eng = QuoteEngine(P(), DB(str(tmp_path / "e.db")), history_ttl=6 * 3600)
+    eng.meta = lambda syms: {}
+    start = date.today() - timedelta(days=400)
+    assert len(eng.history(["MCD"], start)["MCD"]) == 5
+    t, _, _ = eng._full["MCD"]
+    assert time.time() - t > 6 * 3600 - 700                # expires ~10 min from now, not in 6 h
+    eng._full["MCD"] = (t - 700, *eng._full["MCD"][1:])     # 10 minutes later…
+    assert len(eng.history(["MCD"], start)["MCD"]) == 300 and len(calls) == 2

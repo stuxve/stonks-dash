@@ -391,11 +391,27 @@
   }
 
   // daily-move stats change slowly: refresh at most every 5 minutes (today's move is shown live from the quotes)
+  // …but at once when a holding isn't in it yet (a new buy), and every minute while Yahoo had no history for one
   let movesAt = 0;
+  state.movesMiss = {};
   async function loadMoves() {
-    if (Date.now() - movesAt < 5 * 60e3 && state.moves) return;
+    const held = (state.port?.positions || []).filter((p) => p.symbol && p.quote_type !== "MANUAL").map((p) => p.symbol);
+    const age = Date.now() - movesAt;
+    const unknown = held.some((s) => !state.moves?.[s] && !state.movesMiss[s]);
+    const retry = held.some((s) => state.movesMiss[s]) && age > 60e3;
+    if (state.moves && age < 5 * 60e3 && !unknown && !retry) return;
     movesAt = Date.now();
-    try { state.moves = (await api("/api/moves")).symbols || {}; drawPortfolio(); } catch (e) { console.warn(e); movesAt = 0; }
+    try {
+      const r = await api("/api/moves");
+      state.moves = r.symbols || {}; state.movesMiss = r.missing || {};
+      drawPortfolio();
+    } catch (e) { console.warn(e); movesAt = 0; }
+  }
+  function noMoves(p) {
+    const x = state.movesMiss?.[p.symbol];
+    if (!x) return `<td class="num"><span class="sub" title="Loading the last year of daily prices…">…</span></td>`;
+    const tip = `Yahoo hasn't returned a year of daily prices for ${p.symbol} (${x.closes} closes${x.first ? ` since ${x.first}` : ""}). Retrying every minute.`;
+    return `<td class="num"><span class="sub warn-t" title="${esc(tip)}">no history</span></td>`;
   }
 
   function pView() {
@@ -585,6 +601,7 @@
     return `<td class="num ${cls(r)}">${fmtPct(r)}${unusual}</td>`;
   }
   function weekCell(p) {
+    if (!state.moves?.[p.symbol] && p.quote_type !== "MANUAL") return noMoves(p);
     const w = state.moves?.[p.symbol]?.week;
     if (!w) return `<td class="num"><span class="sub">—</span></td>`;
     const tip = `Last 7 days (${w.days} sessions)\nBest day: ${pc(w.best.ret)} on ${fmtDate(w.best.date)}\nWorst day: ${pc(w.worst.ret)} on ${fmtDate(w.worst.date)}\nWeek: ${pc(w.change)} · range ${fmtPrice(w.range.lo, p.price_currency)} – ${fmtPrice(w.range.hi, p.price_currency)}`;
@@ -593,6 +610,7 @@
   }
   function typCell(p) {
     const m = state.moves?.[p.symbol];
+    if (!m && p.quote_type !== "MANUAL") return noMoves(p);
     if (!m) return `<td class="num"><span class="sub">—</span></td>`;
     const q = m.q, dy = m.days;
     const tip = `Last year, ${m.n} sessions (moves in the asset's own currency)\n`

@@ -830,6 +830,16 @@ class QuoteEngine:
         data = fn(list(dict.fromkeys(src.values())), **kw)
         return {s: data[v] for s, v in src.items() if v in data}
 
+    def _stamp(self, now: float, first, start) -> float:
+        """Cache time for a downloaded series. Yahoo sometimes answers a batch with only the last few days for one
+        ticker; a series starting much later than asked is kept 10 minutes instead of hours, so it's retried soon
+        (a ticker that really is new just gets re-checked every 10 minutes)."""
+        try:
+            short = start is not None and pd.Timestamp(first) > pd.Timestamp(start) + pd.Timedelta(days=30)
+        except Exception:  # noqa: BLE001
+            short = False
+        return now - self.history_ttl + 600 if short else now
+
     # ---- raw series with TTL caches ----
     def _fetch(self, cache: dict, symbols: list[str], ttl: float, **kw) -> None:
         now = time.time()
@@ -843,7 +853,9 @@ class QuoteEngine:
             data = self._pull(self.p.closes, chunk, **kw)
             for s in chunk:
                 if s in data:
-                    cache[s] = (now, data[s])
+                    ser = data[s]
+                    t = self._stamp(now, ser.index[0], kw.get("start")) if ttl == self.history_ttl and len(ser) else now
+                    cache[s] = (t, ser)
                     self._miss.pop(s, None)
                 elif s not in cache:
                     self._miss[s] = now
@@ -877,7 +889,8 @@ class QuoteEngine:
                 data = self._pull(self.p.closes, chunk, start=start - timedelta(days=10))
                 for s in chunk:
                     if s in data:
-                        self._full[s] = (now, start, data[s])
+                        ser = data[s]
+                        self._full[s] = (self._stamp(now, ser.index[0], start) if len(ser) else now, start, ser)
                     else:
                         self._miss[s] = now
         meta = self.meta(symbols)
@@ -909,7 +922,8 @@ class QuoteEngine:
                 data = self._pull(self.p.bars, chunk, start=start - timedelta(days=10))
                 for s in chunk:
                     if s in data:
-                        self._bars[s] = (now, start, data[s])
+                        f = data[s]
+                        self._bars[s] = (self._stamp(now, f.index[0], start) if len(f) else now, start, f)
                     else:
                         self._bars_miss[s] = now
             rec = [s for s in symbols if s in self._bars

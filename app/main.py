@@ -1659,7 +1659,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     @app.get("/api/moves")
     def moves_view(extra: str = ""):
         """Cached copy (refreshed in the background with the Highs & lows watch list) or a fresh computation."""
-        return snap.get_or(f"moves:{extra.strip().upper()}", 120, lambda: _moves(extra))
+        key = f"moves:{extra.strip().upper()}"
+        hit = snap.get(key, 120)
+        if hit is not None and not (hit.get("missing") and (snap.age(key) or 0) > 30):
+            return hit                    # a copy with tickers still missing is retried after 30 s
+        return snap.refresh(key, lambda: _moves(extra))
 
     def _moves(extra: str = ""):
         """Per held symbol (plus `extra`, comma-separated tickers you don't hold): typical daily move over the last
