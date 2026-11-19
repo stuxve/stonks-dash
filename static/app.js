@@ -762,6 +762,22 @@
     const t = new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const r = +state.settings.refresh_seconds;
     $("#status").textContent = `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
+    workerBadge();
+  }
+  // Pi background refresh: is the worker keeping prices and alerts current without this page? (app/worker.py)
+  async function workerBadge() {
+    const el = $("#wk-badge");
+    let w;
+    try { w = await api("/api/worker"); } catch { el.hidden = true; return; }
+    const j = Object.fromEntries((w.jobs || []).map((x) => [x.name, x]));
+    const p = j.portfolio, bad = (w.jobs || []).filter((x) => x.stuck || (x.last_error && x.enabled));
+    const ago = (t) => { if (!t) return "never"; const s = Math.round(w.now - t); return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+    const state = !w.running ? "bad" : bad.length || p?.late ? "warn" : "ok";
+    el.hidden = false;
+    el.className = `wk-badge wk-${state}`;
+    el.textContent = !w.running ? "Pi refresh off" : `Pi ${p?.last_ok ? ago(p.last_ok) : "starting"}`;
+    el.title = `Background refresh on the Pi (runs with no browser open) · ${w.busy ? "markets busy: fast schedule" : "quiet hours: slow schedule"}\n`
+      + (w.jobs || []).map((x) => `${x.label}: ${x.enabled ? (x.running_for != null ? `running ${Math.round(x.running_for)}s${x.stuck ? " (stuck)" : ""}` : `${ago(x.last_ok)}, next in ${Math.round((x.next_in || 0) / 60)} min`) : "off"}${x.last_error ? ` · error: ${x.last_error}` : ""}`).join("\n");
   }
   function schedule() {
     clearInterval(state.timer);

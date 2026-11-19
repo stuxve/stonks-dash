@@ -12,13 +12,14 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import alerts, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
+from . import alerts, crosses, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
+from . import worker as wk
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -95,6 +96,7 @@ class AlertCfgIn(BaseModel):
     earn_days: int | None = Field(default=None, ge=0, le=30)
     summary_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$|^$")
     cooldown_h: float | None = Field(default=None, ge=0, le=168)
+    cross_scope: str | None = Field(default=None, pattern=r"^(all|holdings)$")
     app_url: str | None = Field(default=None, max_length=200)
 
 
@@ -138,6 +140,17 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     app = FastAPI(title="stonks-dash", version="1.0.0")
     sessions = SessionService()
     app.state.db, app.state.engine, app.state.provider, app.state.sessions = db, engine, prov, sessions
+    # shared results: filled by the background worker, served to the page while fresh (app/worker.py)
+    snap = wk.Snapshots()
+    app.state.snap = snap
+    QUOTE_TTL = max(30.0, engine.recent_ttl)
+
+    @app.middleware("http")
+    async def _clear_snapshots(request: Request, call_next):
+        resp = await call_next(request)
+        if request.method != "GET" and request.url.path.startswith("/api/") and resp.status_code < 400:
+            snap.clear()            # a buy, sale or setting changed: recompute on the next read
+        return resp
 
     if os.getenv("STONKS_NO_WARMUP") != "1":
         # building ~20 holiday calendars takes a few seconds; do it before the first page view
@@ -240,7 +253,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     @app.get("/api/boards/{board_id}/heatmap")
     def heatmap(board_id: int, base: str | None = None):
-        base = base_or_default(base)
+        b = base_or_default(base)
+        return snap.get_or(f"heat:{board_id}:{b}", QUOTE_TTL, lambda: _heatmap(board_id, b))
+
+    def _heatmap(board_id: int, base: str):
         board = db.get_board(board_id)
         if not board:
             raise HTTPException(404, "board not found")
@@ -504,7 +520,12 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     @app.get("/api/portfolio")
     def portfolio(base: str | None = None):
-        base = base_or_default(base)
+        """Same result for the page and the Telegram alerts: the worker refreshes it every minute while markets
+        are busy, so a request usually gets that copy instead of recomputing."""
+        b = base_or_default(base)
+        return snap.get_or(f"port:{b}", QUOTE_TTL, lambda: _portfolio(b))
+
+    def _portfolio(base: str):
         lots, sells, divs, fr = _context(base)
         rows, tot, fx = _open_rows(base, lots, fr)
         rz, _ = _realized(base, lots, sells, divs, fr)
@@ -578,7 +599,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     @app.get("/api/performance")
     def performance(base: str | None = None):
-        base = base_or_default(base)
+        b = base_or_default(base)
+        return snap.get_or(f"perf:{b}", 300, lambda: _performance(b))
+
+    def _performance(base: str):
         lots, sells, divs, fr = _context(base)
         if not lots:
             return {"base": base, "dates": [], "summary": None}
@@ -805,14 +829,17 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                       "top": sorted(used, key=lambda u: -u["weight"])[:10]}
         return out
 
+    def _levels_snap(max_age: float = 300):
+        return snap.get_or("levels", max_age, _levels)
+
     @app.get("/api/targets/levels")
     def target_levels():
-        return _levels()
+        return _levels_snap()
 
     @app.get("/api/targets/peaks")
     def target_peaks():
         """Highest close since each open, dated buy (quote currency, bad ticks removed)."""
-        return {"peaks": _levels()["lots"]}
+        return {"peaks": _levels_snap()["lots"]}
 
     # ------------------------------------------------------------------ risk
     def _base_prices(base: str, syms: list[str], start: date) -> tuple[dict, dict]:
@@ -1390,12 +1417,40 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         return out
 
     # ------------------------------------------------------------------ Telegram alerts
+    def _watch_extra() -> list[str]:
+        return [str(x).upper() for x in ((db.get_settings().get("ranges") or {}).get("extra") or []) if x]
+
+    def _crosses() -> list[dict]:
+        """50/200-day state of every held ticker (and the Highs & lows watch list unless scope is "holdings")."""
+        lots, _sells, _divs, fr = _context("EUR")
+        held = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
+                       and x["symbol"] and x["manual_price"] is None})
+        scope = monitor.config().get("cross_scope") or "all"
+        syms = list(dict.fromkeys(held + ([s_ for s_ in _watch_extra() if SYMBOL_RE.match(s_)] if scope == "all" else [])))
+        if not syms:
+            return []
+        hist = engine.history(syms, date.today() - timedelta(days=420))
+        meta = engine.meta(syms)
+        now = wk.local_now()
+        out = []
+        for s_ in syms:
+            h = hist.get(s_)
+            if h is None or h.empty:
+                continue
+            info = crosses.sma_cross(crosses.completed(h, now))
+            if info:
+                m = meta.get(s_) or {}
+                out.append({"symbol": s_, "name": m.get("name"), "ccy": normalize_currency(m.get("currency"))[0],
+                            "held": s_ in held, "info": info})
+        return out
+
     def _alert_snapshot():
+        """What the alerts check: the same portfolio and levels the page shows (shared snapshots)."""
         base = base_or_default(None)
-        lots, _sells, _divs, fr = _context(base)
-        rows, _tot, fx = _open_rows(base, lots, fr)
+        port = snap.get_or(f"port:{base}", QUOTE_TTL, lambda: _portfolio(base))
+        rows, fx = port["positions"], port["fx"]
         try:
-            lv = _levels()
+            lv = _levels_snap(900)
         except Exception as e:  # noqa: BLE001
             log.info("levels for alerts failed: %s", e)
             lv = {}
@@ -1407,24 +1462,31 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         except Exception as e:  # noqa: BLE001
             log.info("earnings for alerts failed: %s", e)
             earn = []
+        try:
+            cx = snap.get_or("crosses", 1800, _crosses)
+        except Exception as e:  # noqa: BLE001
+            log.info("crosses for alerts failed: %s", e)
+            cx = []
         dist = {}
         for r in ev:
             if r["stop"] and r["price"]:
                 d = (r["stop"] / r["price"] - 1) * 100
                 if r["symbol"] not in dist or d > dist[r["symbol"]]:
                     dist[r["symbol"]] = d
-        return {"base": base, "lots": ev, "earnings": earn, "stop_dist": dist}
+        return {"base": base, "lots": ev, "earnings": earn, "stop_dist": dist, "crosses": cx, "port": port}
 
     def _alert_summary() -> str:
-        base = base_or_default(None)
-        t = portfolio(base)["totals"]
-        snap = _alert_snapshot()
+        sn = _alert_snapshot()
+        base, t = sn["base"], sn["port"]["totals"]
         unmon = monitor.config()["events"].get("unmonitored")
-        act = [r for r in snap["lots"] if r["status"] in alerts.TITLE and (r["has"] or unmon)]
-        soon = [x for x in snap["earnings"] if x.get("days") is not None and 0 <= x["days"] <= 7]
-        lines = [f"📊 <b>Portfolio</b> {alerts.fmt_money(t['value'], base)}",
-                 f"Today {alerts.fmt_signed(t.get('day_pnl'), base)} ({alerts.fmt_pct(t.get('day_pct'), 2)}) · "
-                 f"total {alerts.fmt_signed(t.get('pnl'), base)} ({alerts.fmt_pct(t.get('pnl_pct'))})"]
+        act = [r for r in sn["lots"] if r["status"] in alerts.TITLE and (r["has"] or unmon)]
+        soon = [x for x in sn["earnings"] if x.get("days") is not None and 0 <= x["days"] <= 7]
+        asof = dt.datetime.fromtimestamp(sn["port"].get("as_of") or time.time(), wk.TZ)
+        lines = [f"📊 <b>Portfolio</b> {alerts.fmt_money(t['value'], base)} <i>· as of {asof:%H:%M}</i>",
+                 f"Today {alerts.fmt_signed(t.get('day_pnl'), base)} ({alerts.fmt_pct(t.get('day_pct'), 2)})",
+                 f"Unrealized P&amp;L {alerts.fmt_signed(t.get('pnl'), base)} ({alerts.fmt_pct(t.get('pnl_pct'))})"
+                 + (f" · incl. realized and dividends {alerts.fmt_signed(t.get('total_return'), base)}"
+                    if abs((t.get('total_return') or 0) - (t.get('pnl') or 0)) > 0.005 else "")]
         if act:
             lines.append("")
             lines += [f"{alerts.EMO[r['status']]} {alerts.html.escape(r['symbol'] or '')} {alerts.title_of(r).lower()}{(' ' + alerts.direction_of(r)) if alerts.direction_of(r) else ''} · "
@@ -1432,12 +1494,84 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         if soon:
             lines.append("")
             lines += [f"📅 {x['symbol']} earnings {x['next']}" for x in soon]
+        recent = [x for x in sn["crosses"] if (x["info"].get("last") or {}).get("bars_ago", 99) <= 5]
+        if recent:
+            lines.append("")
+            lines += [f"{alerts.EMO[x['info']['state']]} {alerts.html.escape(x['symbol'])} {x['info']['state']} cross on {x['info']['last']['date']}"
+                      for x in recent]
         return "\n".join(lines)
 
     monitor = alerts.Monitor(db, _alert_snapshot, _alert_summary)
     app.state.alerts = monitor
+
+    # ------------------------------------------------------------------ background worker
+    def _held_crypto() -> bool:
+        p = snap.get(f"port:{base_or_default(None)}", 86400)
+        return bool(p and any(r.get("quote_type") == "CRYPTOCURRENCY" for r in p["positions"]))
+
+    def _job_portfolio():
+        b = base_or_default(None)
+        snap.refresh(f"port:{b}", lambda: _portfolio(b))
+
+    def _job_boards():
+        b = base_or_default(None)
+        for bd in db.list_boards():
+            try:
+                snap.refresh(f"heat:{bd['id']}:{b}", lambda: _heatmap(bd["id"], b))
+            except Exception as e:  # noqa: BLE001
+                log.info("board %s refresh failed: %s", bd.get("name"), e)
+
+    def _job_moves():
+        ex = ",".join(_watch_extra())
+        snap.refresh(f"moves:{ex}", lambda: _moves(ex))
+
+    def _job_performance():
+        b = base_or_default(None)
+        snap.refresh(f"perf:{b}", lambda: _performance(b))
+
+    def _alert_iv() -> float:
+        return max(5, int(monitor.config().get("interval_min") or 15)) * 60
+
+    def _job_alerts():
+        snap.refresh("crosses", _crosses)
+        monitor.check()
+
+    wcfg = lambda: db.get_settings().get("worker") or {}  # noqa: E731
+    worker = wk.Worker([
+        wk.Job("portfolio", "Portfolio prices", _job_portfolio, QUOTE_TTL, 15 * 60, delay_s=10),
+        wk.Job("levels", "Sell-target levels", lambda: snap.refresh("levels", _levels), 15 * 60, 2 * 3600, delay_s=40),
+        wk.Job("alerts", "Telegram alerts", _job_alerts, _alert_iv, lambda: max(_alert_iv(), 3600), delay_s=70),
+        wk.Job("moves", "Highs & lows", _job_moves, 15 * 60, 2 * 3600, delay_s=100),
+        wk.Job("boards", "Markets heatmaps", _job_boards, 10 * 60, 2 * 3600,
+               enabled=lambda: wcfg().get("boards", True) is not False, delay_s=130),
+        wk.Job("earnings", "Earnings dates", lambda: snap.refresh("earnings", _earnings), 6 * 3600, 6 * 3600, delay_s=160),
+        wk.Job("performance", "P&L history", _job_performance, 3600, 6 * 3600, delay_s=190),
+        wk.Job("summary", "Daily summary clock", monitor.tick, 60, 60, delay_s=30),
+    ], busy=lambda: wk.in_busy_window() or _held_crypto())
+    app.state.worker = worker
     if os.getenv("STONKS_NO_WARMUP") != "1":
         monitor.start()
+        worker.start()
+
+    @app.get("/api/worker")
+    def worker_status():
+        out = worker.status()
+        p = snap.age(f"port:{base_or_default(None)}")
+        out["portfolio_age"] = p
+        return out
+
+    @app.post("/api/worker/run")
+    def worker_run(job: str | None = None):
+        if job and job not in worker.jobs:
+            raise HTTPException(404, "unknown job")
+        return {"scheduled": worker.run_now(job)}
+
+    def _crosses_safe() -> list:
+        try:
+            return snap.get_or("crosses", 1800, _crosses)
+        except Exception as e:  # noqa: BLE001
+            log.info("crosses failed: %s", e)
+            return []
 
     def _alerts_status():
         m = monitor
@@ -1455,7 +1589,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 "pairing": ({"code": p["code"], "until": p["until"],
                              "link": f"https://t.me/{me['username']}?start={p['code']}" if me else None} if p else None),
                 "linked": bool(cfg.get("chat_id")), "last_check": m.last_check, "last_error": m.last_error,
-                "muted_until": st.get("muted_until") or None, "log": m.log()[:20]}
+                "muted_until": st.get("muted_until") or None, "log": m.log()[:20],
+                "crosses": [{"symbol": x["symbol"], "held": x["held"], **{k: x["info"][k] for k in ("state", "gap_pct", "last", "as_of")}}
+                            for x in _crosses_safe()],
+                "worker": {j["name"]: {"last_ok": j["last_ok"], "error": j["last_error"]} for j in worker.status()["jobs"]}}
 
     @app.get("/api/alerts")
     def alerts_get():
@@ -1521,6 +1658,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     # ------------------------------------------------------------------ daily moves (Holdings)
     @app.get("/api/moves")
     def moves_view(extra: str = ""):
+        """Cached copy (refreshed in the background with the Highs & lows watch list) or a fresh computation."""
+        return snap.get_or(f"moves:{extra.strip().upper()}", 120, lambda: _moves(extra))
+
+    def _moves(extra: str = ""):
         """Per held symbol (plus `extra`, comma-separated tickers you don't hold): typical daily move over the last
         year, this week's best / worst day, and highs and lows over 15 days / 6 months / 1 year. A listing whose own
         Yahoo history is too short (common for Munich or other secondary listings) borrows the earlier part from
@@ -1819,6 +1960,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")
     def earnings_view():
+        return snap.get_or("earnings", 3600, _earnings)
+
+    def _earnings():
         lots, _sells, _divs, fr = _context("EUR")
         syms = sorted({x["symbol"] for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS
                        and x["symbol"] and x["manual_price"] is None})

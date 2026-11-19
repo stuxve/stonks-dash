@@ -12,7 +12,9 @@ window.StonksTelegram = function (ctx) {
     return s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)} min ago` : s < 86400 ? `${Math.round(s / 3600)} h ago` : new Date(t * 1000).toLocaleString();
   };
   const EV = [["tp", "Target hit"], ["sl", "Stop hit"], ["brk", "Upside break ↑ (suggests raising the stop)"], ["brkdn", "Downside break ↓ (a support gave way)"], ["near", "Near target / near stop"],
-    ["earnings", "Earnings coming up"], ["unmonitored", "Also for buys without any exit set"]];
+    ["earnings", "Earnings coming up"], ["unmonitored", "Also for buys without any exit set"],
+    ["golden", "Golden cross 🌟 (50-day average rises above the 200-day)"], ["death", "Death cross 💀 (50-day average falls below the 200-day)"]];
+  const JOBS = { portfolio: "prices", levels: "levels", alerts: "alerts check", moves: "Highs & lows", boards: "heatmaps", earnings: "earnings", performance: "P&L history" };
 
   async function load() {
     try { st = await api("/api/alerts"); } catch (e) { box.querySelector(".tgx-body").innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
@@ -48,7 +50,7 @@ window.StonksTelegram = function (ctx) {
       : st.linked ? `<p>✓ Linked to <b>${esc(c.chat_name || String(c.chat_id))}</b>
             <button class="btn ghost xs" data-act="test">Send a test</button> <button class="btn ghost xs" data-act="check">Check now</button>
             <button class="btn ghost xs" data-act="unlink">Unlink</button></p>
-          <p class="hint">In the chat: <code>/status</code> buys at or near a level · <code>/summary</code> portfolio today · <code>/mute 8</code> pause for 8 h · <code>/unmute</code></p>`
+          <p class="hint">In the chat: <code>/status</code> buys at or near a level · <code>/summary</code> portfolio today · <code>/crosses</code> 50-day vs 200-day average of each ticker · <code>/mute 8</code> pause for 8 h · <code>/unmute</code></p>`
       : st.pairing ? `<p>${st.pairing.link ? `<a class="btn primary" href="${esc(st.pairing.link)}" target="_blank" rel="noopener noreferrer">Open ${bot} in Telegram</a> and press <b>Start</b> — or ` : ""}send <code>/start ${esc(st.pairing.code)}</code> to ${bot || "your bot"}.
             <span class="hint">Waiting… (code valid 10 minutes)</span></p>`
       : `<p><button class="btn primary" data-act="link">Link my Telegram</button> <span class="hint">Only the chat that sends the one-time code gets alerts; messages from anyone else are ignored.</span></p>`;
@@ -60,18 +62,29 @@ window.StonksTelegram = function (ctx) {
         <label class="field">Check every (min)<input type="number" min="5" max="1440" step="5" data-cfg="interval_min" value="${c.interval_min ?? 15}"></label>
         <label class="field" title="Empty = the 'Near' setting of this tab">Near within (%)<input type="number" min="0.5" max="50" step="0.5" data-cfg="near_pct" value="${c.near_pct ?? ""}" placeholder="tab setting"></label>
         <label class="field">Earnings: days before<input type="number" min="0" max="30" data-cfg="earn_days" value="${c.earn_days ?? 3}"></label>
+        <label class="field" title="Which tickers are checked for golden and death crosses">Crosses for<select data-cfg="cross_scope">
+          <option value="all" ${(c.cross_scope || "all") === "all" ? "selected" : ""}>Holdings + Highs &amp; lows watch list</option>
+          <option value="holdings" ${c.cross_scope === "holdings" ? "selected" : ""}>Holdings only</option></select></label>
         <label class="field" title="Don't repeat the same alert for the same buy within this many hours">Repeat after (h)<input type="number" min="0" max="168" data-cfg="cooldown_h" value="${c.cooldown_h ?? 12}"></label>
         <label class="field">Daily summary at<input type="time" data-cfg="summary_time" value="${c.summary_time || ""}"></label>
         <label class="field grow" title="Link at the end of each alert">Link in messages<input type="text" data-cfg="app_url" value="${esc(c.app_url || "")}" placeholder="${esc(location.origin)}"></label>
       </div>`;
     const logHtml = (st.log || []).length ? `<table class="grid tgx-log"><tbody>${st.log.slice(0, 8).map((x) => `<tr><td class="sub">${ago(x.t)}</td><td>${esc(x.kind)}</td>
         <td>${esc((x.text || "").replace(/<[^>]+>/g, "").split("\n")[0])}</td><td class="${x.ok ? "up" : "warn-t"}">${x.ok ? "sent" : esc(x.err || "failed")}</td></tr>`).join("")}</tbody></table>` : `<p class="hint">Nothing sent yet.</p>`;
+    const cx = st.crosses || [];
+    const cxHtml = cx.length ? `<div class="tgx-cx">${cx.slice().sort((a, b) => (a.last?.bars_ago ?? 1e9) - (b.last?.bars_ago ?? 1e9)).map((x) =>
+        `<span class="pill ${x.state === "golden" ? "tgx-gold" : "tgx-death"}" title="50-day average ${x.gap_pct >= 0 ? "+" : ""}${x.gap_pct.toFixed(1)}% vs the 200-day, close of ${esc(x.as_of)}${x.last ? `\nLast cross: ${x.last.state} on ${x.last.date} (${x.last.bars_ago} sessions ago)` : ""}">${x.state === "golden" ? "🌟" : "💀"} ${esc(x.symbol)}${x.last ? ` <span class="sub">${esc(x.last.date)}</span>` : ""}${x.held ? "" : " · watch"}</span>`).join("")}</div>`
+      : `<p class="hint">Computed by the Pi a minute or two after start-up, then every check.</p>`;
+    const wk = st.worker || {};
+    const wkHtml = Object.entries(JOBS).filter(([k]) => wk[k]).map(([k, l]) => `<span class="${wk[k].error ? "warn-t" : ""}" title="${esc(wk[k].error || "")}">${l} ${wk[k].last_ok ? ago(wk[k].last_ok) : "pending"}</span>`).join(" · ");
     box.querySelector(".tgx-body").innerHTML = `
       <div class="tgx-err callout warn" hidden></div>
       <div class="tgx-cols"><div><h4>1 · Bot</h4>${step1}</div><div><h4>2 · Your chat</h4>${step2}</div></div>
       <h4>3 · What to send</h4>${step3}
+      <h4>Golden / death crosses <span class="hint">· newest first · hover for details</span></h4>${cxHtml}
       <h4>Recent</h4>${logHtml}
-      <p class="hint">The Pi checks with the same rules as this tab, also when no browser is open, and only sends <b>changes</b> (a buy that reaches its target, stop, a breakout…), not the same alert every check.</p>`;
+      <h4>Pi background refresh</h4><p class="hint">${wkHtml || "starting…"}</p>
+      <p class="hint">The Pi pulls prices and checks these alerts on its own schedule, also when no browser is open (every minute on weekdays 08:00–22:30, less often otherwise). This page shows the same numbers the alerts use. It only sends <b>changes</b> (a buy that reaches its target, stop, a breakout, a new cross…), not the same alert every check. Crosses use completed daily closes, so they're announced after the close (from 22:15).</p>`;
   }
 
   box.addEventListener("click", async (e) => {

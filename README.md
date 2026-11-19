@@ -80,12 +80,14 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Broke out**: the price closed for 2 days more than one daily move above your target, or above a resistance it was under in the last 4 weeks. **Raise stop** moves the stop half a daily move under that level and the target to the next resistance, instead of selling.
   - Each row also shows the peak since the buy, a stop · buy · now · target bar with the zones shaded, the distance to the target and the stop, the P/L at the target after the account's sell fee, and a status: *Broke out*, *Target hit*, *Stop hit*, *Near target*, *Near stop*, *Watching* or *No exit set*. Alerts show as a count on the tab.
   - **Sell** opens the sale dialog prefilled. **All buys** copies a lot's exits to every buy of the same asset. **Fill buys that have no exit yet** sets default exits in one go. Nothing is sold automatically. Later buys of an asset are flagged **FIFO n/m**, because a sale always uses the oldest buy first.
-- **Telegram alerts** (panel at the top of Sell targets). The Pi checks your buys every 15 minutes, using the same rules as the tab, even when no browser is open. It sends a message only when something **changes**: a target hit, a stop hit (fixed, % trailing or ×ATR), a breakout with the suggested new stop and target, near target or near stop (optional), and earnings within N days. There's a cooldown so a price flapping around a level doesn't spam you, and an optional daily summary at a time you choose. Setup:
+- **Telegram alerts** (panel at the top of Sell targets). The Pi checks your buys every 15 minutes (see *Background refresh*), using the same rules as the tab, even when no browser is open. It sends a message only when something **changes**: a target hit, a stop hit (fixed, % trailing or ×ATR), a breakout with the suggested new stop and target, near target or near stop (optional), earnings within N days, and **golden / death crosses** (below). There's a cooldown so a price flapping around a level doesn't spam you, and an optional daily summary at a time you choose. Setup:
   1. Create a bot with **@BotFather** (`/newbot`).
   2. Paste the token in the panel, or set `TELEGRAM_BOT_TOKEN` in `.env`, which is safer. The token is stored only on the Pi and is never returned by the API or included in backups.
   3. Press **Link my Telegram** and **Start** in the bot. Only the chat that sends the one-time code is linked; messages from any other chat are ignored.
 
-  Commands in the chat: `/status`, `/summary`, `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
+  **Golden cross / death cross**: the 50-day simple moving average (SMA, the plain average of the last 50 daily closes) crossing above (golden 🌟) or below (death 💀) the 200-day SMA, for your holdings and, by default, the Highs & lows watch list (*Crosses for* switches to holdings only). Only completed daily closes count, so a cross is announced once, after the close (from 22:15 local time, when US markets have closed). The message gives both averages, the close against the 200-day average and the previous cross. The first time the Pi sees a ticker it only announces a cross from the last 2 sessions. The panel lists each ticker's current state and the date of its last cross. It's a lagging trend signal: it confirms a move that has already happened.
+
+  Commands in the chat: `/status`, `/summary`, `/crosses` (50-day vs 200-day state of each ticker), `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
 - **Highs & lows** shows, for each holding and for the last 15 days, 6 months and 1 year:
   - the lowest and highest price (intraday or closing), with dates;
   - how far today's price is from each one, and where it sits in that range (the bar);
@@ -246,6 +248,23 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 
 **Settings.** Choose between the classic red/green scheme and a colorblind-safe red/blue scheme, ticker or name labels, the auto-refresh interval (off, 30 s, 1 min, 5 min or 15 min), and JSON export/import.
 
+## Background refresh (no browser needed)
+
+The Pi refreshes the data and runs the alerts on its own, whether or not a page is open. The page and the Telegram messages read the **same shared results**: whatever the worker computed last is what you see. When you add a buy or change a setting, those results are cleared and recomputed on the next read.
+
+| Job | While markets are busy* | Otherwise |
+| --- | --- | --- |
+| Portfolio prices | every minute (`STONKS_QUOTE_TTL`) | 15 min |
+| Telegram alerts check, golden / death crosses | every *Check every* minutes (15) | hourly |
+| Sell-target levels, Highs & lows (with the watch list) | 15 min | 2 h |
+| Markets heatmaps (every board) | 10 min | 2 h |
+| P&L history | 1 h | 6 h |
+| Earnings dates | 6 h | 6 h |
+
+\* Weekdays 08:00–22:30 in the container's time zone (`TZ`, Europe/Madrid by default), which covers the European and US sessions, or always if you hold crypto. To stop the heatmap refresh on a slow Pi, set `"worker": {"boards": false}` in settings.
+
+The header shows **● Pi 30s ago**: when the background refresh last updated your prices. Hover it for every job, its next run and any error. Green means OK, amber means an error or a late job, red means the worker isn't running. Errors are also in `sudo docker logs stonks-dash`.
+
 ## Data notes
 
 - Yahoo Finance is an unofficial source. Some exchanges are delayed by about 15 minutes, and Yahoo rate-limits aggressive clients. The app batches downloads, caches prices for 60 s and history for 6 h, and caches metadata for 24 h in SQLite. A failed metadata lookup is retried after 10 minutes and never cached as a guess.
@@ -267,6 +286,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
+| GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
 | GET | `/api/fin_history?symbol=MU` | Annual / quarterly revenue, net income and operating income (SEC EDGAR for SEC filers, else Yahoo) |

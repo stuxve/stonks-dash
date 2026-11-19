@@ -673,3 +673,14 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .pnlh-svg { display: block; font-variant-numeric: tabular-nums; }
 .pnlh-tip { position: absolute; top: 8px; pointer-events: none; background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 12px; line-height: 1.5; white-space: nowrap; z-index: 3; }
 .pnlh-wrap .loading, .pnlh-wrap .empty { display: grid; place-items: center; min-height: 300px; color: var(--muted); }
+
+/* Telegram panel: golden / death cross pills; header: Pi background refresh badge */
+.tgx-cx { display: flex; flex-wrap: wrap; gap: 6px; }
+.tgx-cx .pill { font-size: 12px; padding: 2px 8px; }
+.tgx-gold { border-color: rgba(48,204,90,.5) !important; }
+.tgx-death { border-color: rgba(246,53,56,.5) !important; }
+.wk-badge { font-size: 11px; color: var(--muted); margin-left: 8px; white-space: nowrap; cursor: help; }
+.wk-badge::before { content: "●"; margin-right: 4px; color: var(--muted); }
+.wk-badge.wk-ok::before { color: var(--up); }
+.wk-badge.wk-warn::before { color: #f5a623; }
+.wk-badge.wk-bad::before { color: var(--down); }

@@ -5,9 +5,11 @@
                 with a suggested stop/target, near target / near stop, and upcoming earnings.
 * Telegram    — tiny Bot API client (stdlib only). The bot token comes from TELEGRAM_BOT_TOKEN or is stored
                 write-only in the database; it is never returned by the API or included in backups.
-* Monitor     — two background threads: one checks the alerts every N minutes and sends only CHANGES
-                (with a cooldown per buy and event), the other long-polls the bot for /link, /status, /summary,
-                /mute, /unmute and /help. Messages from chats other than the linked one are ignored.
+* Monitor     — check() sends only CHANGES (with a cooldown per buy and event); the background worker
+                (app/worker.py) calls it every N minutes. A thread long-polls the bot for /link, /status,
+                /summary, /crosses, /mute, /unmute and /help. Messages from chats other than the linked one are ignored.
+* Golden / death crosses (50-day vs 200-day average, app/crosses.py) for your holdings and the Highs & lows
+  watch list: one message per new cross, on the daily close.
 """
 from __future__ import annotations
 
@@ -28,7 +30,9 @@ log = logging.getLogger("stonks.alerts")
 
 DEFAULTS = {
     "enabled": True,
-    "events": {"tp": True, "sl": True, "brk": True, "brkdn": True, "near": False, "earnings": True, "unmonitored": False},
+    "events": {"tp": True, "sl": True, "brk": True, "brkdn": True, "near": False, "earnings": True, "unmonitored": False,
+               "golden": True, "death": True},
+    "cross_scope": "all",      # golden / death crosses for: "all" = holdings + Highs & lows watch list, "holdings"
     "interval_min": 15,
     "near_pct": None,          # None = use the Sell targets setting (default 5)
     "earn_days": 3,
@@ -163,7 +167,8 @@ def evaluate(rows: list[dict], fx: dict, levels: dict, near: float, fee_rules: d
 
 
 # ---------------------------------------------------------------------------------------------- messages
-EMO = {"tp": "✅", "sl": "🛑", "brk": "🚀", "brkdn": "📉", "near-tp": "🎯", "near-sl": "⚠️", "earnings": "📅"}
+EMO = {"tp": "✅", "sl": "🛑", "brk": "🚀", "brkdn": "📉", "near-tp": "🎯", "near-sl": "⚠️", "earnings": "📅",
+       "golden": "🌟", "death": "💀"}
 TITLE = {"tp": "Target hit", "sl": "Stop hit", "brk": "Broke out", "brkdn": "Broke down", "near-tp": "Near target",
          "near-sl": "Near stop"}
 
@@ -245,6 +250,46 @@ def earnings_message(x: dict, stop_dist: float | None) -> str:
         warn = x.get("typical_move") is not None and abs(stop_dist) <= x["typical_move"] * 1.2
         lines.append(f"Your stop is {fmt_num(abs(stop_dist), 1)}% away" + (" — <b>inside that range</b>" if warn else ""))
     return "\n".join(lines)
+
+
+def _d(iso: str | None) -> str:
+    if not iso:
+        return "—"
+    d = date.fromisoformat(iso)
+    return f"{d.day} {d:%b %Y}"
+
+
+def cross_message(x: dict, app_url: str | None = None) -> str:
+    """x: {"symbol", "name", "ccy", "held", "info": crosses.sma_cross(...)}"""
+    e, i = html.escape, x["info"]
+    g = i["state"] == "golden"
+    c = x.get("ccy")
+    lines = [f"{EMO[i['state']]} <b>{'Golden' if g else 'Death'} cross — {e(x['symbol'])}</b>"
+             + (f" · {e(x['name'])}" if x.get("name") and x["name"] != x["symbol"] else "")
+             + (" <i>(in your portfolio)</i>" if x.get("held") else " <i>(watch list)</i>"),
+             f"The 50-day average price ({fmt_money(i['fast'], c)}) moved <b>{'above' if g else 'below'}</b> the 200-day average "
+             f"({fmt_money(i['slow'], c)}) at the close of {_d((i.get('last') or {}).get('date') or i['as_of'])}.",
+             f"Close {fmt_money(i['price'], c)} · {fmt_pct(i['price_vs_slow'])} vs the 200-day average"]
+    if i.get("prev"):
+        p = i["prev"]
+        lines.append(f"Previous cross: {'golden' if p['state'] == 'golden' else 'death'} on {_d(p['date'])} ({p['bars_ago']} sessions ago)")
+    lines.append("<i>A trend signal made from averages: it confirms a move that has already happened, "
+                 "and in sideways markets it can flip back and forth.</i>")
+    if app_url:
+        lines.append(f'<a href="{e(app_url.rstrip("/"))}/#ta">Open Analysis</a>')
+    return "\n".join(lines)
+
+
+def crosses_list(items: list[dict]) -> str:
+    if not items:
+        return "No ticker has 200 days of prices yet."
+    rows = sorted(items, key=lambda x: (x["info"]["state"] != "golden", -(x["info"]["gap_pct"])))
+    out = ["<b>50-day vs 200-day average</b> (🌟 above = golden, 💀 below = death)"]
+    for x in rows:
+        i = x["info"]
+        since = f" since {_d(i['last']['date'])}" if i.get("last") else ""
+        out.append(f"{EMO[i['state']]} <b>{html.escape(x['symbol'])}</b> {fmt_pct(i['gap_pct'])} gap{since}{'' if x.get('held') else ' · watch'}")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------------------------- Telegram
@@ -399,6 +444,18 @@ class Monitor:
                     seen[k2] = now
                     out.append({"kind": "earnings", "text": earnings_message(x, (snap.get("stop_dist") or {}).get(x["symbol"])), "key": None})
                 st["earn"] = {k: v for k, v in seen.items() if now - v < 60 * 86400}
+            known = st.get("cross") or {}
+            for x in snap.get("crosses") or []:
+                i = x["info"]
+                last = i.get("last") or {}
+                prev = known.get(x["symbol"])
+                fresh = last.get("bars_ago") is not None and last["bars_ago"] <= 2
+                new = (prev is None and fresh) or (prev is not None and (prev.get("state") != i["state"]
+                                                                         or (prev.get("since") != last.get("date") and fresh)))
+                known[x["symbol"]] = {"state": i["state"], "since": last.get("date")}
+                if new and ev.get(i["state"]):
+                    out.append({"kind": i["state"], "text": cross_message(x, cfg.get("app_url")), "key": None})
+            st["cross"] = known
             sent = []
             if now >= muted or force:
                 for m in out:
@@ -468,6 +525,8 @@ class Monitor:
                 self.tg.send(linked, "\n".join(lines))
         elif cmd == "/summary":
             self.tg.send(linked, self.summary())
+        elif cmd == "/crosses":
+            self.tg.send(linked, crosses_list(self.snapshot().get("crosses") or []))
         elif cmd == "/mute":
             try:
                 h = float(arg or 8)
@@ -484,35 +543,20 @@ class Monitor:
             self.tg.send(linked, "🔔 Alerts on.")
         elif cmd in ("/help", "/start"):
             self.tg.send(linked, "/status — buys at or near a target or stop\n/summary — portfolio today\n"
+                                 "/crosses — 50-day vs 200-day average of each ticker\n"
                                  "/mute [hours] — pause alerts (default 8 h)\n/unmute — resume")
 
-    # ---- threads
+    # ---- threads: the checks are scheduled by app/worker.py; this only listens for chat commands
     def start(self):
         if self._threads:
             return
-        for fn in (self._check_loop, self._poll_loop):
-            t = threading.Thread(target=fn, daemon=True)
-            t.start()
-            self._threads.append(t)
+        t = threading.Thread(target=self._poll_loop, name="stonks-telegram", daemon=True)
+        t.start()
+        self._threads.append(t)
 
-    def _check_loop(self):
-        time.sleep(20)
-        while not self._stop.is_set():
-            try:
-                self.check()
-                self.maybe_summary()
-            except Exception as e:  # noqa: BLE001
-                self.last_error = str(e)
-                log.warning("alert check failed: %s", e)
-            mins = max(5, int(self.config().get("interval_min") or 15))
-            # wake every minute so the daily summary isn't late and config changes apply soon
-            for _ in range(mins):
-                if self._stop.wait(60):
-                    return
-                try:
-                    self.maybe_summary()
-                except Exception as e:  # noqa: BLE001
-                    log.info("summary failed: %s", e)
+    def tick(self):
+        """Called by the worker every minute: the daily summary at its time."""
+        self.maybe_summary()
 
     def _poll_loop(self):
         offset = None
