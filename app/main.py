@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import alerts, exposure, ideas, ledger, levels, risk, seeds, tax
+from . import alerts, exposure, ideas, ledger, levels, risk, seeds, tax, valuation
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -1623,6 +1623,95 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 "sector": meta.get("sector"), "source": engine.sources.get(sym),
                 "price": q.price if q and q.ok else rows[-1][4], "day": (q.changes or {}).get("1D") if q and q.ok else None,
                 "has_volume": bool((vol > 0).sum() > len(vol) * 0.5), "bars": rows, "zones": zones, "as_of": time.time()}
+
+    # ------------------------------------------------------------------ valuation (Analysis tab)
+    VAL_MARKETS = [("S&P 500", "SPY"), ("Europe", "VGK")]
+    VAL_HOME = {"Spain": ("Spain (IBEX 35)", "EWP"), "Japan": ("Japan", "EWJ"), "United Kingdom": ("United Kingdom", "EWU")}
+
+    @app.get("/api/valuation")
+    def valuation_view(symbol: str):
+        """Is it expensive or cheap? Trailing / forward P/E and other multiples, the stock's own P/E history (from
+        quarterly reported EPS), its sector peers (the Ideas screener universe) and the broad market (index ETFs).
+        Funds without their own P/E use the ETF that tracks the same index."""
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.match(sym):
+            raise HTTPException(400, "Invalid ticker")
+        _sync_sources([sym])
+        meta = engine.meta([sym]).get(sym) or {}
+        v = engine.valuation(sym) or {}
+        qt = v.get("quote_type") or meta.get("quote_type")
+        out = {"symbol": sym, "name": v.get("name") or meta.get("name") or sym, "quote_type": qt, "applicable": True,
+               "proxy": None, "history": None, "peers": None, "markets": [], "as_of": time.time()}
+        if qt in ("CRYPTOCURRENCY", "CURRENCY", "FUTURE", "INDEX"):
+            out.update(applicable=False, reason="P/E needs company earnings; it doesn't exist for crypto, currencies, futures or indices.")
+            return out
+        src = v
+        if qt in ("ETF", "MUTUALFUND") and not (v.get("pe") or v.get("fpe")):
+            _, prof = exposure.fund_profile(sym, {"display_name": meta.get("name")}, meta, {}, db.get_settings().get("fund_profiles") or {})
+            prx = (exposure.PROFILES.get(prof) or {}).get("proxy")
+            pv = engine.valuation(prx) if prx else None
+            if pv and (pv.get("pe") or pv.get("fpe")):
+                src = pv
+                out["proxy"] = {"symbol": prx, "label": exposure.PROFILES[prof].get("label")}
+        keys = ("pe", "fpe", "eps", "feps", "peg", "ps", "pb", "ev_ebitda", "ev_rev", "eps_g", "eps_qg", "rev_g",
+                "currency", "fin_ccy", "sector", "industry", "country", "market_cap")
+        out.update({k: src.get(k) for k in keys})
+        if not any(out.get(k) for k in ("pe", "fpe", "ps", "pb", "ev_ebitda")) and not v.get("eps_hist"):
+            out.update(applicable=False, reason="Yahoo has no valuation data for this listing" + (" or the index it tracks." if qt in ("ETF", "MUTUALFUND") else "."))
+            return out
+
+        # the stock's own P/E history
+        if qt == "EQUITY" and v.get("eps_hist"):
+            close = engine.history([sym], date.today() - timedelta(days=3700)).get(sym)
+            if close is not None and not close.empty:
+                ph = valuation.pe_history(levels.clean(close), v["eps_hist"])
+                pe = ph["pe"].dropna()
+                scaled = None
+                if not pe.empty and out.get("pe"):
+                    k = out["pe"] / float(pe.iloc[-1])
+                    if not 0.5 <= k <= 2:      # EPS in another currency or per a different share class (ADRs): align to Yahoo
+                        ph["pe"] = ph["pe"] * k
+                        scaled = k
+                elif not pe.empty and v.get("fin_ccy") and v.get("currency") and v["fin_ccy"] != v["currency"]:
+                    ph = None                  # can't tell which currency the EPS is in
+                if ph is not None and ph["pe"].notna().sum() >= 26:
+                    last = ph.dropna(subset=["pe"]).iloc[-1]
+                    out["history"] = {
+                        "basis": "reported quarterly EPS (as announced in earnings releases, usually adjusted)",
+                        "scaled": scaled, "ttm": float(last["ttm"]) * (1 / scaled if scaled else 1), "pe_now": float(last["pe"]),
+                        "stats5": valuation.pe_stats(ph["pe"], 5), "stats10": valuation.pe_stats(ph["pe"], 10),
+                        "series": [[d.date().isoformat(), round(float(r.close), 4), None if np.isnan(r.pe) else round(float(r.pe), 2)]
+                                   for d, r in ph.iterrows()],
+                    }
+
+        # sector peers from the screener universe (fetched in the background the first time, like Ideas)
+        if qt == "EQUITY" and out.get("sector"):
+            uni = list(dict.fromkeys(x.upper() for x in seeds.US_MEGACAPS + seeds.EUROPE_LEADERS + seeds.IBEX35 + ideas.WORLD_EXTRA))
+            fund, prog = engine.fundamentals(uni)
+            same = [(s_, f) for s_, f in fund.items() if s_ != sym and f and f.get("sector") == out["sector"]
+                    and f.get("quote_type") in (None, "EQUITY")]
+            ind = [x for x in same if out.get("industry") and x[1].get("industry") == out["industry"]]
+
+            def agg(rows):
+                return {**{k: valuation.median([f.get(k) for _, f in rows if f.get(k) and f.get(k) > 0])
+                           for k in ("pe", "fpe", "pb", "ev_ebitda")}, "n": len(rows)}
+            out["peers"] = {
+                "sector": out["sector"], "stats": agg(same), "industry": out.get("industry"),
+                "industry_stats": agg(ind) if len(ind) >= 3 else None, "pending": prog.get("pending", 0),
+                "list": [{"symbol": s_, "name": f.get("name"), "pe": f.get("pe"), "fpe": f.get("fpe"), "pb": f.get("pb"),
+                          "ev_ebitda": f.get("ev_ebitda"), "market_cap": f.get("market_cap"), "industry": f.get("industry")}
+                         for s_, f in sorted(same, key=lambda x: -(x[1].get("market_cap") or 0))[:12]],
+            }
+
+        # the broad market, through index ETFs
+        mk = list(VAL_MARKETS)
+        if out.get("country") in VAL_HOME:
+            mk.append(VAL_HOME[out["country"]])
+        for label, etf in mk:
+            mv = engine.valuation(etf) or {}
+            if mv.get("pe") or mv.get("fpe"):
+                out["markets"].append({"label": label, "symbol": etf, "pe": mv.get("pe"), "fpe": mv.get("fpe")})
+        return out
 
     # ------------------------------------------------------------------ earnings calendar
     @app.get("/api/earnings")

@@ -205,6 +205,13 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Measure:** the % change, bars and days between two points.
   - **⚓ VWAP:** sets the anchor date for the anchored VWAP.
   - **Escape** leaves a tool.
+- **Valuation** (expensive or cheap?):
+  - **Ratios:** trailing P/E (price ÷ earnings per share, EPS, of the last 12 months), forward P/E (price ÷ analysts' EPS estimate for the next 12 months), PEG (P/E ÷ expected EPS growth), earnings yield, P/S (price ÷ sales), P/B (price ÷ book value) and EV/EBITDA (enterprise value ÷ earnings before interest, taxes, depreciation and amortisation).
+  - **Against its own history:** a 10-year chart of the stock's weekly trailing P/E, built from its quarterly reported EPS. It shows the 5-year median and usual range, today's percentile, and the price the stock would have at its median P/E.
+  - **Against its sector:** median multiples of its sector and industry peers among the ~130 large caps of the Ideas screener, fetched in the background the first time.
+  - **Against the market:** the P/E of the S&P 500 and Europe, plus the home market for Spanish, Japanese and UK stocks, taken from index ETFs.
+  - **Funds** without their own P/E use the ETF on the same index.
+  - **Summary:** plain-language notes and a glossary of the ratios.
 - **Readings table:** every indicator's value on the last bar, with a neutral reading (above/below, overbought/oversold, crossed up/down on a date, squeeze) and a ↑ / ↓ / · tally per group. It describes what the indicators show; it is not a forecast. The **Patterns** group adds:
   - Elder impulse;
   - candlesticks on the last 3 bars, and recent chart patterns with their targets;
@@ -246,6 +253,7 @@ Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchan
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |
+| GET | `/api/valuation?symbol=MSFT` | Trailing / forward P/E and other multiples, P/E history from reported EPS, sector-peer and market comparisons |
 | GET | `/api/ta?symbol=NVDA&years=10` | Daily OHLCV (cleaned) for the Analysis tab, plus support/resistance zones and volatility |
 | GET | `/api/moves?extra=AAPL,ITX.MC` | Per held ticker (plus `extra`): typical daily move, this week's moves, and for 15 days / 6 months / 1 year the highest and lowest close, distance from them, position in range and biggest one-day rise and fall |
 | GET | `/api/targets/levels` | Per symbol: resistance and support zones, typical daily move and volatility, breakout, analyst consensus. Per buy: peak and low since the buy. Exits are the `target_price`, `stop_price`, `trail_pct` and `atr_k` fields of a position |

@@ -1082,6 +1082,118 @@ window.StonksTA = function (ctx) {
       </tbody></table></div>`;
   }
 
+  // ------------------------------------------------------------------ valuation: is it expensive or cheap?
+  let valFor = null, valTimer = null;
+  async function loadVal(sym, attempt = 0) {
+    clearTimeout(valTimer);
+    const el = $("#ta-val");
+    if (attempt === 0) { valFor = sym; el.innerHTML = '<h3 class="sub-h">Valuation</h3><p class="hint">Loading valuation data…</p>'; }
+    let v;
+    try { v = await api(`/api/valuation?symbol=${encodeURIComponent(sym)}`); } catch (e) { if (valFor === sym) el.innerHTML = `<h3 class="sub-h">Valuation</h3><p class="hint">${esc(e.message)}</p>`; return; }
+    if (valFor !== sym) return;
+    renderVal(v);
+    // sector peers come from the screener universe, fetched in the background the first time
+    if (v.peers && v.peers.pending > 0 && attempt < 12) valTimer = setTimeout(() => loadVal(sym, attempt + 1), 6000);
+  }
+  const x2 = (v, d = 1) => (v == null || !isFinite(v) ? "—" : fn(v, d));
+  // stock vs a reference: cheaper (green) when ≥ 15% below, pricier (red) when ≥ 15% above
+  const cmpCls = (mine, ref) => (mine == null || ref == null || !(ref > 0) || !(mine > 0) ? "" : mine < ref * 0.85 ? "v-cheap" : mine > ref * 1.15 ? "v-dear" : "v-inline");
+  function renderVal(v) {
+    const el = $("#ta-val");
+    const glossary = `<details class="ta-gloss"><summary>What do these ratios mean?</summary><dl>
+      <dt>P/E (price-to-earnings ratio)</dt><dd>Share price ÷ earnings per share (EPS). How many years of current profits you pay for. Higher = more expensive, unless profits grow fast.</dd>
+      <dt>Trailing P/E</dt><dd>Uses the EPS actually earned over the last 12 months (TTM, trailing twelve months).</dd>
+      <dt>Forward P/E</dt><dd>Uses analysts' EPS estimate for the next 12 months. Below the trailing P/E = earnings are expected to grow.</dd>
+      <dt>PEG (P/E-to-growth ratio)</dt><dd>P/E ÷ expected yearly EPS growth in %. Around 1 = the growth is fairly priced; below 1 = cheap for its growth.</dd>
+      <dt>Earnings yield</dt><dd>EPS ÷ price (the inverse of P/E), in %. Handy to compare with government bond yields.</dd>
+      <dt>P/S (price-to-sales ratio)</dt><dd>Market value ÷ yearly revenue. Useful when a company has little or no profit.</dd>
+      <dt>P/B (price-to-book ratio)</dt><dd>Price ÷ book value (assets minus debts) per share. Most meaningful for banks and insurers.</dd>
+      <dt>EV/EBITDA</dt><dd>Enterprise value (market value + net debt) ÷ EBITDA (earnings before interest, taxes, depreciation and amortisation). Compares companies with different debt levels.</dd>
+      <dt>Percentile</dt><dd>Share of the period with a lower P/E than today: 20th percentile = cheaper than 80% of the time.</dd></dl></details>`;
+    if (!v.applicable) { el.innerHTML = `<h3 class="sub-h">Valuation</h3><p class="hint">${esc(v.reason || "Not available.")}</p>`; return; }
+    const H = v.history, s5 = H && H.stats5, s10 = H && H.stats10, P = v.peers, ps = P && P.stats, is_ = P && P.industry_stats;
+    const mk = v.markets || [], spx = mk.find((m) => m.symbol === "SPY");
+    const growth = v.pe && v.fpe ? v.pe / v.fpe - 1 : null, ey = v.pe ? 1 / v.pe : null;
+    const loss = !v.pe && v.eps != null && v.eps < 0;
+    const tile = (k, val, what, extra = "", cls = "") => `<div class="kpi"><div class="k">${k}</div><div class="v ${cls}">${val}</div><div class="d">${what}${extra ? `<br>${extra}` : ""}</div></div>`;
+    const refs = (mine, own, sec, mkt, ownLbl = "own 5-y median") => [own != null ? `<span class="${cmpCls(mine, own)}">${ownLbl} ${x2(own)}</span>` : "", sec != null ? `<span class="${cmpCls(mine, sec)}">sector ${x2(sec)}</span>` : "", mkt != null ? `<span class="${cmpCls(mine, mkt.pe)}">${esc(mkt.label)} ${x2(mkt.pe)}</span>` : ""].filter(Boolean).join(" · ");
+    const tiles = [
+      tile("Trailing P/E", loss ? '<span class="down">loss</span>' : x2(v.pe), "price ÷ EPS (earnings per share) of the last 12 months", v.pe ? refs(v.pe, s5 && s5.median, ps && ps.pe, spx) : loss ? "negative earnings: P/E not meaningful" : ""),
+      v.fpe ? tile("Forward P/E", x2(v.fpe), "price ÷ analysts' EPS estimate, next 12 months", [growth != null ? `EPS expected <b class="${growth >= 0 ? "up" : "down"}">${pc(growth, 0)}</b>` : "", ps && ps.fpe ? `<span class="${cmpCls(v.fpe, ps.fpe)}">sector ${x2(ps.fpe)}</span>` : ""].filter(Boolean).join(" · ")) : "",
+      v.peg ? tile("PEG", x2(v.peg, 2), "P/E ÷ expected EPS growth (% a year)", v.peg < 1 ? '<span class="v-cheap">below 1: cheap for its growth</span>' : v.peg > 2 ? '<span class="v-dear">above 2: growth looks fully priced</span>' : "around 1–2: growth roughly priced in") : "",
+      ey ? tile("Earnings yield", pp(ey, 1), "EPS ÷ price (inverse of P/E)", "compare with government bond yields") : "",
+      v.ps ? tile("P/S", x2(v.ps), "price ÷ sales (revenue) per share") : "",
+      v.pb ? tile("P/B", x2(v.pb), "price ÷ book value per share", ps && ps.pb ? `<span class="${cmpCls(v.pb, ps.pb)}">sector ${x2(ps.pb)}</span>` : "") : "",
+      v.ev_ebitda ? tile("EV/EBITDA", x2(v.ev_ebitda), "enterprise value ÷ operating cash earnings", ps && ps.ev_ebitda ? `<span class="${cmpCls(v.ev_ebitda, ps.ev_ebitda)}">sector ${x2(ps.ev_ebitda)}</span>` : "") : "",
+    ].join("");
+
+    // plain-language readings
+    const notes = [];
+    if (v.proxy) notes.push(`This fund has no P/E of its own on Yahoo, so these are the figures of <b>${esc(v.proxy.symbol)}</b>, an ETF (exchange-traded fund) on the same index (${esc(v.proxy.label)}). They describe the index the fund holds.`);
+    if (loss) notes.push("The company lost money over the last 12 months, so the trailing P/E is not meaningful. Look at the forward P/E (if analysts expect a profit) and P/S.");
+    if (s5 && v.pe) {
+      const pct = Math.round(s5.pctile), fair = H.ttm * s5.median, lvl = pct <= 25 ? "v-cheap" : pct >= 75 ? "v-dear" : "v-inline";
+      notes.push(`<span class="${lvl}">${lvl === "v-cheap" ? "Cheap" : lvl === "v-dear" ? "Expensive" : "Normal"} versus its own history:</span> today's P/E of ${x2(H.pe_now)} is higher than ${pct}% of the last 5 years (median ${x2(s5.median)}, usual range ${x2(s5.p25)}–${x2(s5.p75)}). At the median P/E the price would be ${fp(fair)} (${pc(fair / raw.price - 1, 0)} from now).`);
+    }
+    if (ps && ps.pe && v.pe) {
+      const r = v.pe / ps.pe, lvl = cmpCls(v.pe, ps.pe);
+      notes.push(`<span class="${lvl}">${lvl === "v-cheap" ? "Cheaper than" : lvl === "v-dear" ? "More expensive than" : "In line with"} its sector:</span> P/E ${x2(v.pe)} vs a median of ${x2(ps.pe)} for ${ps.n} ${esc(P.sector)} large caps (${pc(r - 1, 0)}).${is_ && is_.pe ? ` Same industry (${esc(P.industry)}, ${is_.n} companies): ${x2(is_.pe)}.` : ""}`);
+    }
+    if (spx && v.pe && !v.proxy) notes.push(`<span class="${cmpCls(v.pe, spx.pe)}">Versus the market:</span> the S&amp;P 500 (through the SPY ETF) trades at a P/E of ${x2(spx.pe)}${mk.length > 1 ? `; ${mk.filter((m) => m !== spx).map((m) => `${esc(m.label)} ${x2(m.pe)}`).join(", ")}` : ""}.`);
+    if (growth != null) notes.push(`Forward P/E ${growth >= 0 ? "below" : "above"} the trailing P/E: analysts expect earnings per share to ${growth >= 0 ? "grow" : "fall"} about ${pc(Math.abs(growth), 0).replace("+", "")} over the next 12 months. A high P/E is easier to justify when growth is high (see PEG).`);
+    notes.push("A low P/E can mean the market expects profits to fall (a “value trap”); a high one can be justified by fast growth. Cyclical companies often look cheapest at the top of their cycle. Use these as context, not as a buy or sell signal.");
+
+    // comparison table
+    const row = (lbl, mine, own, sec, ind, f = x2) => `<tr><td>${lbl}</td><td class="num"><b>${f(mine)}</b></td><td class="num ${cmpCls(mine, own)}">${f(own)}</td><td class="num ${cmpCls(mine, sec)}">${f(sec)}</td>${P && P.industry_stats ? `<td class="num ${cmpCls(mine, ind)}">${f(ind)}</td>` : ""}${mk.map((m) => `<td class="num ${lbl === "Trailing P/E" ? cmpCls(mine, m.pe) : lbl === "Forward P/E" ? cmpCls(mine, m.fpe) : ""}">${lbl === "Trailing P/E" ? f(m.pe) : lbl === "Forward P/E" ? f(m.fpe) : "—"}</td>`).join("")}</tr>`;
+    const table = `<div class="table-wrap"><table class="grid ta-valtab"><thead><tr><th></th><th class="num">${esc(v.proxy ? v.proxy.symbol : raw.symbol)}</th><th class="num" title="Median of its own weekly P/E over the last 5 years">Own 5-y median</th><th class="num">Sector median${ps ? ` <span class="sub">(${ps.n})</span>` : ""}</th>${P && P.industry_stats ? `<th class="num">Industry <span class="sub">(${is_.n})</span></th>` : ""}${mk.map((m) => `<th class="num" title="Through the ${esc(m.symbol)} ETF">${esc(m.label)}</th>`).join("")}</tr></thead><tbody>
+      ${row("Trailing P/E", v.pe, s5 && s5.median, ps && ps.pe, is_ && is_.pe)}${row("Forward P/E", v.fpe, null, ps && ps.fpe, is_ && is_.fpe)}${row("P/B", v.pb, null, ps && ps.pb, is_ && is_.pb)}${row("EV/EBITDA", v.ev_ebitda, null, ps && ps.ev_ebitda, is_ && is_.ev_ebitda)}
+      </tbody></table></div><p class="hint"><span class="v-cheap">green</span> = this stock is at least 15% cheaper than the reference; <span class="v-dear">red</span> = at least 15% more expensive.${P && P.pending ? ` Loading peer data (${P.pending} companies left)…` : ""}</p>`;
+    const peerList = P && P.list.length ? `<details class="ta-peers"><summary>Largest ${esc(P.sector)} peers in the screener (${P.list.length})</summary><div class="table-wrap"><table class="grid"><thead><tr><th>Company</th><th>Industry</th><th class="num">P/E</th><th class="num">Fwd P/E</th><th class="num">P/B</th><th class="num">EV/EBITDA</th></tr></thead><tbody>
+      ${P.list.map((q) => `<tr><td><button class="linkbtn ta-peer" data-sym="${esc(q.symbol)}">${esc(q.symbol)}</button> <span class="sub">${esc(q.name || "")}</span></td><td class="sub">${esc(q.industry || "")}</td><td class="num">${x2(q.pe)}</td><td class="num">${x2(q.fpe)}</td><td class="num">${x2(q.pb)}</td><td class="num">${x2(q.ev_ebitda)}</td></tr>`).join("")}</tbody></table></div></details>` : "";
+
+    el.innerHTML = `<h3 class="sub-h">Valuation — expensive or cheap? <span class="sub">${esc(v.proxy ? `${v.proxy.symbol} (${v.proxy.label})` : v.name || "")}</span></h3>
+      <div class="kpis small ta-valk">${tiles}</div>
+      <div class="ta-valgrid"><div class="ta-pechart" id="ta-pechart">${H ? "" : `<p class="hint">${v.quote_type === "EQUITY" ? "No P/E history: Yahoo has too few quarterly earnings reports for this stock." : "P/E history is only available for individual stocks."}</p>`}</div>
+        <div><ul class="ta-valnotes">${notes.map((n) => `<li>${n}</li>`).join("")}</ul></div></div>
+      ${table}${peerList}${glossary}`;
+    if (H) peChart(H);
+  }
+  // trailing P/E over time with its 5-year median and usual range (25th–75th percentile)
+  function peChart(H) {
+    const el = $("#ta-pechart"), d3 = window.d3;
+    const pts = H.series.filter((r) => r[2] != null).map((r) => ({ t: new Date(r[0] + "T00:00:00"), pe: r[2] }));
+    if (pts.length < 10) return;
+    const W = Math.max(300, el.clientWidth || 520), Hh = 240, M = { l: 8, r: 46, t: 22, b: 22 };
+    const s5 = H.stats5, s10 = H.stats10 || s5;
+    const X = d3.scaleTime().domain(d3.extent(pts, (p) => p.t)).range([M.l, W - M.r]);
+    const lo = d3.min(pts, (p) => p.pe), hi = d3.max(pts, (p) => p.pe);
+    const Y = d3.scaleLinear().domain([Math.max(0, lo * 0.9), hi * 1.05]).range([Hh - M.b, M.t]);
+    const sv = d3.select(el).append("svg").attr("width", W).attr("height", Hh).attr("class", "ta-svg");
+    sv.append("text").attr("x", M.l).attr("y", 13).attr("font-size", 11).attr("fill", "var(--muted)").text(`Trailing P/E, weekly, since ${dS(pts[0].t.toISOString().slice(0, 10))} · band: 5-year usual range (25th–75th percentile) · dashed: median`);
+    if (s5) {
+      sv.append("rect").attr("x", M.l).attr("width", W - M.r - M.l).attr("y", Y(s5.p75)).attr("height", Math.max(1, Y(s5.p25) - Y(s5.p75))).attr("fill", "rgba(57,135,229,.12)");
+      sv.append("line").attr("x1", M.l).attr("x2", W - M.r).attr("y1", Y(s5.median)).attr("y2", Y(s5.median)).attr("stroke", "#3987e5").attr("stroke-dasharray", "5 4");
+    }
+    sv.append("g").attr("transform", `translate(${W - M.r},0)`).call(d3.axisRight(Y).ticks(6)).call((g) => g.selectAll("text").attr("fill", "var(--muted)")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    sv.append("g").attr("transform", `translate(0,${Hh - M.b})`).call(d3.axisBottom(X).ticks(Math.max(3, Math.floor(W / 110)))).call((g) => g.selectAll("text").attr("fill", "var(--muted)")).call((g) => g.selectAll("line,path").attr("stroke", "var(--border)"));
+    sv.append("path").datum(pts).attr("fill", "none").attr("stroke", "#e0e0e0").attr("stroke-width", 1.4).attr("d", d3.line().defined((p) => p.pe != null).x((p) => X(p.t)).y((p) => Y(p.pe)));
+    const last = pts[pts.length - 1];
+    sv.append("circle").attr("cx", X(last.t)).attr("cy", Y(last.pe)).attr("r", 3.5).attr("fill", "#ffd54f");
+    // hover read-out
+    const hl = sv.append("line").attr("y1", M.t).attr("y2", Hh - M.b).attr("stroke", "rgba(255,255,255,.3)").style("display", "none");
+    const tx = sv.append("text").attr("y", M.t + 12).attr("font-size", 11).attr("fill", "var(--text)").style("display", "none");
+    sv.append("rect").attr("x", M.l).attr("y", M.t).attr("width", W - M.r - M.l).attr("height", Hh - M.t - M.b).attr("fill", "transparent")
+      .on("mousemove", (e) => {
+        const [mx] = d3.pointer(e), t = X.invert(mx), i = Math.min(pts.length - 1, d3.bisector((p) => p.t).left(pts, t));
+        const p = pts[i], x = X(p.t);
+        hl.attr("x1", x).attr("x2", x).style("display", null);
+        tx.attr("x", Math.min(x + 6, W - M.r - 130)).text(`${dS(p.t.toISOString().slice(0, 10))}: P/E ${fn(p.pe, 1)}`).style("display", null);
+      })
+      .on("mouseleave", () => { hl.style("display", "none"); tx.style("display", "none"); });
+    if (H.scaled) el.insertAdjacentHTML("beforeend", `<p class="hint">Rescaled ×${fn(H.scaled, 2)} to match Yahoo's trailing P/E (the reported EPS is in another currency or per a different share class).</p>`);
+    el.insertAdjacentHTML("beforeend", `<p class="hint">Built from ${esc(H.basis)}, so it can differ a little from Yahoo's trailing P/E, which uses accounting (GAAP/IFRS) EPS.${s10 && s10.years === 10 ? ` 10-year median: ${fn(s10.median, 1)}.` : ""}</p>`);
+  }
+
   // ------------------------------------------------------------------ header, symbol chips, indicator panel
   function header() {
     const x = raw;
@@ -1131,6 +1243,7 @@ window.StonksTA = function (ctx) {
     if (!(await load(sym))) return;
     header(); controls();
     build(true);
+    loadVal(sym);
   }
 
   // ------------------------------------------------------------------ events
@@ -1156,6 +1269,7 @@ window.StonksTA = function (ctx) {
     if (raw) build();
   });
   $("#ta-reset").addEventListener("click", () => { saveTA({ ind: {} }); panel(); if (raw) build(); });
+  $("#ta-val").addEventListener("click", (e) => { const b = e.target.closest(".ta-peer"); if (b) { open(b.dataset.sym); window.scrollTo(0, 0); } });
   $("#ta-altp").addEventListener("change", (e) => {
     const t2 = e.target, k = t2.dataset.alt, f = t2.dataset.f;
     if (!k || !f) return;

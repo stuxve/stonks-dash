@@ -617,3 +617,32 @@ def test_ta_endpoint(client):
     ib = client.get("/api/ta?symbol=IBCF.MU").json()           # short Munich history → priced from Xetra
     assert ib["source"] == "IBCF.DE" and len(ib["bars"]) > 1000
     assert client.get("/api/ta?symbol=bad%20one").status_code == 400
+
+
+def test_pe_history_math():
+    from app import valuation
+    # quarterly EPS of 1.0 (TTM 4.0) for three years, then 1.5 (TTM 6.0): price 80 → P/E 20, then 13.3
+    q = pd.date_range("2020-03-31", periods=16, freq="QE")
+    eps = [[d.date().isoformat(), 1.0 if k < 12 else 1.5] for k, d in enumerate(q)]
+    close = pd.Series(80.0, index=pd.bdate_range("2020-01-01", "2024-01-31"))
+    ph = valuation.pe_history(close, eps)
+    assert ph["pe"].dropna().iloc[0] == pytest.approx(20.0)
+    assert ph["pe"].iloc[-1] == pytest.approx(80 / 6.0)
+    assert ph.loc[: q[3] - pd.Timedelta(days=1), "pe"].isna().all()       # no P/E before four quarters are known
+    st = valuation.pe_stats(ph["pe"], 5)
+    assert st["median"] == pytest.approx(20.0) and st["pctile"] < 10
+    assert valuation.ttm_eps([["2020-03-31", 1], ["2021-06-30", 1], ["2021-09-30", 1], ["2021-12-31", 1]]).empty   # gap → no TTM
+
+
+def test_valuation_endpoint(client):
+    d = client.get("/api/valuation?symbol=MSFT").json()
+    assert d["applicable"] and d["pe"] > 0 and d["fpe"] > 0
+    h = d["history"]
+    assert h and h["stats5"]["median"] > 0 and 0 <= h["stats5"]["pctile"] <= 100 and len(h["series"]) > 200
+    assert h["pe_now"] == pytest.approx(d["pe"], rel=0.1)          # history agrees with the quoted trailing P/E
+    assert d["peers"]["sector"] and [m["symbol"] for m in d["markets"]][:2] == ["SPY", "VGK"]
+    f = client.get("/api/valuation?symbol=IBCF.MU").json()            # fund without its own P/E → index ETF
+    assert f["applicable"] and f["proxy"]["symbol"] == "SPY" and f["pe"] == pytest.approx(27.0)
+    c = client.get("/api/valuation?symbol=BTC-USD").json()
+    assert not c["applicable"] and "crypto" in c["reason"]
+    assert client.get("/api/valuation?symbol=bad%20one").status_code == 400

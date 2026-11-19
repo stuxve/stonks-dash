@@ -225,6 +225,42 @@ class YahooProvider:
             out["div_yield"] = None
         return out
 
+    VAL_KEYS = {"name": ("longName", "shortName"), "quote_type": ("quoteType",), "currency": ("currency",),
+                "fin_ccy": ("financialCurrency",), "sector": ("sector",), "industry": ("industry",), "country": ("country",),
+                "price": ("currentPrice", "regularMarketPrice", "navPrice"), "market_cap": ("marketCap", "totalAssets"),
+                "pe": ("trailingPE",), "fpe": ("forwardPE",), "eps": ("trailingEps", "epsTrailingTwelveMonths"),
+                "feps": ("forwardEps", "epsForward"), "peg": ("trailingPegRatio", "pegRatio"),
+                "ps": ("priceToSalesTrailing12Months",), "pb": ("priceToBook",), "ev_ebitda": ("enterpriseToEbitda",),
+                "ev_rev": ("enterpriseToRevenue",), "eps_g": ("earningsGrowth",), "eps_qg": ("earningsQuarterlyGrowth",),
+                "rev_g": ("revenueGrowth",)}
+
+    def valuation(self, symbol: str) -> dict:
+        """Valuation ratios plus the quarterly reported EPS history (for a historical P/E). Fields Yahoo lacks are None."""
+        t = self.yf.Ticker(symbol)
+        info = t.get_info() or {}
+        if not info or not (info.get("quoteType") or info.get("shortName")):
+            raise LookupError(f"no info for {symbol}")
+        out = {k: next((info.get(x) for x in srcs if info.get(x) not in (None, "", "Infinity")), None)
+               for k, srcs in self.VAL_KEYS.items()}
+        for k in ("pe", "fpe", "peg", "ps", "pb", "ev_ebitda", "ev_rev"):
+            try:
+                out[k] = float(out[k]) if out[k] is not None else None
+            except (TypeError, ValueError):
+                out[k] = None
+        eps = []
+        if out["quote_type"] == "EQUITY":
+            try:
+                df = t.get_earnings_dates(limit=48)
+                col = next((c for c in (df.columns if df is not None else []) if "Reported" in str(c)), None)
+                if col is not None:
+                    for d, v in df[col].items():
+                        if pd.notna(v):
+                            eps.append([pd.Timestamp(d).date().isoformat(), float(v)])
+            except Exception as e:  # noqa: BLE001 — history is optional
+                log.info("earnings history %s failed: %s", symbol, e)
+        out["eps_hist"] = sorted(eps)
+        return out
+
     def earnings(self, symbol: str) -> dict:
         """Next earnings date(s), estimates, recent reports and dividend dates. {} when Yahoo has none."""
         t = self.yf.Ticker(symbol)
@@ -502,6 +538,40 @@ class MockProvider:
                 "div_yield": y, "payout": float(r.uniform(0.1, 1.2)) if y else None, "beta": float(r.uniform(0.4, 1.8)),
                 "target": px * float(r.uniform(0.9, 1.4)), "n": int(r.integers(0, 40)), "rec": float(r.uniform(1.3, 3.2)),
                 "rec_key": str(r.choice(["buy", "hold", "strong_buy"])), "hi52": px * float(r.uniform(1.0, 1.4))}
+
+    MOCK_INDEX_PE = {"SPY": (27.0, 22.5), "VGK": (15.5, 13.8), "EWP": (12.0, 11.0), "QQQ": (34.0, 28.0), "URTH": (23.0, 19.5),
+                     "VT": (21.0, 18.0), "IEMG": (14.0, 12.0), "EZU": (16.0, 14.0)}
+
+    def valuation(self, symbol: str) -> dict:
+        qt = self._quote_type(symbol)
+        sym = self.ALIAS.get(symbol, symbol)
+        out = {k: None for k in YahooProvider.VAL_KEYS}
+        out.update(name=symbol.split(".")[0] + (" Corp" if qt == "EQUITY" else ""), quote_type=qt, currency=self._currency(symbol))
+        if symbol in self.MOCK_INDEX_PE:
+            out["pe"], out["fpe"] = self.MOCK_INDEX_PE[symbol]
+        if qt != "EQUITY":
+            out["eps_hist"] = []
+            return out
+        r = np.random.default_rng(self._seed(symbol) + 31)
+        s = self._series(sym, date.today() - timedelta(days=3700))
+        # quarterly EPS consistent with a P/E that wanders between ~12 and ~40
+        pe, eps, d = float(r.uniform(15, 30)), [], date.today() - timedelta(days=int(r.integers(10, 80)))
+        while d > s.index[0].date() + timedelta(days=30):
+            px = float(s[s.index <= pd.Timestamp(d)].iloc[-1])
+            pe = float(np.clip(pe * np.exp(r.normal(0, 0.08)), 12, 40))
+            eps.append([d.isoformat(), round(px / pe / 4, 4)])
+            d -= timedelta(days=91)
+        eps.sort()
+        ttm = sum(x[1] for x in eps[-4:])
+        px = float(s.iloc[-1])
+        out.update(price=px, sector=self._sector.get(symbol) or "Technology", industry=None, country=self._country(symbol),
+                   market_cap=float(np.exp(r.uniform(np.log(5e9), np.log(3e12)))), eps=ttm, pe=px / ttm if ttm > 0 else None,
+                   feps=ttm * float(r.uniform(0.95, 1.3)), ps=float(r.uniform(1, 15)), pb=float(r.uniform(0.8, 15)),
+                   ev_ebitda=float(r.uniform(5, 35)), ev_rev=float(r.uniform(1, 14)), eps_g=float(r.uniform(-0.2, 0.5)),
+                   rev_g=float(r.uniform(-0.05, 0.3)), fin_ccy=self._currency(symbol), eps_hist=eps)
+        out["fpe"] = px / out["feps"] if out["feps"] else None
+        out["peg"] = out["fpe"] / (out["eps_g"] * 100) if out["eps_g"] and out["eps_g"] > 0 else None
+        return out
 
     def earnings(self, symbol: str) -> dict:
         if self._quote_type(symbol) != "EQUITY":
@@ -858,6 +928,25 @@ class QuoteEngine:
                     threading.Thread(target=work, args=(todo,), daemon=True).start()
         pending = len(getattr(self, "_fund_job", set()) & set(symbols))
         return have, {"have": len(have), "total": len(symbols), "pending": pending}
+
+    def valuation(self, symbol: str, ttl: float = 12 * 3600) -> dict | None:
+        """Valuation ratios + EPS history for one symbol (cached 12 h). None when Yahoo has nothing."""
+        key = f"val:{symbol}"
+        hit = self.db.get_meta([key], ttl).get(key)
+        if hit is not None:
+            return hit or None
+        if time.time() - self._meta_miss.get(key, 0) < self.meta_retry or not hasattr(self.p, "valuation"):
+            old = self.db.get_meta([key], max_age=30 * 86400).get(key)
+            return old or None
+        try:
+            v = self.p.valuation(symbol)
+        except Exception as e:  # noqa: BLE001
+            log.info("valuation %s failed: %s", symbol, e)
+            self._meta_miss[key] = time.time()
+            old = self.db.get_meta([key], max_age=30 * 86400).get(key)
+            return old or None
+        self.db.put_meta(key, v)
+        return v
 
     def earnings(self, symbols: list[str], ttl: float = 12 * 3600) -> dict[str, dict]:
         """Earnings calendar per stock (cached 12 h; empty answers too)."""
