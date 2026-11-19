@@ -113,3 +113,29 @@ def test_sell_flow_end_to_end(client):
     # deleting the sale restores the lots
     client.delete(f"/api/transactions/{sid}")
     assert sum(p["quantity"] for p in client.get("/api/portfolio").json()["positions"]) == 15
+
+
+def test_performance_cost_series_matches_unrealized_pnl(client):
+    """value − cost on the last day of /api/performance is the Unrealized P&L figure (totals.pnl)."""
+    port = client.get("/api/portfolio?base=EUR").json()
+    perf = client.get("/api/performance?base=EUR").json()
+    assert len(perf["cost"]) == len(perf["dates"]) == len(perf["value"])
+    assert perf["value"][-1] - perf["cost"][-1] == pytest.approx(port["totals"]["pnl"], abs=0.05)
+    # before any buy nothing is held: cost is zero
+    assert all(c >= 0 for c in perf["cost"] if c is not None)
+
+
+def test_performance_cost_is_basis_of_units_held():
+    idx = pd.date_range("2024-01-01", "2024-12-31", freq="D")
+    px = pd.Series(range(100, 100 + len(idx)), index=idx, dtype=float)
+    lots = [lot(1, 10, 100, "2024-01-01", sym="IDX"), lot(2, 5, 200, "2024-06-03", sym="IDX")]
+    sells = [sell(1, 3, 300, "2024-09-02", sym="IDX")]
+    fx = ledger.FxBook("EUR", {}, {})
+    fr = ledger.fifo(lots, sells)
+    rz = ledger.realized(lots, sells, [], fr, fx)
+    perf = ledger.performance(lots, sells, [], fr, rz, fx, {"IDX": px}, {"IDX": "EUR"}, px, "EUR",
+                              value_now=12 * float(px.iloc[-1]), today=date(2024, 12, 31), max_points=10_000)
+    c = dict(zip(perf["dates"], perf["cost"]))
+    assert c["2024-03-01"] == pytest.approx(1000)          # 10 × 100
+    assert c["2024-07-01"] == pytest.approx(2000)          # + 5 × 200
+    assert c["2024-12-31"] == pytest.approx(1700)          # FIFO: 3 of the first lot sold

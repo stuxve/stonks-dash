@@ -232,7 +232,7 @@ def cash_flows(lots, sells, divs, rz: dict, fx: FxBook) -> list[tuple[date, floa
 def performance(lots, sells, divs, fr: FifoResult, rz: dict, fx: FxBook,
                 prices: dict[str, pd.Series], price_ccy: dict[str, str],
                 bench: pd.Series | None, bench_ccy: str | None,
-                value_now: float, today: date | None = None, max_points: int = 600) -> dict:
+                value_now: float, today: date | None = None, max_points: int = 600, cost_now: float | None = None) -> dict:
     today = today or date.today()
     flows = cash_flows(lots, sells, divs, rz, fx)
     if not flows:
@@ -247,6 +247,7 @@ def performance(lots, sells, divs, fr: FifoResult, rz: dict, fx: FxBook,
         sold[m.lot_id].append((tx_date(sells_by_id[m.sell_id]), m.qty))
 
     value = pd.Series(0.0, index=idx)
+    cost = pd.Series(0.0, index=idx)      # cost basis of the units held each day, at that day's FX (like the KPI)
     price_cache: dict[str, pd.Series] = {}
     flat_lots = []
     for lot in lots:
@@ -259,12 +260,16 @@ def performance(lots, sells, divs, fr: FifoResult, rz: dict, fx: FxBook,
             if sym not in price_cache:
                 price_cache[sym] = _align(prices[sym], idx) * fx.on_index(price_ccy.get(sym), idx)
             value += held * price_cache[sym]
+            cost += held * (lot_cost_native(lot) / float(lot["quantity"])) * fx.on_index(lot["currency"], idx)
         else:
             # no price history (manual asset / unknown ticker): carry it at cost
             unit = lot_cost_native(lot) / float(lot["quantity"]) * fx.at(lot["currency"], lot_date(lot))
             value += held * unit
+            cost += held * unit
             flat_lots.append(lot["id"])
     value.iloc[-1] = value_now  # end exactly on today's live valuation
+    if cost_now is not None:
+        cost.iloc[-1] = cost_now
 
     flow_s = pd.Series(0.0, index=idx)
     for d, a, _ in flows:
@@ -307,6 +312,7 @@ def performance(lots, sells, divs, fr: FifoResult, rz: dict, fx: FxBook,
         "dates": [d.date().isoformat() for d in idx[take]],
         "value": rnd(value),
         "invested": rnd(invested),
+        "cost": rnd(cost),
         "bench": rnd(bench_s) if bench_s is not None else [],
         "summary": summary,
     }

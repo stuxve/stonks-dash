@@ -473,6 +473,13 @@
     const color = makeColor(range);
     const useName = state.settings.tile_label === "name";
     renderKpis(d.totals);
+    // Heatmap or "P&L over time" (static/pnlhist.js) above the table
+    const hist = state.settings.p_mapview === "pnl";
+    $$("#p-mapview button").forEach((b) => b.classList.toggle("active", b.dataset.v === (hist ? "pnl" : "map")));
+    $$("#p-sub-holdings .p-maponly").forEach((e) => { e.hidden = hist; });
+    for (const id of ["#p-map", "#p-legend", "#p-crumbs"]) $(id).hidden = hist;
+    $("#p-pnlh").hidden = !hist;
+    if (hist) { pnlHist.show(d.totals); renderTable(d, positions); return; }
     renderTreemap(pMap, {
       tiles: positions,
       groupOf: (p) => autoGroup(p, v.group),
@@ -491,10 +498,7 @@
   }
 
   function renderKpis(t) {
-    const b = base(), chartView = state.settings.p_kpi_view === "chart";
-    $$("#kpi-view button").forEach((x) => x.classList.toggle("active", (x.dataset.v === "chart") === chartView));
-    if (chartView) return pnl.render(t);
-    $("#kpis").classList.remove("pnl-mode");
+    const b = base();
     $("#kpis").innerHTML = [
       ["Market value", fmtMoney(t.value, b), `${t.count} position${t.count === 1 ? "" : "s"}${t.missing ? ` · <span class="down">${t.missing} without price</span>` : ""}`],
       ["Invested", fmtMoney(t.cost, b), "cost basis at current FX"],
@@ -1058,15 +1062,17 @@
     CURRENCIES, TYPE_LABEL, $, $$,
   });
 
+  // ================================================================== P&L history in Holdings (static/pnlhist.js)
+  const pnlHist = window.StonksPnlHist({ api, esc, state, saveSettings, base, fmtMoney, fmtSigned, fmtPct, fmtDate, cls, $ });
+  $("#p-mapview").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]");
+    if (!b) return;
+    saveSettings({ p_mapview: b.dataset.v });
+    drawPortfolio();
+  });
+
   // ================================================================== technical analysis (static/ta.js)
   const ta = window.StonksTA({ api, esc, state, saveSettings, base, fmtDate, attachSearch, $, $$ });
-  // portfolio summary: boxes or a live P&L chart (static/pnlchart.js)
-  const pnl = window.StonksPnl({ api, esc, state, saveSettings, base, fmtMoney, fmtSigned, fmtPct, cls, $ });
-  $("#kpi-view").addEventListener("click", (e) => {
-    const b = e.target.closest("button"); if (!b) return;
-    saveSettings({ p_kpi_view: b.dataset.v });
-    if (state.port) renderKpis(state.port.totals);
-  });
   function openChart(sym) {
     state.settings.ta = { ...(state.settings.ta || {}), symbol: sym };
     switchView("ta");

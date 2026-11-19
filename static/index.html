@@ -85,7 +85,6 @@
       <button data-sub="taxes">Taxes · ES</button>
       <button data-sub="ledger">Transactions</button>
       <div class="grow"></div>
-      <span class="seg kpi-view" id="kpi-view" title="Summary at the top: boxes, or a live P&amp;L chart"><button data-v="boxes">▦ Boxes</button><button data-v="chart">⌁ Chart</button></span>
       <button id="add-position" class="btn primary">+ Buy</button>
       <button id="add-sell" class="btn ghost">Sell</button>
       <button id="add-div" class="btn ghost">Dividend</button>
@@ -93,15 +92,18 @@
 
     <div id="p-sub-holdings" class="psub">
     <div class="toolbar">
-      <label class="ctl">Color by
+      <span class="seg" id="p-mapview" title="Switch the picture above the table: the heatmap of your positions, or your P&amp;L (profit and loss) history since the first buy">
+        <button data-v="map">&#9638; Heatmap</button><button data-v="pnl">&#8767; P&amp;L over time</button>
+      </span>
+      <label class="ctl p-maponly">Color by
         <select id="p-color">
           <option value="pnl">Total P&amp;L %</option>
           <option value="period">Price change (period)</option>
           <option value="bench">Vs index (same dates)</option>
         </select>
       </label>
-      <div class="seg period-seg" data-scope="portfolio"></div>
-      <label class="ctl">Size
+      <div class="seg period-seg p-maponly" data-scope="portfolio"></div>
+      <label class="ctl p-maponly">Size
         <select id="p-size">
           <option value="value">Market value</option>
           <option value="cost">Invested</option>
@@ -117,7 +119,7 @@
           <option value="none">No grouping</option>
         </select>
       </label>
-      <label class="ctl">Range
+      <label class="ctl p-maponly">Range
         <select class="range-sel"></select>
       </label>
       <label class="ctl check" title="Show several buys of the same asset as one position (weighted average cost). Nothing is changed in your data.">
@@ -127,6 +129,7 @@
     <div class="crumbs" id="p-crumbs"></div>
     <div class="map short" id="p-map"><div class="loading">Loading…</div></div>
     <div class="legend" id="p-legend"></div>
+    <div class="pnlh-wrap" id="p-pnlh" hidden></div>
     <div class="table-wrap">
       <table id="p-table" class="grid">
         <thead></thead><tbody></tbody><tfoot></tfoot>
@@ -657,8 +660,8 @@
 <script src="/static/risk.js"></script>
 <script src="/static/ideas.js"></script>
 <script src="/static/ranges.js"></script>
-<script src="/static/pnlchart.js"></script>
 <script src="/static/portfolio.js"></script>
+<script src="/static/pnlhist.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>
