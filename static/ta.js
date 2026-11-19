@@ -1400,7 +1400,8 @@ window.StonksTA = function (ctx) {
     if (!avail[mode]) mode = ["ttm", "annual", "quarterly"].find((m) => avail[m]);
     if (!mode) { el.innerHTML = '<h3 class="sub-h">Revenue vs net income</h3><p class="hint">Not enough reported periods.</p>'; return; }
     const rows = (mode === "ttm" ? ttm : mode === "annual" ? d.annual : d.quarterly).filter((r) => r[1] != null || r[2] != null);
-    const showOp = !!S().rn_op && rows.some((r) => r[3] != null), smooth = S().rn_smooth !== false, ccy = d.currency || "";
+    const showOp = !!S().rn_op && rows.some((r) => r[3] != null), ccy = d.currency || "";
+    const few = rows.length <= 12, smooth = S().rn_smooth !== false && !few;      // a smooth curve through a handful of points misleads
     const lbl = (iso) => (mode === "annual" ? `fiscal year to ${mY(iso)}` : mode === "ttm" ? `12 months to ${mY(iso)}` : `quarter to ${mY(iso)}`);
     // summary: growth (CAGR = compound annual growth rate), margins, losses
     const ann = d.annual.filter((r) => r[1] > 0), yrs = (a, b) => (new Date(b[0]) - new Date(a[0])) / 864e5 / 365.25;
@@ -1420,12 +1421,13 @@ window.StonksTA = function (ctx) {
     el.innerHTML = `<div class="ta-finhead"><h3 class="sub-h">Revenue vs net income <span class="sub">· ${esc(mY(rows[0][0]))} → ${esc(mY(lastR[0]))}</span></h3>
         <span class="seg" id="ta-rnmode">${[["ttm", "TTM", "Trailing twelve months: each point adds up the last 4 quarters (smooths seasonality)"], ["annual", "Annual", "Fiscal years"], ["quarterly", "Quarterly", "Single quarters"]].map(([k, t, tip]) => `<button data-v="${k}" title="${tip}" class="${k === mode ? "active" : ""}" ${avail[k] ? "" : "disabled"}>${t}</button>`).join("")}</span>
         <label class="ctl check"><input type="checkbox" id="ta-rnop" ${showOp ? "checked" : ""} ${rows.some((r) => r[3] != null) ? "" : "disabled"}> Operating income</label>
-        <label class="ctl check"><input type="checkbox" id="ta-rnsmooth" ${smooth ? "checked" : ""}> Smooth</label></div>
+        <label class="ctl check" ${few ? 'title="Only a few periods: shown point by point"' : ""}><input type="checkbox" id="ta-rnsmooth" ${smooth ? "checked" : ""} ${few ? "disabled" : ""}> Smooth</label></div>
+      ${d.note ? `<div class="callout warn">${esc(d.note)}</div>` : ""}
       <div class="ta-rnchart" id="ta-rnchart"><div class="ta-rntip" hidden></div></div>
       <ul class="ta-valnotes">${sum.map((x) => `<li>${x}</li>`).join("")}</ul>
-      <p class="hint">Source: ${esc(d.source)}. Amounts in ${esc(ccy || "the reporting currency")}. Net income = profit attributable to shareholders after all costs, interest and taxes.${d.note ? ` ${esc(d.note)}` : ""}</p>`;
+      <p class="hint">Source: ${esc(d.source)}. Amounts in ${esc(ccy || "the reporting currency")}. Net income = profit attributable to shareholders after all costs, interest and taxes.</p>`;
 
-    const box = $("#ta-rnchart"), W = Math.max(320, box.clientWidth || 900), Hh = window.innerWidth < 700 ? 280 : 360, M = { l: 10, r: 74, t: 14, b: 26 };
+    const box = $("#ta-rnchart"), W = Math.max(320, box.clientWidth || 900), Hh = window.innerWidth < 700 ? 280 : 360, M = { l: 30, r: 74, t: 14, b: 26 };
     const pts = rows.map((r) => ({ t: new Date(r[0] + "T00:00:00"), iso: r[0], rev: r[1], net: r[2], op: r[3] }));
     const X = d3.scaleTime().domain(d3.extent(pts, (p) => p.t)).range([M.l, W - M.r]);
     const lo = Math.min(0, d3.min(pts, (p) => Math.min(p.net ?? 0, showOp ? p.op ?? 0 : 0)));
@@ -1447,6 +1449,10 @@ window.StonksTA = function (ctx) {
     for (const [clip, fill, stroke] of [[`${uid}a`, "rgba(102,187,106,.45)", "#81c784"], [`${uid}b`, "rgba(229,57,53,.55)", "#ef5350"]]) {
       sv.append("path").datum(pts).attr("clip-path", `url(#${clip})`).attr("fill", fill).attr("d", area("net"));
       sv.append("path").datum(pts).attr("clip-path", `url(#${clip})`).attr("fill", "none").attr("stroke", stroke).attr("stroke-width", 1.6).attr("d", line("net"));
+    }
+    if (few) {
+      for (const [key, c] of [["rev", "#e57373"], ["net", "#81c784"]]) sv.append("g").selectAll("circle").data(pts.filter((p) => p[key] != null)).join("circle")
+        .attr("cx", (p) => X(p.t)).attr("cy", (p) => Y(p[key])).attr("r", 3).attr("fill", (p) => (key === "net" && p.net < 0 ? "#ef5350" : c));
     }
     if (showOp) sv.append("path").datum(pts).attr("fill", "none").attr("stroke", "#ffd54f").attr("stroke-width", 1.4).attr("stroke-dasharray", "5 4").attr("d", line("op"));
     sv.append("line").attr("x1", M.l).attr("x2", W - M.r).attr("y1", Y(0)).attr("y2", Y(0)).attr("stroke", "rgba(255,255,255,.35)");

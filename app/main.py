@@ -1742,13 +1742,18 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     # ------------------------------------------------------------------ revenue vs net income, long history (Analysis tab)
     def _sec_history(sym: str, name: str | None) -> dict | None:
-        """SEC EDGAR history for companies that file with the SEC (cached a week; misses cached a day)."""
+        """SEC EDGAR history for companies that file with the SEC. Cached a week; "not an SEC filer" is remembered
+        for a day and a failed download (e.g. 403) for 15 minutes — and both are forgotten when STONKS_SEC_UA changes."""
         key, miss = f"sec:hist:{sym}", f"sec:none:{sym}"
-        got = db.get_meta([key, miss], 7 * 86400)
+        got = db.get_meta([key], 7 * 86400)
         if key in got:
             return got[key]
-        if db.get_meta([miss], 86400).get(miss):
-            return None
+        m = db.get_meta([miss], 86400).get(miss)
+        if m and m.get("ua") == sec.UA:
+            if not m.get("error"):
+                return None
+            if time.time() - m.get("at", 0) < 15 * 60:
+                return {"error": m["error"]}
         try:
             tick = db.get_meta(["sec:tickers"], 30 * 86400).get("sec:tickers")
             if not tick:
@@ -1756,16 +1761,16 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 db.put_meta("sec:tickers", tick)
             cik = sec.find_cik(sym, name, tick)
             if cik is None:
-                db.put_meta(miss, {"reason": "not an SEC filer"})
+                db.put_meta(miss, {"reason": "not an SEC filer", "ua": sec.UA})
                 return None
             h = sec.extract(sec.fetch_json(sec.FACTS_URL.format(cik=cik)))
             h["cik"] = cik
         except Exception as e:  # noqa: BLE001 — network / format problems: fall back to Yahoo
             log.info("SEC history for %s failed: %s", sym, e)
-            db.put_meta(miss, {"reason": str(e)[:200]})
+            db.put_meta(miss, {"error": str(e)[:200], "ua": sec.UA, "at": time.time()})
             return {"error": str(e)[:200]}
         if not h.get("annual") and not h.get("quarterly"):
-            db.put_meta(miss, {"reason": "no revenue facts"})
+            db.put_meta(miss, {"reason": "no revenue facts", "ua": sec.UA})
             return None
         db.put_meta(key, h)
         return h
@@ -1790,8 +1795,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             h = _sec_history(sym, meta.get("long_name") or meta.get("name"))
             src = "SEC EDGAR filings (10-K / 10-Q / 20-F)"
             if h and h.get("error"):
-                note = ("The SEC didn't answer (" + h["error"] + "). If it says 403, set STONKS_SEC_UA in .env to "
-                        "\"Your Name your@email.com\" (the SEC asks API users to identify themselves).")
+                forbidden = "403" in h["error"]
+                note = ("Only Yahoo's last few years are shown because the SEC refused the download (HTTP 403). It requires a "
+                        "contact in the request: set STONKS_SEC_UA=\"Your Name your@email.com\" in the .env on the server and "
+                        "restart the container to get ~15 years." if forbidden else
+                        f"Only Yahoo's last few years are shown because the SEC download failed ({h['error']}); it is retried in 15 minutes.")
                 h = None
         if not h:
             f = engine.financials(sym)
