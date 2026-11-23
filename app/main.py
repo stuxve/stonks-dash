@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import alerts, crosses, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
+from . import alerts, crosses, dividends, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from . import worker as wk
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
@@ -1473,7 +1473,12 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 d = (r["stop"] / r["price"] - 1) * 100
                 if r["symbol"] not in dist or d > dist[r["symbol"]]:
                     dist[r["symbol"]] = d
-        return {"base": base, "lots": ev, "earnings": earn, "stop_dist": dist, "crosses": cx, "port": port}
+        try:
+            dvs = snap.get_or(f"divs:{base}", 3 * 3600, lambda: _dividends(base))["items"]
+        except Exception as e:  # noqa: BLE001
+            log.info("dividends for alerts failed: %s", e)
+            dvs = []
+        return {"base": base, "lots": ev, "earnings": earn, "stop_dist": dist, "crosses": cx, "port": port, "dividends": dvs}
 
     def _alert_summary() -> str:
         sn = _alert_snapshot()
@@ -1544,6 +1549,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         wk.Job("moves", "Highs & lows", _job_moves, 15 * 60, 2 * 3600, delay_s=100),
         wk.Job("boards", "Markets heatmaps", _job_boards, 10 * 60, 2 * 3600,
                enabled=lambda: wcfg().get("boards", True) is not False, delay_s=130),
+        wk.Job("dividends", "Dividends", lambda: snap.refresh(f"divs:{base_or_default(None)}", lambda: _dividends(base_or_default(None))),
+               3 * 3600, 6 * 3600, delay_s=175),
         wk.Job("earnings", "Earnings dates", lambda: snap.refresh("earnings", _earnings), 6 * 3600, 6 * 3600, delay_s=160),
         wk.Job("performance", "P&L history", _job_performance, 3600, 6 * 3600, delay_s=190),
         wk.Job("summary", "Daily summary clock", monitor.tick, 60, 60, delay_s=30),
@@ -2013,6 +2020,110 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         items.sort(key=lambda x: (x["days"] is None, x["days"] if x["days"] is not None else 0))
         return {"items": items, "as_of": time.time()}
 
+    # ------------------------------------------------------------------ dividends (Market hours → Dividends)
+    @app.get("/api/dividends")
+    def dividends_view(base: str | None = None):
+        b = base_or_default(base)
+        return snap.get_or(f"divs:{b}", 600, lambda: _dividends(b))
+
+    def _dividends(base: str):
+        """Per held symbol: payout pattern, next ex-date and payment, what you can expect, what you've recorded,
+        and past ex-dates you held units for with no dividend recorded (app/dividends.py)."""
+        lots, sells, divs, fr = _context(base)
+        open_lots = [x for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS and x["symbol"] and x["manual_price"] is None]
+        held = sorted({x["symbol"] for x in open_lots})
+        rz, _ = _realized(base, lots, sells, divs, fr)
+        today = date.today()
+        port = snap.get_or(f"port:{base}", QUOTE_TTL, lambda: _portfolio(base))
+        by_sym: dict = {}
+        for r in port["positions"]:
+            if r.get("symbol") in held:
+                a = by_sym.setdefault(r["symbol"], {"units": 0.0, "value": 0.0, "cost": 0.0, "accounts": set()})
+                a["units"] += r["quantity"] or 0
+                a["value"] += r["value"] or 0
+                a["cost"] += r["cost"] or 0
+                a["accounts"].add(r.get("account") or "")
+        quotes = engine.quotes(held) if held else {}
+        meta = engine.meta(held) if held else {}
+        dv = engine.dividends(held) if held else {}
+        ccys = {(quotes[s_].currency if s_ in quotes else None) or normalize_currency((meta.get(s_) or {}).get("currency"))[0]
+                for s_ in held} - {None}
+        fx = engine.fx_rates(ccys | {base}, base)
+        items = []
+        for s_ in held:
+            q, m, d = quotes.get(s_), meta.get(s_) or {}, dv.get(s_) or {}
+            ccy = (q.currency if q else None) or normalize_currency(m.get("currency"))[0]
+            rate = fx.get(ccy)
+            price = q.price if q and q.ok else None
+            a = dividends.analyze(d.get("history"), d.get("ex_div"), d.get("pay_date"), price, today)
+            sl = [x for x in lots if x["symbol"] == s_]
+            ss = [t for t in sells if t["symbol"] == s_]
+            sd = [t for t in divs if (t.get("symbol") or "").upper() == s_]
+            fu = dividends.follow_up(d.get("history"), sl, ss, sd, today)
+            agg = by_sym.get(s_) or {"units": 0.0, "value": 0.0, "cost": 0.0, "accounts": set()}
+            units = agg["units"]
+            name = (q.name if q else None) or m.get("name") or s_
+            qt = (q.quote_type if q else None) or m.get("quote_type")
+            kind = ("pays" if a["pays"] and not a["stopped"] else "stopped" if a["stopped"]
+                    else "accumulating" if qt in ("ETF", "MUTUALFUND") and re.search(r"\bacc", name, re.I)
+                    else "none_fund" if qt in ("ETF", "MUTUALFUND") else "na" if qt in ("CRYPTOCURRENCY", "CURRENCY") else "none")
+            nxt = a["next"]
+            if nxt:
+                nxt["expected"] = units * nxt["amount"] if nxt.get("amount") else None
+                nxt["expected_base"] = nxt["expected"] * rate if nxt["expected"] is not None and rate else None
+            pp = a["pending_pay"]
+            if pp:
+                pp["units"] = dividends.units_at(sl, ss, dividends._d(pp["ex"]))
+                pp["expected"] = pp["units"] * pp["amount"] if pp.get("amount") else None
+                pp["expected_base"] = pp["expected"] * rate if pp["expected"] is not None and rate else None
+                if pp["units"] <= 0:
+                    pp = None
+            rec = [rz["per_div"][t["id"]] for t in sd if t["id"] in rz["per_div"]]
+            rec_ytd = [rz["per_div"][t["id"]] for t in sd if t["id"] in rz["per_div"] and ledger.tx_date(t).year == today.year]
+            for e in fu:
+                e["gross_base"] = e["gross"] * rate if rate else None
+            items.append({
+                "symbol": s_, "name": name, "quote_type": qt, "currency": ccy, "kind": kind, "source": d.get("source"),
+                "accounts": sorted(agg["accounts"]), "units": units, "price": price,
+                **{k: a[k] for k in ("freq", "freq_label", "last", "ttm", "yield_ttm", "forward", "next", "history")},
+                "pending_pay": pp,
+                "yield_on_cost": (a["forward"] * units * rate / agg["cost"] * 100) if a["forward"] and rate and agg["cost"] else None,
+                "annual_base": a["forward"] * units * rate if a["forward"] and rate else None,
+                "schedule": [{**e, "expected_base": units * e["amount"] * rate if e["amount"] and rate else None} for e in a["schedule"]],
+                "received": {"gross": sum(r["gross"] for r in rec), "net": sum(r["net"] for r in rec),
+                             "ytd_net": sum(r["net"] for r in rec_ytd), "count": len(rec)},
+                "follow_up": fu,
+            })
+        order = {"pays": 0, "stopped": 1, "none": 2, "none_fund": 3, "accumulating": 4, "na": 5}
+        items.sort(key=lambda x: (order[x["kind"]], (x["next"] or {}).get("days", 9999)))
+        # income calendar: next 12 months expected (by ex-date month) and the last 12 months recorded (by pay date)
+        months: dict = {}
+        for x in items:
+            for e in x["schedule"]:
+                if e["expected_base"]:
+                    mo = months.setdefault(e["ex"][:7], {"expected": 0.0, "received": 0.0, "items": []})
+                    mo["expected"] += e["expected_base"]
+                    mo["items"].append({"symbol": x["symbol"], "ex": e["ex"], "amount": e["expected_base"], "estimated": e["estimated"]})
+        for t in divs:
+            d_ = ledger.tx_date(t)
+            if d_ > today - timedelta(days=365) and t["id"] in rz["per_div"]:
+                mo = months.setdefault(d_.isoformat()[:7], {"expected": 0.0, "received": 0.0, "items": []})
+                mo["received"] += rz["per_div"][t["id"]]["net"]
+        all_rec = list(rz["per_div"].values())
+        ytd = [rz["per_div"][t["id"]] for t in divs if t["id"] in rz["per_div"] and ledger.tx_date(t).year == today.year]
+        soon = [x for x in items if x["next"] and 0 <= x["next"]["days"] <= 90 and x["next"].get("expected_base")]
+        totals = {"annual": sum(x["annual_base"] or 0 for x in items),
+                  "next90": sum(x["next"]["expected_base"] for x in soon),
+                  "ytd_net": sum(r["net"] for r in ytd), "ytd_gross": sum(r["gross"] for r in ytd),
+                  "all_net": sum(r["net"] for r in all_rec),
+                  "value": sum(a["value"] for a in by_sym.values()),
+                  "payers": sum(1 for x in items if x["kind"] == "pays"),
+                  "missing": sum(1 for x in items for e in x["follow_up"] if e["status"] == "missing"),
+                  "awaiting": sum(1 for x in items for e in x["follow_up"] if e["status"] == "awaiting")}
+        totals["yield"] = totals["annual"] / totals["value"] * 100 if totals["value"] else None
+        return {"base": base, "items": items, "totals": totals,
+                "months": [{"month": k, **v} for k, v in sorted(months.items())], "as_of": time.time()}
+
     # ------------------------------------------------------------------ look-through exposure
     @app.get("/api/exposure")
     def exposure_view(base: str | None = None):
@@ -2180,7 +2291,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

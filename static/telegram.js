@@ -13,8 +13,9 @@ window.StonksTelegram = function (ctx) {
   };
   const EV = [["tp", "Target hit"], ["sl", "Stop hit"], ["brk", "Upside break ↑ (suggests raising the stop)"], ["brkdn", "Downside break ↓ (a support gave way)"], ["near", "Near target / near stop"],
     ["earnings", "Earnings coming up"], ["unmonitored", "Also for buys without any exit set"],
-    ["golden", "Golden cross 🌟 (50-day average rises above the 200-day)"], ["death", "Death cross 💀 (50-day average falls below the 200-day)"]];
-  const JOBS = { portfolio: "prices", levels: "levels", alerts: "alerts check", moves: "Highs & lows", boards: "heatmaps", earnings: "earnings", performance: "P&L history" };
+    ["golden", "Golden cross 🌟 (50-day average rises above the 200-day)"], ["death", "Death cross 💀 (50-day average falls below the 200-day)"],
+    ["dividend", "Dividends 💰 (ex-date coming soon, and payment day)"]];
+  const JOBS = { dividends: "dividends", portfolio: "prices", levels: "levels", alerts: "alerts check", moves: "Highs & lows", boards: "heatmaps", earnings: "earnings", performance: "P&L history" };
 
   async function load() {
     try { st = await api("/api/alerts"); } catch (e) { box.querySelector(".tgx-body").innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
@@ -61,7 +62,7 @@ window.StonksTelegram = function (ctx) {
       <div class="row tgx-row">
         <label class="field">Check every (min)<input type="number" min="5" max="1440" step="5" data-cfg="interval_min" value="${c.interval_min ?? 15}"></label>
         <label class="field" title="Empty = the 'Near' setting of this tab">Near within (%)<input type="number" min="0.5" max="50" step="0.5" data-cfg="near_pct" value="${c.near_pct ?? ""}" placeholder="tab setting"></label>
-        <label class="field">Earnings: days before<input type="number" min="0" max="30" data-cfg="earn_days" value="${c.earn_days ?? 3}"></label>
+        <label class="field">Earnings &amp; ex-dividend: days before<input type="number" min="0" max="30" data-cfg="earn_days" value="${c.earn_days ?? 3}"></label>
         <label class="field" title="Which tickers are checked for golden and death crosses">Crosses for<select data-cfg="cross_scope">
           <option value="all" ${(c.cross_scope || "all") === "all" ? "selected" : ""}>Holdings + Highs &amp; lows watch list</option>
           <option value="holdings" ${c.cross_scope === "holdings" ? "selected" : ""}>Holdings only</option></select></label>

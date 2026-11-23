@@ -761,7 +761,7 @@
     $("#refresh-btn").classList.add("spin");
     try {
       if (state.view === "markets") await loadMarkets(silent);
-      else if (state.view === "hours") await hours.load(silent);
+      else if (state.view === "hours") { divs.load(false); await hours.load(silent); }
       else if (state.view === "ta") await ta.refresh(silent);
       else await loadPortfolio(silent);
     } catch (err) {
@@ -1095,6 +1095,11 @@
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$,
   });
+
+  // ================================================================== dividends in Market hours (static/dividends.js)
+  const divs = window.StonksDividends({ api, esc, state, base, fmtMoney, fmtPrice, fmtNum, fmtDate, fmtPct,
+    openTx: (...a) => pf.openTx(...a), $ });
+  $("#h-go-divs").addEventListener("click", () => $("#h-divs-h").scrollIntoView({ behavior: "smooth", block: "start" }));
 
   // ================================================================== P&L history in Holdings (static/pnlhist.js)
   const pnlHist = window.StonksPnlHist({ api, esc, state, saveSettings, base, fmtMoney, fmtSigned, fmtPct, fmtDate, cls, $ });

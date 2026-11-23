@@ -31,7 +31,7 @@ log = logging.getLogger("stonks.alerts")
 DEFAULTS = {
     "enabled": True,
     "events": {"tp": True, "sl": True, "brk": True, "brkdn": True, "near": False, "earnings": True, "unmonitored": False,
-               "golden": True, "death": True},
+               "golden": True, "death": True, "dividend": True},
     "cross_scope": "all",      # golden / death crosses for: "all" = holdings + Highs & lows watch list, "holdings"
     "interval_min": 15,
     "near_pct": None,          # None = use the Sell targets setting (default 5)
@@ -168,7 +168,7 @@ def evaluate(rows: list[dict], fx: dict, levels: dict, near: float, fee_rules: d
 
 # ---------------------------------------------------------------------------------------------- messages
 EMO = {"tp": "✅", "sl": "🛑", "brk": "🚀", "brkdn": "📉", "near-tp": "🎯", "near-sl": "⚠️", "earnings": "📅",
-       "golden": "🌟", "death": "💀"}
+       "golden": "🌟", "death": "💀", "dividend": "💰"}
 TITLE = {"tp": "Target hit", "sl": "Stop hit", "brk": "Broke out", "brkdn": "Broke down", "near-tp": "Near target",
          "near-sl": "Near stop"}
 
@@ -277,6 +277,31 @@ def cross_message(x: dict, app_url: str | None = None) -> str:
                  "and in sideways markets it can flip back and forth.</i>")
     if app_url:
         lines.append(f'<a href="{e(app_url.rstrip("/"))}/#ta">Open Analysis</a>')
+    return "\n".join(lines)
+
+
+def dividend_message(x: dict, base: str, kind: str, app_url: str | None = None) -> str:
+    """kind "ex": the ex-dividend date is coming (own the units before it); "pay": the payment is due today."""
+    e, n = html.escape, x.get("next") or {}
+    c = x.get("currency")
+    if kind == "ex":
+        when = "today" if n["days"] == 0 else "tomorrow" if n["days"] == 1 else f"in {n['days']} days"
+        amt = (f"{fmt_money(n['amount'], c)} per share" + ("" if n.get("amount_known") else " (if it repeats the last payment)")
+               if n.get("amount") else "amount not announced")
+        lines = [f"💰 <b>{e(x['symbol'])} goes ex-dividend {when}</b> ({_d(n['ex'])})",
+                 f"{amt}" + (f" · paid {_d(n['pay'])}" if n.get("pay") else ""),
+                 f"You hold {fmt_num(x['units'], 4)} → about <b>{fmt_money(n['expected'], c)}</b> gross"
+                 + (f" ({fmt_money(n['expected_base'], base)})" if n.get("expected_base") is not None and c != base else ""),
+                 "<i>Units bought on or after the ex-date don't get this payment; selling before it gives it up.</i>"]
+    else:
+        p = x["pending_pay"]
+        pa = f"{fmt_money(p['amount'], c)} per share" if p.get("amount") else "amount not published"
+        lines = [f"💰 <b>{e(x['symbol'])} pays its dividend today</b> (ex-date {_d(p['ex'])})",
+                 f"{pa}" + (f" · about <b>{fmt_money(p['expected'], c)}</b> gross on the {fmt_num(p['units'], 4)} units you held then"
+                            if p.get("expected") is not None else ""),
+                 "<i>Record it under Dividend in the app when it reaches your broker (gross and tax withheld).</i>"]
+    if app_url:
+        lines.append(f'<a href="{e(app_url.rstrip("/"))}/#hours">Open Dividends</a>')
     return "\n".join(lines)
 
 
@@ -456,6 +481,23 @@ class Monitor:
                 if new and ev.get(i["state"]):
                     out.append({"kind": i["state"], "text": cross_message(x, cfg.get("app_url")), "key": None})
             st["cross"] = known
+            seen_div = st.get("div") or {}
+            if ev.get("dividend"):
+                for x in snap.get("dividends") or []:
+                    n = x.get("next")
+                    ok = n and not n.get("estimated") and n.get("days") is not None and x.get("units", 0) > 0
+                    if ok and 0 <= n["days"] <= (cfg.get("earn_days") or 3):     # only dates Yahoo published
+                        k = f"{x['symbol']}:ex:{n['ex']}"
+                        if k not in seen_div:
+                            seen_div[k] = now
+                            out.append({"kind": "dividend", "text": dividend_message(x, snap["base"], "ex", cfg.get("app_url")), "key": None})
+                    pp = x.get("pending_pay")
+                    if pp and pp.get("days") == 0:
+                        k = f"{x['symbol']}:pay:{pp['pay']}"
+                        if k not in seen_div:
+                            seen_div[k] = now
+                            out.append({"kind": "dividend", "text": dividend_message(x, snap["base"], "pay", cfg.get("app_url")), "key": None})
+            st["div"] = {k: v for k, v in seen_div.items() if now - v < 120 * 86400}
             sent = []
             if now >= muted or force:
                 for m in out:

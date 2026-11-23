@@ -5,7 +5,7 @@ A self-hosted market heatmap in the style of TradingView and finviz. The two hea
 - **Markets**: boards for world indices, index funds and ETFs, US mega caps, Europe, IBEX 35, macro (commodities, FX, rates) and crypto. You can create, rename, reorder and delete boards and add any Yahoo Finance symbol to them.
 - **My portfolio**: your own positions with market value, invested amount, unrealized P&L and today's P&L. Each position is a tile sized by value and colored by total P&L % or by price change over a period.
 
-**Analysis** is an interactive technical-analysis chart for any ticker. **Market hours** shows which exchanges are open right now, with countdowns to the next open or close, a 24-hour session timeline, lunch breaks, holidays and early closes.
+**Analysis** is an interactive technical-analysis chart for any ticker. **Market hours** shows which exchanges are open right now, with countdowns to the next open or close, a 24-hour session timeline, lunch breaks, holidays and early closes, and the **dividends** of your holdings.
 
 All values can be shown in **EUR or USD**. Positions in other currencies are converted at live FX rates, and GBp/ZAc/ILA quotes are normalized to their major unit.
 
@@ -244,6 +244,27 @@ The size and group choices are saved per board. Period, range and currency are g
 - **Choose markets** picks from about 30 exchanges plus FX, CME Globex and crypto.
 - Below the timeline is a list of holidays and early closes for the next 14 days.
 
+**Dividends** (Market hours, **💰 Dividends ↓**) follows the payouts of everything you hold:
+
+- **Words used.** The *ex-dividend date* (ex-date) is the first day a buyer no longer gets the coming payment: you must own the units **before** it, and the units you held then are what you're paid on. The *pay date* is when the cash arrives, usually 1–6 weeks later.
+- **Summary boxes:**
+  - what you can expect per year, gross: each payer's latest regular amount × its frequency × your units;
+  - what's due in the next 90 days;
+  - what you've received this year and all-time, as recorded;
+  - how many past payments are still to record.
+- **Monthly bars:** received dividends for the last 12 months (recorded, net), and expected ones for the next 12 (gross, by ex-date month). Hover a month for the detail.
+- **One row per payer:**
+  - frequency (quarterly, twice a year…) and last ex-date with its amount per share;
+  - next ex-date, and its payment date when Yahoo has published it. Otherwise it's marked *est.*, estimated from the usual spacing with the last amount;
+  - your units and the expected gross amount;
+  - TTM (trailing twelve months) yield: last year's dividends ÷ today's price;
+  - yield on cost: the yearly payout rate on what you paid;
+  - estimated income per year, and what you've recorded.
+- **Click a row** for its payment history and **your payments**: every ex-date of the last 2 years you held units for, with the units you held then and the expected gross. Each one shows *Recorded* (a dividend of that ticker recorded from 5 days before to 75 days after the ex-date), *Awaiting payment* (ex-date less than 45 days ago) or *Not recorded*. **Record** opens the Dividend dialog prefilled with the expected gross and currency; replace them with what your broker paid and the tax withheld.
+- **Funds that don't pay out:** accumulating funds (*Acc* in the name) and funds without distributions are listed apart, as are stocks without a dividend and crypto. A fund priced from another listing (*via IBCF.DE*) uses that listing's dividends.
+- **Telegram:** the *Dividends 💰* alert (on by default) tells you N days before a published ex-date (the *Earnings & ex-dividend: days before* setting), with your units and the expected amount, and on the payment day. Estimated dates never trigger alerts.
+- **Data:** Yahoo's dividend history and calendar, cached 12 hours, refreshed in the background every 3 hours. Amounts are gross per share in the listing's currency; the payment you get is net of tax withheld at source (for example 15% on US stocks with the W-8BEN form, the US tax treaty form) and converted by your broker.
+
 Schedules come from [`exchange_calendars`](https://github.com/gerrymanoim/exchange_calendars). Its holiday data ships with each release, and a few exchanges (Shanghai, Mumbai, Singapore) only have holidays recorded through the current year. When that data runs out, the row shows "calendar outdated"; rebuild with `--pull` to update it. FX (Sunday 17:00 to Friday 17:00 New York time), CME Globex (Sunday to Thursday 18:00 to 17:00 New York time) and crypto (24/7) follow fixed weekly rules and ignore holidays. US pre-market (04:00) and after-hours (until 20:00 ET) are shown for NYSE / Nasdaq.
 
 **Settings.** Choose between the classic red/green scheme and a colorblind-safe red/blue scheme, ticker or name labels, the auto-refresh interval (off, 30 s, 1 min, 5 min or 15 min), and JSON export/import.
@@ -286,6 +307,7 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | GET | `/api/risk?base=EUR&years=3` | Risk of today's mix: volatility, drawdowns, beta, per-holding risk share and correlation, concentration, crisis scenarios |
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
+| GET | `/api/dividends?base=EUR` | Per holding: payout frequency, last and next ex-date and payment, expected amount, TTM yield, yield on cost, recorded dividends, past ex-dates to record; monthly received / expected; totals |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

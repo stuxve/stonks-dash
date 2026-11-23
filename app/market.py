@@ -345,6 +345,28 @@ class YahooProvider:
             log.info("earnings dates %s failed: %s", symbol, e)
         return out if (out["next"] or out["history"]) else {}
 
+    def dividends(self, symbol: str) -> dict:
+        """Past dividends per share (ex-date, amount in the listing's currency as Yahoo quotes it, e.g. GBp) and
+        the next ex-dividend / payment date when Yahoo's calendar has them."""
+        t = self.yf.Ticker(symbol)
+        out: dict = {"history": [], "ex_div": None, "pay_date": None}
+        try:
+            d = t.dividends
+            if d is not None and len(d):
+                out["history"] = [[pd.Timestamp(i).date().isoformat(), float(v)] for i, v in d.items()
+                                  if v is not None and not pd.isna(v) and float(v) > 0][-60:]
+        except Exception as e:  # noqa: BLE001
+            log.info("dividends %s failed: %s", symbol, e)
+            raise
+        try:
+            cal = t.calendar or {}
+            for k, dst in (("Ex-Dividend Date", "ex_div"), ("Dividend Date", "pay_date")):
+                if cal.get(k):
+                    out[dst] = pd.Timestamp(cal[k]).date().isoformat()
+        except Exception as e:  # noqa: BLE001
+            log.info("dividend calendar %s failed: %s", symbol, e)
+        return out
+
     def fund(self, symbol: str) -> dict | None:
         """Top holdings, sector weights, asset classes and expense ratio of an ETF / mutual fund."""
         try:
@@ -694,6 +716,28 @@ class MockProvider:
                          "surprise": round((act / est - 1) * 100, 2)})
         return {"next": [nxt.isoformat()], "eps_est": round(float(r.uniform(0.5, 3)), 2), "rev_est": None,
                 "ex_div": None, "div_date": None, "history": hist}
+
+    def dividends(self, symbol: str) -> dict:
+        """Quarterly payers among stocks (about 60%), a few semi-annual European ones; ETFs here accumulate."""
+        if self._quote_type(symbol) != "EQUITY":
+            return {"history": [], "ex_div": None, "pay_date": None}
+        r = np.random.default_rng(self._seed(symbol) + 23)
+        if r.random() > 0.6:
+            return {"history": [], "ex_div": None, "pay_date": None}
+        per_year = 2 if "." in symbol and r.random() < 0.5 else 4
+        gap = 365 // per_year
+        today = date.today()
+        nxt = today + timedelta(days=int(r.integers(2, gap)))
+        amt = round(self._base_level(symbol) * float(r.uniform(0.004, 0.012)), 4)
+        hist = []
+        for i in range(1, 4 * per_year + 1):
+            hist.append([(nxt - timedelta(days=gap * i)).isoformat(), round(amt * (1 - 0.015 * (i // per_year)), 4)])
+        hist.sort()
+        cur = self._currency(symbol)
+        if cur == "GBp":
+            hist = [[d, v * 100] for d, v in hist]
+        return {"history": hist, "ex_div": nxt.isoformat() if r.random() < 0.7 else None,
+                "pay_date": (nxt + timedelta(days=int(r.integers(10, 30)))).isoformat() if r.random() < 0.5 else None}
 
     def _country(self, sym: str) -> str:
         for suf, c in ((".DE", "Germany"), (".AS", "Netherlands"), (".PA", "France"), (".MC", "Spain"),
@@ -1112,6 +1156,43 @@ class QuoteEngine:
             old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
             have.update({s: old[keys[s]] for s in stale if keys[s] in old})
         return have
+
+    def dividends(self, symbols: list[str], ttl: float = 12 * 3600) -> dict[str, dict]:
+        """Dividend history and calendar per symbol (cached 12 h in SQLite), amounts in MAJOR currency units.
+        A symbol priced from another listing (IBCF.MU via IBCF.DE) takes that listing's dividends: same fund."""
+        symbols = list(dict.fromkeys(symbols))
+        src = {s: self.sources.get(s, s) for s in symbols}
+        keys = {s: f"div:{src[s]}" for s in symbols}
+        raw = self.db.get_meta(list(set(keys.values())), ttl)
+        have = {s: raw[k] for s, k in keys.items() if k in raw}
+        now = time.time()
+        todo = sorted({src[s] for s in symbols if s not in have and now - self._meta_miss.get(keys[s], 0) > self.meta_retry})
+        if todo and hasattr(self.p, "dividends"):
+            def fetch(s):
+                try:
+                    return s, self.p.dividends(s)
+                except Exception as e:  # noqa: BLE001
+                    log.info("dividends %s failed: %s", s, e)
+                    return s, None
+            got = {}
+            with ThreadPoolExecutor(max_workers=min(self.workers, 4)) as ex:
+                for s, d in ex.map(fetch, todo):
+                    if d is None:
+                        self._meta_miss[f"div:{s}"] = time.time()
+                    else:
+                        self.db.put_meta(f"div:{s}", d)
+                        got[s] = d
+            have.update({s: got[src[s]] for s in symbols if src[s] in got})
+        stale = [s for s in symbols if s not in have]
+        if stale:
+            old = self.db.get_meta([keys[s] for s in stale], max_age=60 * 86400)
+            have.update({s: old[keys[s]] for s in stale if keys[s] in old})
+        meta = self.meta(list(set(src.values())))
+        out = {}
+        for s, d in have.items():
+            _, div = normalize_currency((meta.get(src[s]) or {}).get("currency"))
+            out[s] = {**d, "history": [[x, v / div] for x, v in d.get("history") or []], "source": src[s] if src[s] != s else None}
+        return out
 
     # ---- metadata ----
     def meta(self, symbols: list[str]) -> dict[str, dict]:

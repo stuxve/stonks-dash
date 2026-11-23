@@ -684,3 +684,29 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .wk-badge.wk-ok::before { color: var(--up); }
 .wk-badge.wk-warn::before { color: #f5a623; }
 .wk-badge.wk-bad::before { color: var(--down); }
+
+/* ---------- Market hours: dividends (static/dividends.js) ---------- */
+.dv { margin-top: 10px; }
+.dv .loading, .dv .empty { padding: 24px; color: var(--muted); text-align: center; }
+.dv-months { display: grid; grid-template-columns: repeat(24, minmax(0, 1fr)); gap: 3px; height: 110px; align-items: end; margin: 4px 0 2px; }
+.dv-m { display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; cursor: help; }
+.dv-m span { font-size: 10px; color: var(--muted); margin-top: 3px; }
+.dv-m.cur span { color: var(--text-strong); font-weight: 600; }
+.dv-bar { width: 100%; min-height: 1px; border-radius: 3px 3px 0 0; }
+.dv-m.past .dv-bar { background: var(--up); opacity: .75; }
+.dv-m.fut .dv-bar { background: repeating-linear-gradient(135deg, rgba(48,204,90,.45) 0 4px, rgba(48,204,90,.15) 4px 8px); border: 1px solid rgba(48,204,90,.6); border-bottom: 0; }
+.dv-mleg { margin: 0 0 12px; }
+.dv-sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; vertical-align: -1px; margin: 0 3px 0 8px; }
+.dv-sw.past { background: var(--up); opacity: .75; }
+.dv-sw.fut { border: 1px solid rgba(48,204,90,.6); background: rgba(48,204,90,.25); }
+.dv-table .dv-row { cursor: pointer; }
+.dv-table td { vertical-align: middle; }
+.dv-table .exp { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px 0 0; }
+.dv-est { color: #f5a623; }
+.dv-others { margin: 10px 0; font-size: 13px; line-height: 2; }
+.dv-det { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20px; padding: 6px 4px 10px; font-size: 13px; }
+.dv-hist { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.dv-fu { margin-top: 6px; }
+.dv-fu td { font-size: 12.5px; }
+.dv-m span { white-space: nowrap; overflow: hidden; max-width: 100%; }
+@media (max-width: 900px) { .dv-det { grid-template-columns: 1fr; } .dv-months { height: 80px; gap: 1px; } .dv-m:not(:nth-child(3n+1)) span { visibility: hidden; } }
