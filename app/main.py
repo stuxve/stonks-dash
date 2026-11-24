@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 import re
@@ -18,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .db import DB
-from . import alerts, crosses, dividends, exposure, ideas, ledger, levels, risk, sec, seeds, tax, valuation
+from . import alerts, crosses, dividends, exposure, implied, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from . import worker as wk
 from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
@@ -1926,10 +1927,74 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                          "time": blk.get("time") if blk else None, "change_pct": ch, "impact": imp})
         rows.sort(key=lambda r: (not r["held"], -(abs(r["impact"] or 0)), -(abs(r["change_pct"] or 0))))
         us_value = sum(r["value"] or 0 for r in rows if r["held"])
-        return {"base": base, "phase": phase, "futures": futures, "rows": rows,
-                "totals": {"impact": impact, "us_value": us_value, "impact_pct": impact / us_value * 100 if us_value else None,
+        etfs = _etf_estimates(held, meta, quotes, fx, us)
+        etf_impact = sum(r["impact"] or 0 for r in etfs)
+        return {"base": base, "phase": phase, "futures": futures, "rows": rows, "etfs": etfs,
+                "totals": {"etf_impact": etf_impact, "etf_value": sum(r["value"] or 0 for r in etfs if r["impact"] is not None),
+                           "impact": impact, "us_value": us_value, "impact_pct": impact / us_value * 100 if us_value else None,
                            "portfolio_pct": impact / port["totals"]["value"] * 100 if port["totals"].get("value") else None},
                 "as_of": time.time()}
+
+    def _fund_session(sym: str):
+        """(time zone, open, close) of a European fund listing; German regional listings follow Xetra."""
+        sfx = sym.rsplit(".", 1)[-1] if "." in sym else ""
+        if sfx in ("L", "IL"):
+            return "Europe/London", (8, 0), (16, 30)
+        return "Europe/Madrid", (9, 0), (17, 30)
+
+    def _etf_estimates(held: dict, meta: dict, quotes: dict, fx: dict, us: list) -> list[dict]:
+        """Funds you hold that aren't US listings: while their exchange is closed, the move their markets and
+        currencies have made since the fund's last close (app/implied.py); while it's open, their own price."""
+        overrides = db.get_settings().get("fund_profiles") or {}
+        out, need, plan = [], set(), {}
+        now = app.state.clock() if getattr(app.state, "clock", None) else pd.Timestamp.now(tz="UTC")   # tests set a clock
+        for s_, h in held.items():
+            m, q = meta.get(s_) or {}, quotes.get(s_)
+            qt = (q.quote_type if q else None) or m.get("quote_type")
+            if s_ in us or qt not in ("ETF", "MUTUALFUND") or not (q and q.ok):
+                continue
+            name = m.get("long_name") or m.get("name") or h.get("name") or s_
+            _, prof = exposure.fund_profile(s_, {"display_name": h.get("name")}, m, {}, overrides)
+            P = exposure.PROFILES.get(prof) or {}
+            ccy = q.currency
+            hedged = exposure.hedge_currency(name, ccy) == ccy
+            g = ({"Gold": ("GC=F", "Gold futures", "USD", 1.0)} if prof == "gold"
+                 else {} if P.get("asset") == "Bonds" else implied.gauges_for(P.get("countries") or {}, nasdaq=prof == "nasdaq100"))
+            tz, op, cl = _fund_session(engine.sources.get(s_, s_))
+            local = now.tz_convert(tz)
+            last_day = pd.Timestamp(q.last_date) if q.last_date else local.normalize().tz_localize(None)
+            t0 = pd.Timestamp(last_day.date()).tz_localize(tz) + pd.Timedelta(hours=cl[0], minutes=cl[1])
+            is_open = local.weekday() < 5 and op <= (local.hour, local.minute) < cl and last_day.date() == local.date()
+            plan[s_] = (h, q, name, prof, P, hedged, g, t0, is_open)
+            if not is_open:
+                need |= {v[0] for v in g.values()}
+                if not hedged:
+                    need |= {f"{ccy}{c}=X" for c in implied.FX_CCYS if c != ccy}
+        series = {}
+        if need:
+            with ThreadPoolExecutor(max_workers=4) as ex:
+                for s_, ser in zip(sorted(need), ex.map(lambda x: engine.intraday(x, "5d", "30m", 300), sorted(need))):
+                    series[s_] = ser
+        for s_, (h, q, name, prof, P, hedged, g, t0, is_open) in plan.items():
+            ccy, rate = q.currency, fx.get(q.currency)
+            row = {"symbol": s_, "name": name, "currency": ccy, "profile": P.get("label") or prof, "hedged": hedged,
+                   "units": h["units"], "value": h["value"], "state": "open" if is_open else "closed",
+                   "last_close": q.price, "last_close_at": int(t0.timestamp() * 1000), "move_pct": None,
+                   "est_price": None, "impact": None, "drivers": [], "day_pct": (q.changes or {}).get("1D")}
+            if not is_open and g:
+                moves = {v[0]: implied.move_since(series.get(v[0]), t0) for v in g.values()}
+                fxm = {c: implied.move_since(series.get(f"{ccy}{c}=X"), t0) for c in implied.FX_CCYS if c != ccy}
+                est = implied.estimate(g, moves, {k: v for k, v in fxm.items() if v is not None}, ccy, hedged)
+                if est["move"] is not None:
+                    row.update(move_pct=est["move"] * 100, est_price=q.price * (1 + est["move"]),
+                               impact=h["units"] * q.price * est["move"] * rate if rate else None,
+                               covered_pct=est["covered"] * 100,
+                               drivers=[{"country": d["country"], "label": d["label"], "weight_pct": d["weight"] * 100,
+                                         "market_pct": d["market"] * 100, "fx_pct": d["fx"] * 100,
+                                         "contribution_pct": d["contribution"] * 100} for d in est["drivers"][:8]])
+            out.append(row)
+        out.sort(key=lambda r: -(r["value"] or 0))
+        return out
 
     # ------------------------------------------------------------------ detail chart (symbol sheet, mobile-first)
     CHART_RANGES = {   # range: (intraday period, bar, cache seconds) — None = daily closes

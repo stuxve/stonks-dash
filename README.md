@@ -269,7 +269,14 @@ The size and group choices are saved per board. Period, range and currency are g
   - the change against the regular close;
   - what the move means for your position in your currency, and the total: "if the US open matched these prices".
 - **Elsewhere in the app.** The same move appears as a small *pre −0.4%* / *after +1.1%* badge in Holdings, and as a line under the price in the ticker sheet.
-- **Data.** From Yahoo's quote for each ticker, refreshed every 30 s while a page shows it. Yahoo has no pre-market for European listings; some brokers, such as Trade Republic, quote them from 07:30 on their own venue.
+- **Your ETFs listed in Europe** (VWCE.DE, IWDA.AS, IS3N.DE…). Their exchange (Xetra, Euronext: 09:00–17:30) is closed most of the day, so they get an **indicative value**: each country's weight in the fund × that market's move since the fund's last close, converted into the fund's currency.
+  - **Weights** come from the fund's index profile, the same one used in Exposure (MSCI World ≈ 72% US, 5% Japan…). Countries without a gauge are left out and the rest is scaled back to 100%.
+  - **Gauges:** S&P 500 futures for the US (Nasdaq 100 futures for Nasdaq funds), Nikkei 225 for Japan, Hang Seng for China, and so on. A market that hasn't traded since the fund's last close counts as unchanged: Europe before 09:00 contributes 0.
+  - **Currency:** funds that aren't hedged gain when the dollar, yen and so on rise against the fund's currency. *EUR Hedged* classes ignore currency.
+  - **Display:** the estimated price, the move, and what it means for your position. Tap ▸ for each country's contribution. Holdings shows a dashed *est +0.4%* badge, and the ticker sheet shows an *Indicative now* line.
+  - **Open hours:** while the exchange is open, the fund's own live price is shown instead.
+  - **Caveat:** it is an estimate, not a quote. The real opening price also reflects spreads and demand.
+- **Data.** From Yahoo's quote for each ticker, refreshed every 30 s while a page shows it. Yahoo has no pre-market trades for European listings. Some brokers, such as Trade Republic, quote them from 07:30 on their own venue, which is why the indicative value above exists.
 
 **Dividends** (Market hours, **💰 Dividends ↓**) follows the payouts of everything you hold:
 

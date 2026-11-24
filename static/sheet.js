@@ -134,7 +134,7 @@
       const el = dlg.open || cur ? $("#sh-ext") : null;
       if (!el || !cur) return;
       const r = ctx.ext?.(cur.symbol);
-      el.innerHTML = r && r.price != null ? `${r.kind === "pre" ? "Pre-market" : "After-hours"} <b>${esc(fmtPrice(r.price, r.currency))}</b>
+      el.innerHTML = r && r.price != null ? `${r.kind === "est" ? `<span title="Its exchange is closed: estimated from ${esc((r.drivers || []).slice(0, 3).map((d) => d.label).join(", "))} since its last close">Indicative now</span>` : r.kind === "pre" ? "Pre-market" : "After-hours"} <b>${esc(fmtPrice(r.price, r.currency))}</b>
         <span class="${cls(r.change_pct)}">${r.change_pct > 0 ? "▲" : r.change_pct < 0 ? "▼" : ""} ${Math.abs(r.change_pct).toFixed(2)} %</span>${r.time ? ` · ${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(r.time * 1000)}` : ""}` : "";
     }
     async function load() {

@@ -211,3 +211,36 @@ def test_premarket_endpoint(client):
             assert abs(r["impact"]) < r["value"]
     assert d["totals"]["impact"] == pytest.approx(sum(r["impact"] or 0 for r in d["rows"]))
     assert next(r for r in d["rows"] if r["symbol"] == "AAPL")["impact"] is None   # watch only: no P&L
+
+
+def test_implied_etf_move_math():
+    import pandas as pd
+    from app import implied
+    g = implied.gauges_for({"United States": 70.0, "Japan": 10.0, "Other": 20.0})
+    assert set(g) == {"United States", "Japan"} and g["United States"][3] == pytest.approx(0.875)
+    t0 = pd.Timestamp("2026-11-23 16:30", tz="UTC")
+    idx = pd.date_range("2026-11-23 12:00", periods=40, freq="30min", tz="UTC")
+    es = pd.Series(100.0, index=idx); es.iloc[-1] = 101.0                  # +1% since t0
+    nk = pd.Series(200.0, index=idx); nk.iloc[-1] = 196.0                  # −2%
+    usd = pd.Series(1.10, index=idx); usd.iloc[-1] = 1.10 * 1.005          # EURUSD +0.5%: dollar weaker
+    assert implied.move_since(es, t0) == pytest.approx(0.01)
+    assert implied.move_since(es, pd.Timestamp("2026-11-20", tz="UTC")) is None   # no bar that early
+    m = {"ES=F": implied.move_since(es, t0), "^N225": implied.move_since(nk, t0)}
+    fx = {"USD": implied.move_since(usd, t0)}
+    hedged = implied.estimate(g, m, fx, "EUR", hedged=True)
+    assert hedged["move"] == pytest.approx(0.875 * 0.01 + 0.125 * -0.02)
+    unhedged = implied.estimate(g, m, fx, "EUR", hedged=False)
+    us = next(d for d in unhedged["drivers"] if d["country"] == "United States")
+    assert us["fx"] == pytest.approx(1 / 1.005 - 1) and unhedged["move"] < hedged["move"]
+
+
+def test_premarket_includes_european_etfs(client):
+    import pandas as pd
+    client.app.state.clock = lambda: pd.Timestamp.now(tz="Europe/Madrid").normalize().tz_convert("UTC") + pd.Timedelta(hours=22)
+    d = client.get("/api/premarket?base=EUR").json()
+    syms = {r["symbol"]: r for r in d["etfs"]}
+    assert {"VWCE.DE", "IWDA.AS", "IS3N.DE"} <= set(syms) and "MSFT" not in syms
+    r = syms["IWDA.AS"]
+    assert r["state"] == "closed" and r["profile"].startswith("MSCI World") and r["move_pct"] is not None
+    assert r["drivers"][0]["country"] == "United States" and r["drivers"][0]["label"] == "S&P 500 futures"
+    assert sum(x["weight_pct"] for x in r["drivers"]) <= 100.01

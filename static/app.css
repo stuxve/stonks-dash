@@ -892,3 +892,19 @@ svg.lc, .pnlh-svg { touch-action: pan-y; }
   .pm-futs::-webkit-scrollbar { display: none; }
   .pm-fut { flex: 0 0 150px; scroll-snap-align: start; }
 }
+
+.pm-badge.est { border-style: dashed; background: rgba(201,162,39,.08); border-color: rgba(201,162,39,.5); }
+.pm-h { margin: 18px 0 4px; font-size: 14px; color: var(--text-strong); }
+.pm-etf { cursor: pointer; }
+.pm-etf .exp { background: none; border: 0; color: var(--muted); cursor: pointer; padding: 0 4px 0 0; }
+.pm-drv { display: grid; gap: 4px; font-size: 12.5px; }
+.pm-drv > div { display: grid; grid-template-columns: 1fr 70px 80px 70px; gap: 8px; align-items: baseline; font-variant-numeric: tabular-nums; }
+.pm-drv > div > :not(:first-child) { text-align: right; }
+.pm-drv i { color: var(--muted); font-style: normal; }
+@media (max-width: 720px) { .pm-drv > div { grid-template-columns: 1fr 58px 62px 58px; font-size: 12px; } }
+table.grid .pm-det td { white-space: normal; }
+.pm-det .hint { margin: 6px 0 0; }
+@media (max-width: 720px) {
+  .pm-table th:nth-child(2), .pm-table tr:not(.pm-det) > td:nth-child(2) { display: none; }   /* last close: the change says it */
+  .pm-table th, .pm-table td { padding: 7px 6px; }
+}

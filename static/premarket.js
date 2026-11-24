@@ -8,7 +8,12 @@ window.StonksPremarket = function (ctx) {
   const box = $("#h-pre");
   let data = null, at = 0, key = "", loading = false;
   const listeners = [];
-  const bySym = () => Object.fromEntries((data?.rows || []).map((r) => [r.symbol, r]));
+  // US listings: real pre-market / after-hours trades; European funds while closed: the indicative estimate
+  const bySym = () => Object.fromEntries((data?.rows || []).map((r) => [r.symbol, r]).concat((data?.etfs || [])
+    .filter((e) => e.state === "closed" && e.move_pct != null)
+    .map((e) => [e.symbol, { kind: "est", price: e.est_price, change_pct: e.move_pct, currency: e.currency, time: null, drivers: e.drivers, regular: e.last_close }])));
+  const openRows = new Set();
+  const driversTxt = (ds) => (ds || []).slice(0, 3).map((d) => d.label).join(", ");
 
   async function load(force) {
     const k = base();
@@ -69,11 +74,41 @@ window.StonksPremarket = function (ctx) {
     const sum = held.some((r) => r.impact != null) ? `<p class="pm-sum">If the US open matched these prices: <b class="${cls(t.impact)}">${fmtSigned(t.impact, b)}</b> on your US holdings
         (${fmtPct(t.impact_pct)}), ${fmtPct(t.portfolio_pct)} of your whole portfolio.</p>` : "";
     box.innerHTML = `<div class="pm-phase">${phaseLine(data.phase)}</div>
-      <div class="pm-futs">${fut}</div>${sum}${table}
+      <div class="pm-futs">${fut}</div>${sum}${table}${etfTable()}
       <p class="hint">US pre-market runs 04:00–09:30 and after-hours 16:00–20:00 New York time (${hm(nyToday(4))}–${hm(nyToday(9.5))} and ${hm(nyToday(16))}–${hm(nyToday(20))} your time).
         Fewer trades happen then, so prices jump more and the open can differ. Futures on the S&amp;P 500, Nasdaq 100, Dow and Russell 2000 trade almost round the clock and show where Wall Street is heading; the VIX is the market's expected volatility.
         European listings have no pre-market on Yahoo (some brokers, like Trade Republic, quote them from 07:30 on their own venue). Tap a row for its chart.</p>`;
   }
+  // European-listed funds: indicative move while their exchange (Xetra, Euronext… 09:00–17:30) is closed
+  function etfTable() {
+    const E = data.etfs || [];
+    if (!E.length) return "";
+    const b = data.base, t = data.totals;
+    const closed = E.filter((e) => e.state === "closed");
+    const row = (e) => {
+      const est = e.state === "closed" && e.move_pct != null;
+      const open = openRows.has(e.symbol);
+      const det = open && est ? `<tr class="pm-det"><td colspan="5"><div class="pm-drv">${e.drivers.map((d) => `<div><span>${esc(d.country)} <i>${d.weight_pct.toFixed(0)}%</i> · ${esc(d.label)}</span>
+          <span class="${cls(d.market_pct)}">${fmtPct(d.market_pct)}</span>${e.hedged ? "" : `<span class="sub" title="Currency against ${esc(e.currency)}">fx ${fmtPct(d.fx_pct)}</span>`}
+          <b class="${cls(d.contribution_pct)}">${fmtPct(d.contribution_pct)}</b></div>`).join("")}</div>
+          <p class="hint">Weights from the fund's index profile (${esc(e.profile)}${e.covered_pct < 99.9 ? `; ${e.covered_pct.toFixed(0)}% of it has a gauge, scaled to 100%` : ""}), moves since its last close at ${esc(when(e.last_close_at))}.
+          ${e.hedged ? "Currency-hedged: exchange rates left out." : "Not hedged: a stronger dollar, yen… raises it in " + esc(e.currency) + "."} Change the profile in Exposure if it's wrong.</p></td></tr>` : "";
+      return `<tr class="pm-etf" data-sym="${esc(e.symbol)}"><td class="asset">${est ? `<button class="exp">${open ? "▾" : "▸"}</button>` : ""}<b>${esc(e.symbol)}</b>${e.hedged ? ' <span class="pill" title="Currency-hedged share class">hedged</span>' : ""}<div class="sub">${esc(e.profile)}</div></td>
+        <td class="num">${fmtPrice(e.last_close, e.currency)}<div class="sub">${e.state === "open" ? "trading now" : `close ${esc(when(e.last_close_at))}`}</div></td>
+        <td class="num">${est ? `<b>${fmtPrice(e.est_price, e.currency)}</b><div class="sub" title="${esc(driversTxt(e.drivers))}">indicative</div>` : e.state === "open" ? '<span class="sub">live price</span>' : '<span class="sub">no gauge</span>'}</td>
+        <td class="num ${cls(est ? e.move_pct : e.day_pct)}">${est ? fmtPct(e.move_pct) : e.state === "open" ? `${fmtPct(e.day_pct)}<div class="sub">today</div>` : "—"}</td>
+        <td class="num ${cls(e.impact)}">${e.impact == null ? "" : fmtSigned(e.impact, b)}</td></tr>${det}`;
+    };
+    const sum = closed.some((e) => e.impact != null) ? `<p class="pm-sum">Indicative for your European-listed funds: <b class="${cls(t.etf_impact)}">${fmtSigned(t.etf_impact, b)}</b>
+      (${fmtPct(t.etf_value ? t.etf_impact / t.etf_value * 100 : null)}) since their last close.</p>` : "";
+    return `<h4 class="pm-h">Your ETFs listed in Europe <span class="hint">· estimated from the markets they hold while their exchange is closed (09:00–17:30)</span></h4>${sum}
+      <div class="table-wrap"><table class="grid pm-table"><thead><tr><th>Fund</th><th class="num">Last close</th><th class="num">Now (est.)</th><th class="num">Move</th><th class="num">Your P&amp;L</th></tr></thead>
+      <tbody>${E.map(row).join("")}</tbody></table></div>
+      <p class="hint">Indicative value = each country's weight in the fund × that market's move since the fund last traded (US: S&amp;P 500 futures, Japan: Nikkei 225, China: Hang Seng…), converted into the fund's currency unless it's hedged.
+        Markets that haven't traded since (Europe before 09:00) count as unchanged. It's an estimate, not a quote: the real opening price also reflects spreads and demand. Tap ▸ for the breakdown.</p>`;
+  }
+  function when(ms) { const d = new Date(ms), t = new Date(); return d.toDateString() === t.toDateString() ? hm(ms) : `${tfmt(ms, { weekday: "short" })} ${hm(ms)}`; }
+
   // a New York wall-clock hour today, as a timestamp in this browser's zone
   function nyToday(h) {
     const now = new Date();
@@ -84,6 +119,12 @@ window.StonksPremarket = function (ctx) {
   }
 
   box?.addEventListener("click", (e) => {
+    const x = e.target.closest(".pm-etf[data-sym]");
+    if (x) {
+      if (e.target.closest(".exp")) { const s = x.dataset.sym; openRows.has(s) ? openRows.delete(s) : openRows.add(s); draw(); }
+      else ctx.openSheet(x.dataset.sym);
+      return;
+    }
     const r = e.target.closest(".pm-row[data-sym]");
     if (r) ctx.openSheet(r.dataset.sym);
   });
@@ -92,6 +133,9 @@ window.StonksPremarket = function (ctx) {
   function badge(sym, cur) {
     const r = state.pre?.[sym];
     if (!r || r.price == null || r.change_pct == null) return "";
+    if (r.kind === "est") {
+      return `<span class="pm-badge est ${cls(r.change_pct)}" title="Exchange closed. Indicative ${esc(fmtPrice(r.price, r.currency))} from the markets this fund holds (${esc(driversTxt(r.drivers))}) since its last close — an estimate, not a trade">est ${fmtPct(r.change_pct)}</span>`;
+    }
     return `<span class="pm-badge ${cls(r.change_pct)}" title="${r.kind === "pre" ? "Pre-market" : "After-hours"} price ${esc(fmtPrice(r.price, cur || r.currency))}${r.time ? ` at ${hm(r.time * 1000)}` : ""}, vs ${r.kind === "post" ? "today's" : "the last"} close">${r.kind === "pre" ? "pre" : "after"} ${fmtPct(r.change_pct)}</span>`;
   }
   return { load, draw, badge, row: (sym) => state.pre?.[sym], onChange: (f) => listeners.push(f) };
