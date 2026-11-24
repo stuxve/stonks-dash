@@ -1584,7 +1584,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         snap.refresh("crosses", _crosses)
         monitor.check()
 
-    _watch_re = re.compile(r"^(port:[A-Z]{3}|heat:\d{1,9}:[A-Z]{3}|divs:[A-Z]{3})$")
+    _watch_re = re.compile(r"^(port:[A-Z]{3}|heat:\d{1,9}:[A-Z]{3}|divs:[A-Z]{3}|pre:[A-Z]{3})$")
 
     def _refresh_key(key: str):
         kind, *rest = key.split(":")
@@ -1594,6 +1594,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             snap.refresh(key, lambda: _heatmap(int(rest[0]), rest[1]))
         elif kind == "divs":
             snap.refresh(key, lambda: _dividends(rest[0]))
+        elif kind == "pre":
+            snap.refresh(key, lambda: _premarket(rest[0]))
 
     def _job_live():
         """Results open pages are showing: refresh each one every live_seconds (dividends: every 10 min)."""
@@ -1602,7 +1604,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         engine.recent_ttl = min(BASE_QUOTE_TTL, max(5.0, live - 2)) if watched else BASE_QUOTE_TTL
         for key in sorted(watched):
             age = snap.age(key)
-            if age is None or age >= (600 if key.startswith("divs:") else live - 1):
+            if age is None or age >= (600 if key.startswith("divs:") else max(live - 1, 30) if key.startswith("pre:") else live - 1):
                 try:
                     _refresh_key(key)
                 except HTTPException:
@@ -1671,7 +1673,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                     except asyncio.TimeoutError:
                         yield ": ping\n\n"
                         continue
-                    if ev["kind"] == "update" and ev["key"] not in keys and not ev["key"].startswith("divs:"):
+                    if ev["kind"] == "update" and ev["key"] not in keys and not ev["key"].startswith(("divs:", "pre:")):
                         continue                          # only what this page shows
                     n += 1
                     yield fmt(ev["kind"], ev)
@@ -1845,6 +1847,90 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                               "quote_type": q.quote_type if q else None}
         return {"symbols": out, "missing": missing, "extra": extra_info, "as_of": time.time()}
 
+    # ------------------------------------------------------------------ US pre-market & after-hours
+    US_EXCHANGES = {"NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS"}
+
+    def _us_exchange(ex: str | None) -> bool | None:
+        """Yahoo exchange code (NMS) or full name (NasdaqGS, NYSE Arca…); None when unknown (e.g. demo data)."""
+        if not ex or ex == "MOCK":
+            return None
+        return ex.upper() in US_EXCHANGES or any(k in ex.upper() for k in ("NASDAQ", "NYSE", "BATS", "CBOE"))
+    PRE_FUTURES = [("ES=F", "S&P 500 futures"), ("NQ=F", "Nasdaq 100 futures"), ("YM=F", "Dow Jones futures"),
+                   ("RTY=F", "Russell 2000 futures"), ("^VIX", "VIX (expected volatility)"), ("CL=F", "Crude oil (WTI)"),
+                   ("GC=F", "Gold"), ("EURUSD=X", "EUR / USD")]
+
+    def _is_us(sym: str, meta: dict, q) -> bool:
+        qt = (q.quote_type if q else None) or meta.get("quote_type")
+        if qt not in ("EQUITY", "ETF"):
+            return False
+        us = _us_exchange(meta.get("exchange") or (q.exchange if q else None))
+        return us if us is not None else ("." not in sym and ((q.currency if q else None) or meta.get("currency")) == "USD")
+
+    @app.get("/api/premarket")
+    def premarket_view(base: str | None = None):
+        b = base_or_default(base)
+        return snap.get_or(f"pre:{b}", 30, lambda: _premarket(b))
+
+    def _premarket(base: str):
+        """Where the US session stands (pre-market 04:00–09:30, regular, after-hours 16:00–20:00 New York, holidays
+        included), index futures and other overnight gauges, and the pre-market / after-hours price of every US
+        stock or ETF you hold or watch (Highs & lows list), with what the move means for your position."""
+        now = int(time.time() * 1000)
+        ny = sessions.build(["XNYS"])[0]
+        wins = sorted([{"k": w["k"], "s": w["s"], "e": w["e"]} for w in ny.get("ext") or []]
+                      + [{"k": "regular", "s": x["o"], "e": x["c"]} for x in ny.get("sessions") or []], key=lambda w: w["s"])
+        cur = next((w for w in wins if w["s"] <= now < w["e"]), None)
+        nxt = next((w for w in wins if w["s"] > now), None)
+        phase = {"k": cur["k"] if cur else "closed", "until": cur["e"] if cur else (nxt["s"] if nxt else None),
+                 "next": nxt["k"] if nxt else None, "next_at": nxt["s"] if nxt else None,
+                 "holidays": ny.get("holidays") or [], "early": ny.get("early") or []}
+        fq = engine.quotes([s_ for s_, _ in PRE_FUTURES])
+        futures = [{"symbol": s_, "name": n, "ok": bool(fq.get(s_) and fq[s_].ok),
+                    "price": fq[s_].price if fq.get(s_) and fq[s_].ok else None, "currency": fq[s_].currency if fq.get(s_) else None,
+                    "change_pct": (fq[s_].changes or {}).get("1D") if fq.get(s_) else None,
+                    "spark": fq[s_].spark[-20:] if fq.get(s_) else []} for s_, n in PRE_FUTURES]
+        port = snap.get_or(f"port:{base}", QUOTE_TTL, lambda: _portfolio(base))
+        held: dict = {}
+        for r in port["positions"]:
+            if r.get("symbol") and r.get("quote_type") != "MANUAL":
+                a = held.setdefault(r["symbol"], {"units": 0.0, "value": 0.0, "name": r.get("display_name")})
+                a["units"] += r.get("quantity") or 0
+                a["value"] += r.get("value") or 0
+        watch = [w for w in _watch_extra() if SYMBOL_RE.match(w) and w not in held]
+        syms = list(held) + watch
+        meta = engine.meta(syms) if syms else {}
+        quotes = engine.quotes(syms) if syms else {}
+        us = [s_ for s_ in syms if _is_us(s_, meta.get(s_) or {}, quotes.get(s_))]
+        ext = engine.extended(us)
+        fx = port.get("fx") or {}
+        rows, impact = [], 0.0
+        for s_ in us:
+            e, q = ext.get(s_) or {}, quotes.get(s_)
+            reg = (e.get("regular") or {}).get("price") or (q.price if q and q.ok else None)
+            st = (e.get("state") or "").upper()
+            kind, blk = None, None
+            if st.startswith("PRE") and st != "PREPRE" and e.get("pre"):
+                kind, blk = "pre", e["pre"]
+            elif e.get("post") and (e["post"].get("time") or 0) >= ((e.get("regular") or {}).get("time") or 0):
+                kind, blk = "post", e["post"]
+            elif st == "PREPRE" and e.get("pre"):
+                kind, blk = "pre", e["pre"]
+            ccy = (q.currency if q else None) or "USD"
+            h = held.get(s_)
+            ch = (blk["price"] / reg - 1) * 100 if blk and reg else None
+            imp = h["units"] * (blk["price"] - reg) * fx.get(ccy, 0) if h and blk and reg and fx.get(ccy) else None
+            impact += imp or 0
+            rows.append({"symbol": s_, "name": (q.name if q else None) or (h or {}).get("name") or s_, "held": bool(h),
+                         "units": h["units"] if h else None, "value": h["value"] if h else None, "currency": ccy,
+                         "state": st or None, "kind": kind, "regular": reg, "price": blk["price"] if blk else None,
+                         "time": blk.get("time") if blk else None, "change_pct": ch, "impact": imp})
+        rows.sort(key=lambda r: (not r["held"], -(abs(r["impact"] or 0)), -(abs(r["change_pct"] or 0))))
+        us_value = sum(r["value"] or 0 for r in rows if r["held"])
+        return {"base": base, "phase": phase, "futures": futures, "rows": rows,
+                "totals": {"impact": impact, "us_value": us_value, "impact_pct": impact / us_value * 100 if us_value else None,
+                           "portfolio_pct": impact / port["totals"]["value"] * 100 if port["totals"].get("value") else None},
+                "as_of": time.time()}
+
     # ------------------------------------------------------------------ detail chart (symbol sheet, mobile-first)
     CHART_RANGES = {   # range: (intraday period, bar, cache seconds) — None = daily closes
         "1D": ("5d", "5m", 60), "1W": ("5d", "30m", 120), "1M": ("1mo", "60m", 900), "1Y": None, "MAX": None}
@@ -1907,9 +1993,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     def sessions_tz(exchange: str | None) -> str:
         """Time zone of a Yahoo exchange code, to cut 1D charts at the session's local date."""
         e = (exchange or "").upper()
-        if e in ("NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS", "PNK", "OQB"):
+        if _us_exchange(exchange) or e in ("PNK", "OQB") or "OTC" in e:
             return "America/New_York"
-        if e in ("LSE", "IOB"):
+        if e in ("LSE", "IOB") or "LONDON" in e:
             return "Europe/London"
         if e in ("JPX", "TYO"):
             return "Asia/Tokyo"
@@ -2478,7 +2564,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "sheet.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "sheet.js", "premarket.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

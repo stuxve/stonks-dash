@@ -260,6 +260,17 @@ The size and group choices are saved per board. Period, range and currency are g
 - **Choose markets** picks from about 30 exchanges plus FX, CME Globex and crypto.
 - Below the timeline is a list of holidays and early closes for the next 14 days.
 
+**Pre-market & after-hours (US)**, at the top of Market hours:
+
+- **Session status.** Where the US session stands: pre-market 04:00–09:30, regular, after-hours 16:00–20:00 New York time, or closed. It shows when the current phase ends, what comes next, and upcoming holidays and early closes.
+- **Overnight gauges.** S&P 500, Nasdaq 100, Dow and Russell 2000 futures (they trade almost round the clock and show where Wall Street is heading), the VIX (expected volatility), oil, gold and EUR/USD. Each shows its change since the previous settlement or close and a small 20-day sparkline.
+- **Your US stocks and ETFs, plus US tickers on your Highs & lows watch list.** For each one:
+  - the regular close and the pre-market or after-hours price with its time;
+  - the change against the regular close;
+  - what the move means for your position in your currency, and the total: "if the US open matched these prices".
+- **Elsewhere in the app.** The same move appears as a small *pre −0.4%* / *after +1.1%* badge in Holdings, and as a line under the price in the ticker sheet.
+- **Data.** From Yahoo's quote for each ticker, refreshed every 30 s while a page shows it. Yahoo has no pre-market for European listings; some brokers, such as Trade Republic, quote them from 07:30 on their own venue.
+
 **Dividends** (Market hours, **💰 Dividends ↓**) follows the payouts of everything you hold:
 
 - **Words used.** The *ex-dividend date* (ex-date) is the first day a buyer no longer gets the coming payment: you must own the units **before** it, and the units you held then are what you're paid on. The *pay date* is when the cash arrives, usually 1–6 weeks later.
@@ -332,6 +343,7 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET | `/api/dividends?base=EUR` | Per holding: payout frequency, last and next ex-date and payment, expected amount, TTM yield, yield on cost, recorded dividends, past ex-dates to record; monthly received / expected; totals |
+| GET | `/api/premarket?base=EUR` | US session phase (pre-market / regular / after-hours / closed, holidays), index futures and other gauges, pre-market or after-hours price of your US holdings and watch list with the P&L effect |
 | GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
 | GET | `/api/events?watch=port:EUR,heat:1:EUR` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |

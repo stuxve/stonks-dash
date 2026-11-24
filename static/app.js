@@ -394,6 +394,7 @@
     loadMoves();
     pf.onPortfolio();
     sheet.refresh();
+    pre.load(false);
     stamp(state.port.as_of);
   }
 
@@ -668,7 +669,7 @@
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
-      <td class="num">${p.ok ? fmtPrice(p.price, p.price_currency) : '<span class="down">n/a</span>'}</td>
+      <td class="num">${p.ok ? fmtPrice(p.price, p.price_currency) : '<span class="down">n/a</span>'}${p.symbol ? `<div>${pre.badge(p.symbol, p.price_currency)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
       <td class="num">${fmtMoney(p.value, b)}</td>
       <td class="num ${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</td>
@@ -696,7 +697,7 @@
         <span class="ml-logo" style="background:hsl(${hueOf(sym || p.display_name || "?")} 45% 38%)">${esc((sym || p.display_name || "?").replace(/^\^/, "").replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase())}</span>
         <span class="ml-main"><b>${esc(p.display_name || sym)}</b><span>${fmtNum(p.quantity)} · ${esc(sym)}${p.lots ? ` · ${p.lots.length} lots` : ""}</span></span>
         <span class="ml-num"><b>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
-          <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span></span></button>`;
+          <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span>${sym ? pre.badge(sym, p.price_currency) : ""}</span></button>`;
     }).join("") + `<div class="ml-total"><span>Total · ${list.length} positions</span><b>${fmtMoney(t.value, b)}</b><span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)} (${fmtPct(t.pnl_pct)})</span></div>`
       : '<div class="empty">No positions yet.</div>';
   }
@@ -796,7 +797,7 @@
     $("#refresh-btn").classList.add("spin");
     try {
       if (state.view === "markets") await loadMarkets(silent);
-      else if (state.view === "hours") { divs.load(false); await hours.load(silent); }
+      else if (state.view === "hours") { divs.load(false); pre.load(false); await hours.load(silent); }
       else if (state.view === "ta") await ta.refresh(silent);
       else await loadPortfolio(silent);
     } catch (err) {
@@ -828,9 +829,9 @@
   const live = { es: null, watch: null, ok: false, secs: 15, lastTs: 0, t: null, on() { return this.ok && !!this.watch; } };
   function liveWatch() {
     const b = base();
-    if (state.view === "portfolio") return `port:${b}`;
+    if (state.view === "portfolio") return `port:${b},pre:${b}`;
     if (state.view === "markets" && state.boardId != null) return `heat:${state.boardId}:${b}`;
-    if (state.view === "hours") return `divs:${b}`;
+    if (state.view === "hours") return `divs:${b},pre:${b}`;
     return "";
   }
   function liveConnect(force = false) {
@@ -850,7 +851,8 @@
     es.addEventListener("update", (e) => {
       const d = JSON.parse(e.data);
       if (d.key.startsWith("divs:")) { if (state.view === "hours" && d.changed) divs.load(true); return; }
-      if (d.key !== live.watch) return;
+      if (d.key.startsWith("pre:")) { if (d.changed) pre.load(true); return; }
+      if (!live.watch.split(",").includes(d.key)) return;
       if (d.changed) liveReload(); else stamp(d.at, true);   // same prices: just the time
     });
     es.addEventListener("clear", () => liveReload());          // an edit here or in another tab
@@ -1185,8 +1187,17 @@
     CURRENCIES, TYPE_LABEL, $, $$,
   });
 
+  // ================================================================== US pre-market / after-hours (static/premarket.js)
+  const pre = window.StonksPremarket({ api, esc, state, base, fmtMoney, fmtPrice, fmtSigned, fmtPct, cls, $, openSheet: (s) => sheet.open(s) });
+  pre.onChange(() => {
+    if (state.view !== "portfolio" || !state.port) return;
+    renderMobileList(state.port, shownPositions(state.port, pView()));
+    renderTable(state.port, shownPositions(state.port, pView()));
+    sheet.refreshExt();
+  });
+
   // ================================================================== symbol sheet (static/sheet.js)
-  const sheet = window.StonksSheet({ api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
+  const sheet = window.StonksSheet({ ext: (s) => pre.row(s), extBadge: (s, c) => pre.badge(s, c), api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
     positionFor: (sym) => (state.port ? shownPositions(state.port, { ...pView(), combine: true, group: "none" }).find((p) => p.symbol === sym) : null),
     openTx: (...a) => pf.openTx(...a), openPosition: (...a) => openPosition(...a), openChart: (s) => openChart(s), $ });
 

@@ -126,7 +126,16 @@
       render();
       if (!dlg.open) dlg.showModal();
       body.scrollTop = 0;
+      refreshExt();
       load();
+    }
+    // US pre-market / after-hours line under the price (static/premarket.js)
+    function refreshExt() {
+      const el = dlg.open || cur ? $("#sh-ext") : null;
+      if (!el || !cur) return;
+      const r = ctx.ext?.(cur.symbol);
+      el.innerHTML = r && r.price != null ? `${r.kind === "pre" ? "Pre-market" : "After-hours"} <b>${esc(fmtPrice(r.price, r.currency))}</b>
+        <span class="${cls(r.change_pct)}">${r.change_pct > 0 ? "▲" : r.change_pct < 0 ? "▼" : ""} ${Math.abs(r.change_pct).toFixed(2)} %</span>${r.time ? ` · ${new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(r.time * 1000)}` : ""}` : "";
     }
     async function load() {
       const my = ++seq, sym = cur.symbol, r = rng(), k = `${sym}|${r}`;
@@ -148,6 +157,7 @@
         <div class="sh-name">${esc(name)} <span>${esc(sym)}</span></div>
         <div class="sh-price"><b id="sh-px">${p?.ok ? esc(fmtPrice(p.price, p.price_currency)) : cur.hint.price != null ? esc(fmtPrice(cur.hint.price, cur.hint.currency)) : "—"}</b><span id="sh-ch"></span></div>
         <div class="sh-when" id="sh-when">&nbsp;</div>
+        <div class="sh-ext" id="sh-ext"></div>
         <div class="sh-ranges" role="tablist">${RANGES.map(([v, l]) => `<button data-r="${v}" class="${v === rng() ? "active" : ""}">${l}</button>`).join("")}</div>
         <div class="sh-chart" id="sh-chart"></div>
         ${p ? cards(p) : ""}
@@ -269,6 +279,6 @@
       if (!dlg.open || !cur) return;
       if (rng() === "1D") { cache.delete(`${cur.symbol}|1D`); load(); }
     }
-    return { open, refresh, isOpen: () => dlg.open };
+    return { open, refresh, refreshExt, isOpen: () => dlg.open };
   };
 })();

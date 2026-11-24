@@ -345,6 +345,27 @@ class YahooProvider:
             log.info("earnings dates %s failed: %s", symbol, e)
         return out if (out["next"] or out["history"]) else {}
 
+    def extended(self, symbol: str) -> dict:
+        """US extended hours from Yahoo's quote: market state (PRE, REGULAR, POST, CLOSED…), the regular-session
+        price, and the pre-market / after-hours price with its time (epoch seconds). Raw listing units."""
+        i = self.yf.Ticker(symbol).info or {}
+
+        def ts(v):
+            if v is None:
+                return None
+            try:
+                return int(v.timestamp()) if hasattr(v, "timestamp") else int(v)
+            except (TypeError, ValueError):
+                return None
+
+        def blk(k):
+            px = i.get(f"{k}MarketPrice")
+            return {"price": float(px), "time": ts(i.get(f"{k}MarketTime"))} if px else None
+        return {"state": i.get("marketState"), "currency": i.get("currency"),
+                "regular": {"price": i.get("regularMarketPrice"), "prev_close": i.get("regularMarketPreviousClose"),
+                            "time": ts(i.get("regularMarketTime"))},
+                "pre": blk("pre"), "post": blk("post")}
+
     def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
         """Closes of `interval` bars (5m, 30m, 60m…) over `period` (1d, 5d, 1mo), UTC timestamps, raw listing units."""
         df = self.yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False,
@@ -730,6 +751,22 @@ class MockProvider:
                          "surprise": round((act / est - 1) * 100, 2)})
         return {"next": [nxt.isoformat()], "eps_est": round(float(r.uniform(0.5, 3)), 2), "rev_est": None,
                 "ex_div": None, "div_date": None, "history": hist}
+
+    def extended(self, symbol: str) -> dict:
+        """Synthetic US pre-market / after-hours quotes that follow the New York clock."""
+        ny = pd.Timestamp.now(tz="America/New_York")
+        hm = ny.hour * 60 + ny.minute
+        wk = ny.weekday() < 5
+        state = ("PRE" if wk and 240 <= hm < 570 else "REGULAR" if wk and 570 <= hm < 960
+                 else "POST" if wk and 960 <= hm < 1200 else "CLOSED")
+        last = float(self._series(symbol, date.today() - timedelta(days=10)).iloc[-1])
+        r = np.random.default_rng(self._seed(symbol) ^ int(time.time() // 300))
+        now = int(time.time())
+        ext = lambda: {"price": round(last * float(np.exp(r.normal(0, 0.009))), 4), "time": now - int(r.integers(0, 240))}  # noqa: E731
+        return {"state": state, "currency": self._currency(symbol),
+                "regular": {"price": last, "prev_close": last / 1.004, "time": now - 3600},
+                "pre": ext() if state == "PRE" else None,
+                "post": ext() if state in ("POST", "CLOSED") else None}
 
     def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
         """Synthetic intraday bars ending at the latest close: 09:00–17:30 Madrid sessions (24/7 for crypto)."""
@@ -1194,6 +1231,27 @@ class QuoteEngine:
             old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
             have.update({s: old[keys[s]] for s in stale if keys[s] in old})
         return have
+
+    def extended(self, symbols: list[str], ttl: float = 60) -> dict[str, dict]:
+        """Pre-market / after-hours quotes per symbol (cached `ttl` seconds in memory, fetched in parallel)."""
+        if not hasattr(self.p, "extended") or not symbols:
+            return {}
+        cache = self.__dict__.setdefault("_ext", {})
+        now = time.time()
+        todo = [s for s in dict.fromkeys(symbols) if not (s in cache and now - cache[s][0] < ttl)]
+
+        def fetch(s):
+            try:
+                return s, self.p.extended(s)
+            except Exception as e:  # noqa: BLE001
+                log.info("extended hours %s failed: %s", s, e)
+                return s, None
+        if todo:
+            with ThreadPoolExecutor(max_workers=min(self.workers, 4)) as ex:
+                for s, d in ex.map(fetch, todo):
+                    if d is not None:
+                        cache[s] = (time.time(), d)
+        return {s: cache[s][1] for s in symbols if s in cache}
 
     def intraday(self, symbol: str, period: str, interval: str, ttl: float = 60) -> pd.Series | None:
         """Intraday closes (MAJOR currency units, UTC index) for the detail chart, cached `ttl` seconds in memory.

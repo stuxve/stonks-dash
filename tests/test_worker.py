@@ -194,3 +194,20 @@ def test_chart_endpoint_ranges(client):
     assert len(mx["points"]) <= 500 and mx["points"][-1][0] <= time.time() * 1000 + 86400e3
     assert client.get("/api/chart?symbol=SAN.MC&range=5Y").status_code == 400
     assert client.get("/api/chart?symbol=bad sym&range=1Y").status_code == 400
+
+
+def test_premarket_endpoint(client):
+    client.put("/api/settings", json={"ranges": {"extra": ["AAPL", "SAN.MC"]}})
+    d = client.get("/api/premarket?base=EUR").json()
+    assert d["phase"]["k"] in ("pre", "regular", "post", "closed")
+    assert {f["symbol"] for f in d["futures"]} >= {"ES=F", "NQ=F", "^VIX"}
+    syms = [r["symbol"] for r in d["rows"]]
+    assert "MSFT" in syms and "AAPL" in syms and "SAN.MC" not in syms      # US listings only
+    for r in d["rows"]:
+        if r["price"] is not None:
+            assert r["change_pct"] == pytest.approx((r["price"] / r["regular"] - 1) * 100)
+            assert r["kind"] in ("pre", "post")
+        if r["held"] and r["impact"] is not None:
+            assert abs(r["impact"]) < r["value"]
+    assert d["totals"]["impact"] == pytest.approx(sum(r["impact"] or 0 for r in d["rows"]))
+    assert next(r for r in d["rows"] if r["symbol"] == "AAPL")["impact"] is None   # watch only: no P&L
