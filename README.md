@@ -47,6 +47,22 @@ The container runs as a non-root user with a read-only root filesystem, `cap_dro
 
 ## Using it
 
+**On a phone** (screens up to 720 px wide) the app works like a broker app:
+
+- **Navigation:** the four sections sit in a bottom tab bar. Rows of controls, the summary boxes and the portfolio sub-tabs scroll sideways instead of stacking up, and dialogs slide up from the bottom.
+- **Holdings** is a list: name, units, value, total return and today's move.
+- **Tap a holding or any heatmap tile** to open its sheet (on a computer, click the ticker in the table or a tile):
+  - big price and the change over **1D · 1W · 1M · 1Y · Max**;
+  - a line chart you **drag a finger across**: the price, the change and the date follow your finger, and the rest of the line greys out;
+  - the dotted line is where the change is measured from: the previous close for 1D, the start of the range otherwise. The gold dashed line is your average buy price, and the gold circles are your buys;
+  - your position as swipeable cards: value, return, today, average buy price, time held, weight;
+  - key stats: previous close, the range's low and high, 52-week low and high, typical daily move, and for stocks the P/E (price-to-earnings), forward P/E, P/B (price-to-book) and market cap;
+  - **Buy more**, **Sell** and **Analysis** buttons. Swipe the sheet down to close it.
+- **Charts** (P&L over time, Performance vs index): drag sideways to read values; vertical swipes still scroll the page.
+- **Analysis:** one finger pans the chart sideways, two fingers zoom, press and hold to read a candle (the read-out goes when you lift your finger). The indicator list starts folded.
+
+To use it like an app on the iPhone, open it in Safari, tap **Share → Add to Home Screen**.
+
 **Tiles.** Hover a tile, or tap it on mobile, to see the price, a 30-day sparkline, the change for 1D, 1W, 1M, 3M, 6M, YTD and 1Y, and the market cap or AUM. Click a group header (for example "Technology ›") to zoom into that group. Press `Esc` to zoom back out.
 
 **Toolbar.**
@@ -284,6 +300,14 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
 
 \* Weekdays 08:00–22:30 in the container's time zone (`TZ`, Europe/Madrid by default), which covers the European and US sessions, or always if you hold crypto. To stop the heatmap refresh on a slow Pi, set `"worker": {"boards": false}` in settings.
 
+**Live updates while a page is open.** The page opens one Server-Sent Events connection to the Pi (SSE: a single HTTP response the server keeps writing to; `/api/events`). It tells the Pi what it's showing: your portfolio, a Markets board, or the dividends in Market hours. Every **15 s** (Settings → *Live prices*: 10 s to 1 min, or off), the Pi refreshes exactly that and pushes an event the moment the new result is ready. The page reloads only when prices actually moved; otherwise just the *Updated* clock advances. The header then reads *Updated 10:31:05 · live 15s*.
+
+- An edit (a buy, a sale, a setting that changes the numbers) is pushed to every open tab, so they all reload.
+- A hidden browser tab closes its connection, so the Pi slows back down to the background rate; the tab catches up when you return.
+- If the connection drops, the browser reconnects by itself. Meanwhile the page polls at *Auto-refresh (fallback)*, which also drives Market hours and Analysis.
+- Faster rates mean more requests to Yahoo, which blocks clients that ask too often for a while. 15 s for a dozen holdings is fine.
+- Behind a reverse proxy (nginx…), response buffering must be off for `/api/events`. The app sends `X-Accel-Buffering: no` for nginx.
+
 The header shows **● Pi 30s ago**: when the background refresh last updated your prices. Hover it for every job, its next run and any error. Green means OK, amber means an error or a late job, red means the worker isn't running. Errors are also in `sudo docker logs stonks-dash`.
 
 ## Data notes
@@ -308,6 +332,8 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET | `/api/dividends?base=EUR` | Per holding: payout frequency, last and next ex-date and payment, expected amount, TTM yield, yield on cost, recorded dividends, past ex-dates to record; monthly received / expected; totals |
+| GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
+| GET | `/api/events?watch=port:EUR,heat:1:EUR` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

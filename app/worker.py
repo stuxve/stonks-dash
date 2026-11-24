@@ -3,6 +3,11 @@
 * Snapshots — one shared cache of computed results (portfolio, sell-target levels, Highs & lows, heatmaps…).
   The worker fills it on a schedule; the API serves from it while it's fresh. The web page and the Telegram
   alerts therefore read the *same* numbers. Any change made through the API (a buy, a setting…) clears it.
+* EventBus   — pushes "this result was refreshed" to every open page over Server-Sent Events (SSE: one long
+  HTTP response the server keeps writing to), so a page redraws right after the Pi has new prices instead of
+  polling on its own clock. Each page also says what it is showing ("watch"); the worker refreshes those
+  results at the live rate (every 15 s by default) while someone is looking, and at the slower background
+  rate otherwise.
 * Worker     — a scheduler thread that runs each job at its own interval: short while markets are busy
   (weekdays 08:00–22:30 local time, which covers European and US sessions, or always when you hold crypto),
   longer otherwise. Jobs run on a small thread pool, so one slow Yahoo call can't stop the others; a job that
@@ -10,6 +15,9 @@
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 import os
 import threading
@@ -35,13 +43,88 @@ def in_busy_window(now: datetime | None = None) -> bool:
     return now.weekday() < 5 and BUSY_FROM <= (now.hour, now.minute) < BUSY_TO
 
 
-class Snapshots:
-    """Thread-safe {key: (time, value)} cache of computed API results."""
+class EventBus:
+    """Fan-out of small JSON events from worker threads to asyncio SSE streams."""
 
-    def __init__(self):
+    def __init__(self, max_queue: int = 200):
+        self._subs: dict[int, "Sub"] = {}
+        self._lock = threading.Lock()
+        self._n = 0
+        self.max_queue = max_queue
+        self.seq = 0
+
+    def subscribe(self, watch: list[str]) -> "Sub":
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            self._n += 1
+            sub = Sub(self._n, loop, asyncio.Queue(self.max_queue), list(watch))
+            self._subs[sub.id] = sub
+        return sub
+
+    def unsubscribe(self, sub: "Sub"):
+        with self._lock:
+            self._subs.pop(sub.id, None)
+
+    def watched(self) -> set[str]:
+        """Results some open page is showing right now."""
+        with self._lock:
+            return {k for s in self._subs.values() for k in s.watch}
+
+    def clients(self) -> int:
+        with self._lock:
+            return len(self._subs)
+
+    def publish(self, kind: str, data: dict):
+        with self._lock:
+            self.seq += 1
+            ev = {"kind": kind, "seq": self.seq, **data}
+            subs = list(self._subs.values())
+        for s in subs:
+            try:
+                s.loop.call_soon_threadsafe(s.offer, ev)
+            except RuntimeError:          # its event loop has closed: the page is gone
+                self.unsubscribe(s)
+
+
+@dataclass
+class Sub:
+    id: int
+    loop: asyncio.AbstractEventLoop
+    q: asyncio.Queue
+    watch: list[str]
+
+    def offer(self, ev: dict):
+        if self.q.full():                 # a stalled page: drop the oldest, it only needs the latest
+            try:
+                self.q.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        self.q.put_nowait(ev)
+
+
+def fingerprint(key: str, value) -> str:
+    """What a page would redraw for: prices and values, not the timestamp. Same fingerprint = nothing moved."""
+    try:
+        if key.startswith("port:"):
+            core = [(p.get("id"), p.get("price"), p.get("quantity")) for p in value.get("positions") or []]
+        elif key.startswith("heat:"):
+            core = [(t.get("symbol"), t.get("price"), t.get("market_cap")) for t in value.get("tiles") or []]
+        else:
+            core = {k: v for k, v in value.items() if k != "as_of"} if isinstance(value, dict) else value
+        return hashlib.sha1(json.dumps(core, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    except Exception:  # noqa: BLE001
+        return str(time.time())
+
+
+class Snapshots:
+    """Thread-safe {key: (time, value)} cache of computed API results. `on_put(key, value)` / `on_clear()` are
+    called after a new result is stored / everything is dropped (used to push events to open pages)."""
+
+    def __init__(self, on_put: Callable | None = None, on_clear: Callable | None = None):
         self._d: dict[str, tuple[float, object]] = {}
         self._lock = threading.Lock()
         self.cleared_at = 0.0
+        self.on_put, self.on_clear = on_put, on_clear
 
     def get(self, key: str, max_age: float):
         with self._lock:
@@ -62,6 +145,11 @@ class Snapshots:
             if started is not None and started < self.cleared_at:
                 return value
             self._d[key] = (time.time(), value)
+        if self.on_put:
+            try:
+                self.on_put(key, value)
+            except Exception as e:  # noqa: BLE001
+                log.info("snapshot hook failed: %s", e)
         return value
 
     def get_or(self, key: str, max_age: float, fn: Callable):
@@ -79,6 +167,11 @@ class Snapshots:
         with self._lock:
             self._d.clear()
             self.cleared_at = time.time()
+        if self.on_clear:
+            try:
+                self.on_clear()
+            except Exception as e:  # noqa: BLE001
+                log.info("snapshot hook failed: %s", e)
 
 
 @dataclass
@@ -136,7 +229,7 @@ class Worker:
             return in_busy_window()
 
     def _loop(self):
-        while not self._stop.wait(5):
+        while not self._stop.wait(1):
             busy = self._is_busy()
             now = time.time()
             for j in self.jobs.values():

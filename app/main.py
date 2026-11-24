@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -140,17 +140,58 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     app = FastAPI(title="stonks-dash", version="1.0.0")
     sessions = SessionService()
     app.state.db, app.state.engine, app.state.provider, app.state.sessions = db, engine, prov, sessions
-    # shared results: filled by the background worker, served to the page while fresh (app/worker.py)
-    snap = wk.Snapshots()
-    app.state.snap = snap
-    QUOTE_TTL = max(30.0, engine.recent_ttl)
+    # shared results: filled by the background worker, served to the page while fresh, and announced to open
+    # pages over Server-Sent Events as soon as they change (app/worker.py)
+    bus = wk.EventBus()
+    _fps: dict[str, str] = {}
 
-    @app.middleware("http")
-    async def _clear_snapshots(request: Request, call_next):
-        resp = await call_next(request)
-        if request.method != "GET" and request.url.path.startswith("/api/") and resp.status_code < 400:
-            snap.clear()            # a buy, sale or setting changed: recompute on the next read
-        return resp
+    def _on_put(key, value):
+        fp = wk.fingerprint(key, value)
+        changed = _fps.get(key) != fp
+        _fps[key] = fp
+        bus.publish("update", {"key": key, "at": time.time(), "changed": changed})
+
+    def _on_clear():
+        _fps.clear()
+        bus.publish("clear", {"at": time.time()})
+
+    snap = wk.Snapshots(on_put=_on_put, on_clear=_on_clear)
+    app.state.snap, app.state.bus = snap, bus
+    QUOTE_TTL = max(30.0, engine.recent_ttl)
+    SETTINGS_AFFECTING_DATA = {"base_currency", "benchmark", "price_sources", "account_fees", "ranges", "alerts",
+                               "sell_targets", "worker", "risk_proxies"}
+    BASE_QUOTE_TTL = engine.recent_ttl
+
+    def live_seconds() -> int:
+        """How often prices refresh while a page is open (settings.live_seconds; 0 = only the background rate)."""
+        try:
+            v = int(db.get_settings().get("live_seconds", 15))
+        except (TypeError, ValueError):
+            v = 15
+        return 0 if v <= 0 else max(10, min(v, 300))
+
+    class _ClearOnWrite:
+        """Pure ASGI middleware (keeps streaming responses like /api/events untouched): after a successful
+        non-GET API call — a buy, a sale, a setting — drop the shared results so the next read recomputes."""
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        async def __call__(self, scope, receive, send):
+            if (scope["type"] != "http" or scope["method"] == "GET" or not scope["path"].startswith("/api/")
+                    or scope["path"] == "/api/settings"):    # settings: put_settings decides
+                return await self.inner(scope, receive, send)
+            status = {}
+
+            async def send2(msg):
+                if msg["type"] == "http.response.start":
+                    status["code"] = msg["status"]
+                await send(msg)
+            await self.inner(scope, receive, send2)
+            if status.get("code", 500) < 400:
+                snap.clear()
+
+    app.add_middleware(_ClearOnWrite)
 
     if os.getenv("STONKS_NO_WARMUP") != "1":
         # building ~20 holiday calendars takes a few seconds; do it before the first page view
@@ -178,6 +219,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         if "base_currency" in data and str(data["base_currency"]).upper() not in BASES:
             raise HTTPException(400, f"base_currency must be one of {BASES}")
         db.update_settings(data)
+        if set(data) & SETTINGS_AFFECTING_DATA:
+            snap.clear()        # e.g. the benchmark changed; view preferences (sort, colours…) don't need it
         return db.get_settings()
 
     @app.get("/api/search")
@@ -1541,6 +1584,32 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         snap.refresh("crosses", _crosses)
         monitor.check()
 
+    _watch_re = re.compile(r"^(port:[A-Z]{3}|heat:\d{1,9}:[A-Z]{3}|divs:[A-Z]{3})$")
+
+    def _refresh_key(key: str):
+        kind, *rest = key.split(":")
+        if kind == "port":
+            snap.refresh(key, lambda: _portfolio(rest[0]))
+        elif kind == "heat":
+            snap.refresh(key, lambda: _heatmap(int(rest[0]), rest[1]))
+        elif kind == "divs":
+            snap.refresh(key, lambda: _dividends(rest[0]))
+
+    def _job_live():
+        """Results open pages are showing: refresh each one every live_seconds (dividends: every 10 min)."""
+        live = live_seconds()
+        watched = bus.watched() if live else set()
+        engine.recent_ttl = min(BASE_QUOTE_TTL, max(5.0, live - 2)) if watched else BASE_QUOTE_TTL
+        for key in sorted(watched):
+            age = snap.age(key)
+            if age is None or age >= (600 if key.startswith("divs:") else live - 1):
+                try:
+                    _refresh_key(key)
+                except HTTPException:
+                    pass                                  # e.g. a board deleted in another tab
+                except Exception as e:  # noqa: BLE001
+                    log.info("live refresh %s failed: %s", key, e)
+
     wcfg = lambda: db.get_settings().get("worker") or {}  # noqa: E731
     worker = wk.Worker([
         wk.Job("portfolio", "Portfolio prices", _job_portfolio, QUOTE_TTL, 15 * 60, delay_s=10),
@@ -1554,6 +1623,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         wk.Job("earnings", "Earnings dates", lambda: snap.refresh("earnings", _earnings), 6 * 3600, 6 * 3600, delay_s=160),
         wk.Job("performance", "P&L history", _job_performance, 3600, 6 * 3600, delay_s=190),
         wk.Job("summary", "Daily summary clock", monitor.tick, 60, 60, delay_s=30),
+        wk.Job("live", "Live prices for open pages", _job_live, 3, 3, delay_s=0),
     ], busy=lambda: wk.in_busy_window() or _held_crypto())
     app.state.worker = worker
     if os.getenv("STONKS_NO_WARMUP") != "1":
@@ -1565,7 +1635,50 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         out = worker.status()
         p = snap.age(f"port:{base_or_default(None)}")
         out["portfolio_age"] = p
+        out["live"] = {"seconds": live_seconds(), "clients": bus.clients(), "watched": sorted(bus.watched())}
         return out
+
+    @app.get("/api/events")
+    async def events(request: Request, watch: str = "", limit: int = 0):
+        """Server-Sent Events stream. `watch`: comma-separated results this page shows (port:EUR, heat:3:EUR,
+        divs:EUR); they're refreshed every live_seconds while the page is open, and every refresh is announced:
+        event "update" {key, at, changed} — `changed` false means the prices didn't move, only the time.
+        Event "clear": something was edited (here or in another tab), reload. A comment line every 15 s keeps
+        proxies from closing the connection. `limit` closes the stream after that many events (tests)."""
+        import asyncio
+        import json as _json
+        def norm(x):
+            k, _, r = x.strip().partition(":")
+            return f"{k.lower()}:{r.upper()}"
+        keys = [k for k in dict.fromkeys(norm(x) for x in watch.split(",") if x.strip()) if _watch_re.match(k)][:4]
+        sub = bus.subscribe(keys)
+        if any((snap.age(k) or 1e9) > max(5, live_seconds() - 1) for k in keys):
+            worker.run_now("live")
+
+        def fmt(kind, data):
+            return f"event: {kind}\ndata: {_json.dumps(data)}\n\n"
+
+        async def gen():
+            n = 0
+            try:
+                yield "retry: 3000\n\n"
+                yield fmt("hello", {"watch": keys, "live_seconds": live_seconds(), "ages": {k: snap.age(k) for k in keys}})
+                while not limit or n < limit:
+                    if await request.is_disconnected():
+                        break
+                    try:
+                        ev = await asyncio.wait_for(sub.q.get(), 15)
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+                        continue
+                    if ev["kind"] == "update" and ev["key"] not in keys and not ev["key"].startswith("divs:"):
+                        continue                          # only what this page shows
+                    n += 1
+                    yield fmt(ev["kind"], ev)
+            finally:
+                bus.unsubscribe(sub)
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     @app.post("/api/worker/run")
     def worker_run(job: str | None = None):
@@ -1731,6 +1844,80 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                               "day": (q.changes or {}).get("1D") if ok else None,
                               "quote_type": q.quote_type if q else None}
         return {"symbols": out, "missing": missing, "extra": extra_info, "as_of": time.time()}
+
+    # ------------------------------------------------------------------ detail chart (symbol sheet, mobile-first)
+    CHART_RANGES = {   # range: (intraday period, bar, cache seconds) — None = daily closes
+        "1D": ("5d", "5m", 60), "1W": ("5d", "30m", 120), "1M": ("1mo", "60m", 900), "1Y": None, "MAX": None}
+
+    @app.get("/api/chart")
+    def chart_view(symbol: str, range: str = "1Y"):  # noqa: A002 — the query parameter is called range
+        """Line chart for one ticker: 1D (5-minute bars of the last session, against the previous close),
+        1W (30-minute bars), 1M (hourly), 1Y (daily closes) and Max (weekly). `ref` is the value the change
+        is measured from: the previous close for 1D, the first point otherwise."""
+        sym = symbol.strip().upper()
+        rng = range.strip().upper()
+        if not SYMBOL_RE.match(sym) or rng not in CHART_RANGES:
+            raise HTTPException(400, "Invalid ticker or range")
+        _sync_sources([sym])
+        q = engine.quotes([sym]).get(sym)
+        meta = engine.meta([sym]).get(sym) or {}
+        intraday = CHART_RANGES[rng] is not None
+        ser, ref = None, None
+        if intraday:
+            period, bar, ttl = CHART_RANGES[rng]
+            ser = engine.intraday(sym, period, bar, ttl)
+            if ser is not None and len(ser):
+                if rng == "1D":
+                    tz = sessions_tz(meta.get("exchange"))
+                    local = ser.index.tz_convert(tz)
+                    ser = ser[local.date == local[-1].date()]
+                    ref = q.prev_close if q and q.ok and q.prev_close else None
+                elif rng == "1W":
+                    ser = ser[ser.index >= ser.index[-1] - pd.Timedelta(days=7)]
+            else:
+                intraday = False                    # no intraday data: fall back to daily closes
+        if not intraday:
+            days = {"1D": 10, "1W": 10, "1M": 35, "1Y": 366, "MAX": 365 * 40}[rng]
+            start = date.today() - timedelta(days=days)
+            h = engine.history([sym], start).get(sym)
+            if h is not None and len(h):
+                h = levels.clean(h[h.index >= pd.Timestamp(start)].dropna())
+                if rng == "MAX" and len(h) > 600:
+                    h = h.groupby(h.index.to_period("W")).tail(1)     # weekly, on real trading dates
+                if rng in ("1D", "1W"):
+                    h = h.iloc[-(2 if rng == "1D" else 6):]
+                ser = h.tz_localize("UTC") if h.index.tz is None else h
+        if ser is None or len(ser) == 0:
+            raise HTTPException(404, f"No price history for {sym}")
+        if len(ser) > 500:                          # enough for a phone-wide line
+            ser = ser.iloc[np.unique(np.linspace(0, len(ser) - 1, 500).astype(int))]
+        pts = [[int(t.timestamp() * 1000), round(float(v), 6)] for t, v in ser.items()]
+        if ref is None:
+            ref = pts[0][1]
+        last = pts[-1][1]
+        ccy = (q.currency if q else None) or normalize_currency(meta.get("currency"))[0]
+        return {"symbol": sym, "name": (q.name if q else None) or meta.get("name") or sym, "currency": ccy,
+                "quote_type": (q.quote_type if q else None) or meta.get("quote_type"), "range": rng,
+                "intraday": intraday, "points": pts, "ref": ref, "last": last,
+                "change": last - ref, "change_pct": (last / ref - 1) * 100 if ref else None,
+                "price": q.price if q and q.ok else last, "prev_close": q.prev_close if q else None,
+                "sector": meta.get("sector"), "industry": meta.get("industry"), "exchange": meta.get("exchange"),
+                "source": engine.sources.get(sym), "as_of": time.time()}
+
+    def sessions_tz(exchange: str | None) -> str:
+        """Time zone of a Yahoo exchange code, to cut 1D charts at the session's local date."""
+        e = (exchange or "").upper()
+        if e in ("NMS", "NYQ", "NGM", "NCM", "ASE", "PCX", "BTS", "NAS", "NYS", "PNK", "OQB"):
+            return "America/New_York"
+        if e in ("LSE", "IOB"):
+            return "Europe/London"
+        if e in ("JPX", "TYO"):
+            return "Asia/Tokyo"
+        if e in ("HKG",):
+            return "Asia/Hong_Kong"
+        if e in ("CCC", "CCY"):
+            return "UTC"
+        return "Europe/Madrid"
 
     # ------------------------------------------------------------------ technical analysis
     @app.get("/api/ta")
@@ -2291,7 +2478,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "sheet.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

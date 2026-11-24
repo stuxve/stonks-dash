@@ -710,3 +710,161 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
 .dv-fu td { font-size: 12.5px; }
 .dv-m span { white-space: nowrap; overflow: hidden; max-width: 100%; }
 @media (max-width: 900px) { .dv-det { grid-template-columns: 1fr; } .dv-months { height: 80px; gap: 1px; } .dv-m:not(:nth-child(3n+1)) span { visibility: hidden; } }
+
+/* =====================================================================================================
+   Symbol sheet (static/sheet.js) — bottom sheet on phones, centred panel on desktop
+   ===================================================================================================== */
+.sheet { border: 0; padding: 0; background: var(--panel); color: var(--text); width: min(520px, calc(100vw - 32px));
+  max-height: min(92vh, 940px); border-radius: 16px; box-shadow: 0 24px 64px rgba(0,0,0,.6); overflow: hidden; transition: transform .15s; }
+.sheet::backdrop { background: rgba(0,0,0,.55); }
+.sheet[open] { display: flex; flex-direction: column; }
+.sh-grab { display: none; }
+.sheet-body { overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px 0; }
+.sh-top { display: flex; justify-content: space-between; align-items: center; }
+.sh-logo { width: 42px; height: 42px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 14px; letter-spacing: .3px; }
+.sh-x { background: var(--panel-2); border: 0; width: 32px; height: 32px; border-radius: 50%; color: var(--muted); cursor: pointer; font-size: 14px; }
+.sh-name { margin-top: 14px; color: var(--muted); font-weight: 600; font-size: 15px; }
+.sh-name span { font-weight: 500; font-size: 12px; margin-left: 4px; opacity: .8; }
+.sh-price { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; }
+.sh-price b { font-size: 32px; font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; letter-spacing: -.5px; }
+#sh-ch { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.sh-when { color: var(--muted); font-size: 12.5px; min-height: 18px; font-variant-numeric: tabular-nums; }
+.sh-ranges { display: flex; gap: 4px; margin: 14px 0 4px; }
+.sh-ranges button { flex: 1; background: none; border: 0; padding: 8px 0; border-radius: 8px; color: var(--muted); font-weight: 700; font-size: 14px; cursor: pointer; }
+.sh-ranges button.active { color: var(--text-strong); background: var(--panel-2); }
+.sh-chart { margin: 0 -20px; min-height: 230px; }
+.sh-chart .loading, .sh-chart .empty { display: grid; place-items: center; min-height: 230px; color: var(--muted); }
+.sh-cards { display: flex; gap: 10px; overflow-x: auto; scroll-snap-type: x mandatory; margin: 14px -20px 0; padding: 0 20px 4px; scrollbar-width: none; }
+.sh-cards::-webkit-scrollbar { display: none; }
+.sh-card { flex: 0 0 auto; min-width: 136px; scroll-snap-align: start; background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }
+.sh-card .k { color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.sh-card .v { font-size: 18px; font-weight: 700; color: var(--text-strong); font-variant-numeric: tabular-nums; margin-top: 2px; white-space: nowrap; }
+.sh-card .v.up { color: var(--up); } .sh-card .v.down { color: var(--down); }
+.sh-card .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sh-h { margin: 20px 0 6px; font-size: 16px; color: var(--text-strong); }
+.sh-stats { display: grid; grid-template-columns: 1fr auto; margin: 0; }
+.sh-stats dt, .sh-stats dd { padding: 9px 0; border-bottom: 1px solid var(--border); margin: 0; }
+.sh-stats dt { color: var(--muted); }
+.sh-stats dd { text-align: right; color: var(--text-strong); font-weight: 600; font-variant-numeric: tabular-nums; }
+.sh-stats dd span { display: block; color: var(--muted); font-weight: 400; font-size: 11.5px; }
+.sh-actions { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 14px 0 calc(14px + env(safe-area-inset-bottom)); margin-top: 10px;
+  background: linear-gradient(to bottom, transparent, var(--panel) 30%); }
+.sh-actions .btn { flex: 1; padding: 12px 8px; border-radius: 12px; font-weight: 600; }
+
+/* scrubbable line chart (window.StonksLine) */
+.ln-svg { display: block; user-select: none; -webkit-user-select: none; touch-action: pan-y; }   /* touch-action only works on the <svg> itself */
+.ln-svg text { fill: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.ln-y { text-anchor: end; }
+.ln-ref { stroke: var(--muted); stroke-width: 2; stroke-dasharray: 0.1 6; stroke-linecap: round; opacity: .55; }
+.ln-avg { stroke: #c9a227; stroke-width: 1; stroke-dasharray: 4 4; opacity: .7; }
+.ln-svg .ln-avgt { fill: #c9a227; font-size: 10px; }
+.ln-main { fill: none; stroke-width: 2.2; stroke-linejoin: round; stroke-linecap: round; }
+.ln-rest { fill: none; stroke: #3a4050; stroke-width: 2.2; stroke-linejoin: round; }
+.ln-buy { fill: var(--bg); stroke: #c9a227; stroke-width: 1.6; }
+.ln-halo { opacity: .22; }
+.ln-svg .ln-date { fill: var(--text); font-size: 12px; font-weight: 600; }
+.ln-hit { touch-action: pan-y; cursor: crosshair; }
+
+/* phones: holdings as a list */
+.mlist { display: none; }
+.ml-row { display: grid; grid-template-columns: 40px 1fr auto; gap: 12px; align-items: center; width: 100%; padding: 11px 2px; background: none; border: 0;
+  border-bottom: 1px solid var(--border); color: inherit; text-align: left; cursor: pointer; }
+.ml-row:disabled { cursor: default; opacity: .85; }
+.ml-logo { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; }
+.ml-main { min-width: 0; display: flex; flex-direction: column; }
+.ml-main b { color: var(--text-strong); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ml-main span, .ml-day { color: var(--muted); font-size: 12.5px; }
+.ml-num { display: flex; flex-direction: column; align-items: flex-end; font-variant-numeric: tabular-nums; }
+.ml-num b { color: var(--text-strong); font-weight: 600; }
+.ml-num span { font-size: 13px; font-weight: 600; }
+.ml-num .ml-day { font-weight: 400; font-size: 11.5px; }
+.ml-total { display: flex; flex-wrap: wrap; gap: 2px 10px; justify-content: space-between; padding: 12px 2px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ml-total b { color: var(--text-strong); }
+.ml-total span:last-child { width: 100%; text-align: right; }
+
+/* desktop: bottom-tab icons and the subnav wrapper don't exist visually */
+.tab-ic { display: none; }
+.subnav-tabs { display: contents; }
+
+/* =====================================================================================================
+   Phones (≤ 720 px): app-like shell — compact header, bottom tab bar, swipeable rows, sheets for dialogs
+   ===================================================================================================== */
+@media (max-width: 720px) {
+  html, body { font-size: 14px; -webkit-text-size-adjust: 100%; }
+  body { padding-bottom: calc(64px + env(safe-area-inset-bottom)); }
+  /* no backdrop-filter here: it would make the fixed bottom bar position itself inside the header */
+  .topbar { flex-wrap: nowrap; padding: calc(6px + env(safe-area-inset-top)) 12px 6px; gap: 8px; backdrop-filter: none; background: var(--bg); }
+  .tabs button > span { text-transform: capitalize; }
+  .brand { font-size: 15px; }
+  .badge { font-size: 10px; padding: 1px 6px; }
+  .wk-badge { font-size: 0; margin-left: 0; }
+  .wk-badge::before { font-size: 12px; margin: 0; }
+  #base-seg button { padding: 3px 8px; font-size: 12px; }
+  .icon-btn { width: 34px; height: 34px; }
+  /* tabs become a bottom navigation bar */
+  .tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 30; margin: 0; order: 0; width: auto; display: grid; grid-template-columns: repeat(4, 1fr);
+    padding: 4px 6px calc(4px + env(safe-area-inset-bottom)); background: rgba(14,16,20,.96); backdrop-filter: blur(10px); border-top: 1px solid var(--border); }
+  .tabs button { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0 4px; font-size: 10.5px; font-weight: 600; border-radius: 10px; }
+  .tabs button.active { background: none; color: var(--text-strong); }
+  .tabs button.active .tab-ic { stroke: var(--accent); }
+  .tabs .long { display: none; }
+  .tab-ic { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  main { padding: 10px 12px 24px; }
+
+  /* horizontal scrollers instead of wrapping rows */
+  .toolbar, .ta-tools, .boardbar { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+  .toolbar::-webkit-scrollbar, .ta-tools::-webkit-scrollbar, .subnav-tabs::-webkit-scrollbar, .kpis::-webkit-scrollbar { display: none; }
+  .toolbar > *, .boardbar > * { flex: 0 0 auto; }
+  .toolbar .grow { display: none; }
+  .toolbar .filter, #m-filter { flex: 0 0 170px; width: 170px; }
+  .toolbar .ctl { white-space: nowrap; }
+  .ta-top .ta-searchbox { flex: 1 0 100%; }
+  .toolbar.ta-top { flex-wrap: wrap; }
+  .hours-bar { flex-wrap: wrap; }
+
+  /* portfolio: KPI cards swipe sideways; sub-tabs on one swipeable line */
+  .kpis { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 8px; margin: 0 -12px 10px; padding: 0 12px 2px; scrollbar-width: none; }
+  .kpis > .kpi { flex: 0 0 46%; scroll-snap-align: start; padding: 10px 12px; border-radius: 12px; }
+  .kpi .v { font-size: 18px; }
+  .kpi .d { font-size: 11.5px; }
+  .subnav { flex-wrap: wrap; gap: 8px; padding-bottom: 0; border-bottom: 0; }
+  .subnav-tabs { display: flex; gap: 4px; flex: 1 0 100%; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px;
+    border-bottom: 1px solid var(--border); }
+  .subnav-tabs [data-sub] { flex: 0 0 auto; white-space: nowrap; padding: 9px 10px; }
+  .subnav [data-sub].active::after { bottom: 0; }
+  .subnav > .btn { flex: 1; padding: 8px 6px; }
+  .subnav > .grow { display: none; }
+
+  /* holdings: list instead of the wide table; heatmap shorter */
+  .mlist { display: block; margin-top: 10px; }
+  .p-table-wrap { display: none; }
+  .map, .map.short { height: 52vh; min-height: 300px; }
+
+  /* tables that stay: tighter */
+  table.grid th, table.grid td { padding: 7px 8px; font-size: 12.5px; }
+  .table-wrap { margin-left: -12px; margin-right: -12px; border-radius: 0; border-left: 0; border-right: 0; }
+
+  /* dialogs slide up from the bottom */
+  .dlg, .dlg.wide { width: 100vw; max-width: 100vw; margin: auto 0 0; border-radius: 18px 18px 0 0; max-height: 92dvh; border-bottom: 0; }
+  .dlg[open] { display: flex; flex-direction: column; }
+  .dlg-body { overflow-y: auto; }
+  .dlg-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .dlg .row { flex-wrap: wrap; }
+  .sheet { width: 100vw; max-width: 100vw; margin: auto 0 0; max-height: 94dvh; border-radius: 18px 18px 0 0; }
+  .sheet[open] { animation: sheet-up .22s ease-out; }
+  .sh-grab { display: block; width: 40px; height: 5px; border-radius: 3px; background: #3a4050; margin: 8px auto 0; flex: 0 0 auto; }
+  .sheet-body { padding: 10px 18px 0; }
+  .sh-chart, .sh-cards { margin-left: -18px; margin-right: -18px; }
+  .sh-cards { padding: 0 18px 4px; }
+  .sh-price b { font-size: 30px; }
+
+  /* charts */
+  .pnlh-head { gap: 6px; }
+  .pnlh-head .seg button { padding: 4px 8px; }
+  .pnlh-sum { width: 100%; }
+  .pnlh-wrap { padding: 8px 6px 4px; margin: 0 -12px; border-radius: 0; }
+  #perf-chart { margin: 0 -12px; }
+  .tooltip { max-width: calc(100vw - 24px); }
+}
+@keyframes sheet-up { from { transform: translateY(40%); opacity: .4; } to { transform: none; opacity: 1; } }
+svg.lc, .pnlh-svg { touch-action: pan-y; }

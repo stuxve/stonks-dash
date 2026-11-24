@@ -2,7 +2,10 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0e1014">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <title>stonks-dash</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='9' height='9' fill='%2330cc5a'/%3E%3Crect x='10' width='6' height='9' fill='%23f63538'/%3E%3Crect y='10' width='6' height='6' fill='%23bf4045'/%3E%3Crect x='7' y='10' width='9' height='6' fill='%2335764e'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/app.css">
@@ -11,10 +14,10 @@
 <header class="topbar">
   <div class="brand"><span class="logo" aria-hidden="true"><i></i><i></i><i></i><i></i></span>stonks<b>dash</b></div>
   <nav class="tabs" role="tablist">
-    <button role="tab" data-view="markets" class="active">Markets</button>
-    <button role="tab" data-view="portfolio">My portfolio</button>
-    <button role="tab" data-view="ta">Analysis</button>
-    <button role="tab" data-view="hours">Market hours</button>
+    <button role="tab" data-view="markets" class="active"><svg class="tab-ic" viewBox="0 0 24 24"><rect x="3" y="3" width="10" height="10" rx="1.5"/><rect x="15" y="3" width="6" height="10" rx="1.5"/><rect x="3" y="15" width="6" height="6" rx="1.5"/><rect x="11" y="15" width="10" height="6" rx="1.5"/></svg><span>Markets</span></button>
+    <button role="tab" data-view="portfolio"><svg class="tab-ic" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/></svg><span><span class="long">My </span>portfolio</span></button>
+    <button role="tab" data-view="ta"><svg class="tab-ic" viewBox="0 0 24 24"><path d="M3 17l5-6 4 4 8-9"/><path d="M3 21h18"/></svg><span>Analysis</span></button>
+    <button role="tab" data-view="hours"><svg class="tab-ic" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span><span class="long">Market </span>hours</span></button>
   </nav>
   <div class="grow"></div>
   <span id="demo-badge" class="badge" hidden title="STONKS_PROVIDER=mock — synthetic prices">Demo data</span>
@@ -73,6 +76,7 @@
   <section id="view-portfolio" class="view" hidden>
     <div class="kpis" id="kpis"></div>
     <div class="subnav" id="p-subnav" role="tablist">
+      <div class="subnav-tabs">
       <button data-sub="holdings" class="active">Holdings</button>
       <button data-sub="targets">Sell targets <span class="nb" id="tg-badge" hidden></span></button>
       <button data-sub="ranges">Highs &amp; lows</button>
@@ -84,6 +88,7 @@
       <button data-sub="costs">Costs</button>
       <button data-sub="taxes">Taxes · ES</button>
       <button data-sub="ledger">Transactions</button>
+      </div>
       <div class="grow"></div>
       <button id="add-position" class="btn primary">+ Buy</button>
       <button id="add-sell" class="btn ghost">Sell</button>
@@ -130,7 +135,8 @@
     <div class="map short" id="p-map"><div class="loading">Loading…</div></div>
     <div class="legend" id="p-legend"></div>
     <div class="pnlh-wrap" id="p-pnlh" hidden></div>
-    <div class="table-wrap">
+    <div class="mlist" id="p-mlist"></div>
+    <div class="table-wrap p-table-wrap">
       <table id="p-table" class="grid">
         <thead></thead><tbody></tbody><tfoot></tfoot>
       </table>
@@ -579,6 +585,8 @@
     <button id="h-save" class="btn primary">Save</button></div>
 </dialog>
 
+<dialog id="dlg-sheet" class="sheet" aria-label="Ticker details"><div class="sh-grab" aria-hidden="true"></div><div id="sheet-body" class="sheet-body"></div></dialog>
+
 <dialog id="dlg-tx" class="dlg">
   <form method="dialog" class="dlg-head"><h2 id="tx-title">Record a sale</h2><button class="icon-btn" aria-label="Close">✕</button></form>
   <form id="tx-form" class="dlg-body">
@@ -633,7 +641,13 @@
         <option value="name">Name / custom label</option>
       </select>
     </label>
-    <label class="field">Auto-refresh
+    <label class="field" title="While a page is open, the Pi refreshes what it shows at this rate and pushes each update to it. Faster means more requests to Yahoo, which can rate-limit (block for a while) clients that ask too often.">Live prices
+      <select id="s-live">
+        <option value="0">Off (background rate only)</option><option value="10">Every 10 s</option><option value="15">Every 15 s</option>
+        <option value="20">Every 20 s</option><option value="30">Every 30 s</option><option value="60">Every minute</option>
+      </select>
+    </label>
+    <label class="field" title="Used when live updates are off or the connection drops, and for Market hours and Analysis">Auto-refresh (fallback)
       <select id="s-refresh">
         <option value="0">Off</option><option value="30">Every 30 s</option>
         <option value="60">Every minute</option><option value="300">Every 5 min</option><option value="900">Every 15 min</option>
@@ -666,6 +680,7 @@
 <script src="/static/portfolio.js"></script>
 <script src="/static/pnlhist.js"></script>
 <script src="/static/dividends.js"></script>
+<script src="/static/sheet.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

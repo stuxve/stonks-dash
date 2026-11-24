@@ -191,7 +191,11 @@
       div.addEventListener("mouseenter", (e) => showTip(opts.tooltip(t), e));
       div.addEventListener("mousemove", moveTip);
       div.addEventListener("mouseleave", hideTip);
-      div.addEventListener("click", (e) => { showTip(opts.tooltip(t), e); e.stopPropagation(); });
+      div.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const sym = opts.openSymbol?.(t);
+        if (sym) { hideTip(); sheet.open(sym, opts.sheetHint?.(t) || {}); } else showTip(opts.tooltip(t), e);
+      });
       frag.appendChild(div);
     }
     el.innerHTML = "";
@@ -322,6 +326,8 @@
       onZoom: (g) => { state.zoom.markets = g; drawMarkets(); },
       emptyHtml: `This board is empty. Use <b>Edit board</b> to add symbols.`,
       tooltip: (t) => marketTip(t, period, color),
+      openSymbol: (t) => t.symbol,
+      sheetHint: (t) => ({ name: t.label || t.name, price: t.ok ? t.price : null, currency: t.currency, quote_type: t.quote_type }),
     });
     renderCrumbs("#m-crumbs", "markets", drawMarkets);
     if (res && res.query && !res.hits) {
@@ -387,6 +393,7 @@
     drawPortfolio();
     loadMoves();
     pf.onPortfolio();
+    sheet.refresh();
     stamp(state.port.as_of);
   }
 
@@ -495,6 +502,7 @@
     $$("#p-sub-holdings .p-maponly").forEach((e) => { e.hidden = hist; });
     for (const id of ["#p-map", "#p-legend", "#p-crumbs"]) $(id).hidden = hist;
     $("#p-pnlh").hidden = !hist;
+    renderMobileList(d, positions);
     if (hist) { pnlHist.show(d.totals); renderTable(d, positions); return; }
     renderTreemap(pMap, {
       tiles: positions,
@@ -507,6 +515,7 @@
       onZoom: (g) => { state.zoom.portfolio = g; drawPortfolio(); },
       emptyHtml: `No positions yet.<br><br><button class="btn primary" onclick="document.getElementById('add-position').click()">+ Add your first position</button>`,
       tooltip: (p) => portfolioTip(p, period, color, v.color),
+      openSymbol: (p) => (p.symbol && p.quote_type !== "MANUAL" ? p.symbol : null),
     });
     renderCrumbs("#p-crumbs", "portfolio", drawPortfolio);
     renderLegend($("#p-legend"), range, color, v.color === "pnl" ? "Total P&L" : v.color === "bench" ? `vs ${d.benchmark?.symbol || "index"} (pp)` : `${period} change`);
@@ -675,7 +684,32 @@
       <td class="num ${cls(tt.pnl)}">${fmtSigned(tt.pnl, b)}</td><td class="num ${cls(tt.pnl_pct)}">${fmtPct(tt.pnl_pct)}</td>
       <td class="num ${cls(tt.vs_bench)}">${tt.vs_bench == null ? "—" : fmtPP(tt.vs_bench)}</td><td class="num">100%</td><td></td></tr>` : "";
   }
+  // phones: holdings as a list (name, units, value, return); tap one for its sheet (static/sheet.js)
+  const hueOf = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+  function renderMobileList(d, rows) {
+    const b = base(), t = d.totals, el = $("#p-mlist");
+    const list = rows.slice().sort((a, c) => (c.value || 0) - (a.value || 0));
+    const arrow = (v) => (v > 0 ? "▲" : v < 0 ? "▼" : "");
+    el.innerHTML = list.length ? list.map((p) => {
+      const sym = p.symbol || "", man = !p.symbol || p.quote_type === "MANUAL";
+      return `<button class="ml-row" data-sym="${esc(sym)}" ${man ? "disabled" : ""}>
+        <span class="ml-logo" style="background:hsl(${hueOf(sym || p.display_name || "?")} 45% 38%)">${esc((sym || p.display_name || "?").replace(/^\^/, "").replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase())}</span>
+        <span class="ml-main"><b>${esc(p.display_name || sym)}</b><span>${fmtNum(p.quantity)} · ${esc(sym)}${p.lots ? ` · ${p.lots.length} lots` : ""}</span></span>
+        <span class="ml-num"><b>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
+          <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span></span></button>`;
+    }).join("") + `<div class="ml-total"><span>Total · ${list.length} positions</span><b>${fmtMoney(t.value, b)}</b><span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)} (${fmtPct(t.pnl_pct)})</span></div>`
+      : '<div class="empty">No positions yet.</div>';
+  }
+  $("#p-mlist").addEventListener("click", (e) => {
+    const r = e.target.closest(".ml-row[data-sym]");
+    if (r && r.dataset.sym) sheet.open(r.dataset.sym);
+  });
   $("#p-table").addEventListener("click", async (e) => {
+    const sym = e.target.closest("td.asset > b");
+    if (sym && !e.target.closest(".lot-row")) {
+      const s = sym.textContent.trim();
+      if (s && s !== "—") { sheet.open(s); e.stopPropagation(); return; }
+    }
     const th = e.target.closest("th.sortable");
     if (th) {
       const k = th.dataset.k;
@@ -755,6 +789,7 @@
     state.view === "markets" ? drawMarkets() : drawPortfolio();
   }
   async function reload(silent = false) {
+    liveConnect();                                         // follow what this view shows (no-op if unchanged)
     if (state.loading) { state.pending = true; return; }   // e.g. tab switched mid-load: run again after
     state.loading = true;
     state.pending = false;
@@ -776,12 +811,59 @@
       if (state.pending) { state.pending = false; reload(true); }
     }
   }
-  function stamp(ts) {
-    const t = new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  function stamp(ts, quiet = false) {
+    if (ts) live.lastTs = ts;
+    const t = live.lastTs ? new Date(live.lastTs * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
     const r = +state.settings.refresh_seconds;
-    $("#status").textContent = `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
-    workerBadge();
+    const el = $("#status");
+    el.textContent = live.on() ? `Updated ${t} · live ${live.secs}s` : `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
+    el.title = live.on() ? "Live: the Pi pushes each refresh to this page as it happens (Server-Sent Events). Change the rate in Settings → Live prices."
+      : live.es ? "Live connection lost: reconnecting; meanwhile the page polls on its own" : "";
+    if (!quiet) workerBadge();
   }
+
+  // ---- live updates: the Pi refreshes what this page shows every N seconds and pushes "new data" events
+  // (Server-Sent Events, /api/events). The page reloads only when prices actually moved; the clock updates
+  // either way. If the stream drops, the browser reconnects by itself and the page falls back to polling.
+  const live = { es: null, watch: null, ok: false, secs: 15, lastTs: 0, t: null, on() { return this.ok && !!this.watch; } };
+  function liveWatch() {
+    const b = base();
+    if (state.view === "portfolio") return `port:${b}`;
+    if (state.view === "markets" && state.boardId != null) return `heat:${state.boardId}:${b}`;
+    if (state.view === "hours") return `divs:${b}`;
+    return "";
+  }
+  function liveConnect(force = false) {
+    if (typeof EventSource === "undefined" || document.hidden || !state.settings) return;
+    const w = liveWatch();
+    if (!force && live.es && live.watch === w) return;
+    live.es?.close();
+    live.ok = false;
+    live.watch = w;
+    const es = new EventSource(`/api/events?watch=${encodeURIComponent(w)}`);
+    live.es = es;
+    es.addEventListener("hello", (e) => {
+      const d = JSON.parse(e.data);
+      live.ok = true; live.secs = d.live_seconds;
+      schedule(); stamp(0, true);
+    });
+    es.addEventListener("update", (e) => {
+      const d = JSON.parse(e.data);
+      if (d.key.startsWith("divs:")) { if (state.view === "hours" && d.changed) divs.load(true); return; }
+      if (d.key !== live.watch) return;
+      if (d.changed) liveReload(); else stamp(d.at, true);   // same prices: just the time
+    });
+    es.addEventListener("clear", () => liveReload());          // an edit here or in another tab
+    es.onerror = () => { if (live.ok) { live.ok = false; schedule(); stamp(0, true); } };
+  }
+  function liveReload() {                                       // several events in a row → one reload
+    clearTimeout(live.t);
+    live.t = setTimeout(() => reload(true), 250);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { live.es?.close(); live.es = null; live.ok = false; clearInterval(state.timer); }
+    else { schedule(); reload(true); }                          // back on the tab: catch up, reconnect
+  });
   // Pi background refresh: is the worker keeping prices and alerts current without this page? (app/worker.py)
   async function workerBadge() {
     const el = $("#wk-badge");
@@ -799,7 +881,8 @@
   }
   function schedule() {
     clearInterval(state.timer);
-    const r = +state.settings.refresh_seconds;
+    // live views get pushed updates; polling stays for the others and as a fallback when the stream is down
+    const r = live.on() && state.view !== "hours" ? 0 : +state.settings.refresh_seconds;
     if (r > 0) state.timer = setInterval(() => { if (!document.hidden) reload(true); }, r * 1000);
   }
   $("#refresh-btn").addEventListener("click", () => reload(true));
@@ -808,6 +891,7 @@
   $$(".tabs button").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
   function switchView(v) {
     state.view = v;
+    setTimeout(schedule, 0);
     $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
     $("#view-markets").hidden = v !== "markets";
     $("#view-portfolio").hidden = v !== "portfolio";
@@ -1069,11 +1153,16 @@
     $("#s-scheme").value = state.settings.color_scheme || "classic";
     $("#s-label").value = state.settings.tile_label || "symbol";
     $("#s-refresh").value = String(state.settings.refresh_seconds ?? 60);
+    $("#s-live").value = String(state.settings.live_seconds ?? 15);
     dlgSet.showModal();
   });
   $("#s-scheme").addEventListener("change", (e) => { saveSettings({ color_scheme: e.target.value }); redraw(); });
   $("#s-label").addEventListener("change", (e) => { saveSettings({ tile_label: e.target.value }); redraw(); });
   $("#s-refresh").addEventListener("change", (e) => { saveSettings({ refresh_seconds: +e.target.value }); schedule(); });
+  $("#s-live").addEventListener("change", async (e) => {
+    await saveSettings({ live_seconds: +e.target.value });
+    if (+e.target.value > 0) liveConnect(true); else { live.es?.close(); live.es = null; live.ok = false; schedule(); stamp(0, true); }
+  });
   $("#s-import").addEventListener("change", async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -1095,6 +1184,11 @@
     showTip, moveTip, hideTip, autoGroup, shownPositions, pView, attachSearch, openPosition, loadPortfolio,
     CURRENCIES, TYPE_LABEL, $, $$,
   });
+
+  // ================================================================== symbol sheet (static/sheet.js)
+  const sheet = window.StonksSheet({ api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
+    positionFor: (sym) => (state.port ? shownPositions(state.port, { ...pView(), combine: true, group: "none" }).find((p) => p.symbol === sym) : null),
+    openTx: (...a) => pf.openTx(...a), openPosition: (...a) => openPosition(...a), openChart: (s) => openChart(s), $ });
 
   // ================================================================== dividends in Market hours (static/dividends.js)
   const divs = window.StonksDividends({ api, esc, state, base, fmtMoney, fmtPrice, fmtNum, fmtDate, fmtPct,
@@ -1122,6 +1216,7 @@
   // ================================================================== boot
   (async function boot() {
     setupPeriodSegs();
+    if (matchMedia("(max-width: 720px)").matches) $("#ta-indbox").open = false;   // phones: chart first
     try {
       state.settings = await api("/api/settings");
       await loadBoards();

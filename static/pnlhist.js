@@ -69,7 +69,8 @@ window.StonksPnlHist = function (ctx) {
 
   function draw(pts, fmtY, b) {
     const box = $("#pnlh-chart"), d3 = window.d3;
-    const W = Math.max(300, box.clientWidth || 900), H = Math.max(300, Math.min(520, Math.round(window.innerHeight * 0.5))), Mg = { l: 10, r: 84, t: 10, b: 24 };
+    const phone = matchMedia("(max-width: 720px)").matches;
+    const W = Math.max(280, box.clientWidth || 900), H = phone ? 260 : Math.max(300, Math.min(520, Math.round(window.innerHeight * 0.5))), Mg = { l: phone ? 4 : 10, r: phone ? 70 : 84, t: phone ? 64 : 10, b: 24 };
     const X = d3.scaleTime().domain(d3.extent(pts, (p) => p.t)).range([Mg.l, W - Mg.r]);
     const lo = Math.min(0, d3.min(pts, (p) => p.y)), hi = Math.max(0, d3.max(pts, (p) => p.y)), pad = (hi - lo) * 0.08 || 1;
     const Y = d3.scaleLinear().domain([lo - pad, hi + pad]).nice().range([H - Mg.b, Mg.t]);
@@ -100,16 +101,24 @@ window.StonksPnlHist = function (ctx) {
     // hover read-out
     const tip = box.querySelector(".pnlh-tip"), hl = sv.append("line").attr("y1", Mg.t).attr("y2", H - Mg.b).attr("stroke", "rgba(255,255,255,.35)").style("display", "none");
     const dot = sv.append("circle").attr("r", 3.5).attr("fill", "var(--text)").style("display", "none");
-    sv.append("rect").attr("x", Mg.l).attr("y", Mg.t).attr("width", W - Mg.r - Mg.l).attr("height", H - Mg.t - Mg.b).attr("fill", "transparent")
-      .on("mousemove", (e) => {
-        const [mx] = d3.pointer(e), p = pts[d3.bisector((q) => q.t).center(pts, X.invert(mx))], x = X(p.t);
+    // mouse: hover; finger: drag sideways to scrub (vertical swipes still scroll the page), lift to hide
+    let down = false;
+    const hit = sv.append("rect").attr("x", Mg.l).attr("y", 0).attr("width", W - Mg.r - Mg.l).attr("height", H - Mg.b).attr("fill", "transparent")
+      .style("touch-action", "pan-y");
+    const hide = () => { hl.style("display", "none"); dot.style("display", "none"); tip.hidden = true; };
+    hit.on("pointerdown", (e) => { down = true; try { e.target.setPointerCapture(e.pointerId); } catch { /* */ } move(e); })
+      .on("pointermove", (e) => { if (down || e.pointerType === "mouse") move(e); })
+      .on("pointerup pointercancel", (e) => { down = false; if (e.pointerType !== "mouse") hide(); })
+      .on("pointerleave", (e) => { if (e.pointerType === "mouse") hide(); });
+    function move(e) {
+        const [mx] = d3.pointer(e, sv.node()), p = pts[d3.bisector((q) => q.t).center(pts, X.invert(Math.max(Mg.l, Math.min(W - Mg.r, mx))))], x = X(p.t);
         hl.attr("x1", x).attr("x2", x).style("display", null); dot.attr("cx", x).attr("cy", Y(p.y)).style("display", null);
         const pct = p.basis > 0 ? (p.pnl / p.basis) * 100 : null;
         tip.innerHTML = `<b>${esc(fmtDate(p.d))}</b><br>${mode() === "total" ? "Total P&amp;L" : "Unrealized P&amp;L"} <b class="${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</b>${pct != null ? ` <span class="${cls(pct)}">${fmtPct(pct)}</span>` : ""}
           <br><span class="sub">value</span> ${fmtMoney(p.value, b)} · <span class="sub">${mode() === "total" ? "net invested" : "cost"}</span> ${fmtMoney(p.basis, b)}`;
-        tip.hidden = false; tip.style.left = `${Math.min(x + 12, W - 250)}px`;
-      })
-      .on("mouseleave", () => { hl.style("display", "none"); dot.style("display", "none"); tip.hidden = true; });
+        tip.hidden = false;
+        tip.style.left = phone ? `${Math.max(4, Math.min(x - 120, W - 250))}px` : `${Math.min(x + 12, W - 250)}px`;
+    }
   }
 
   document.addEventListener("click", (e) => {

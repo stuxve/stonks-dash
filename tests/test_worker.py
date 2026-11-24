@@ -142,3 +142,55 @@ def test_short_yahoo_history_is_retried_soon(tmp_path):
     assert time.time() - t > 6 * 3600 - 700                # expires ~10 min from now, not in 6 h
     eng._full["MCD"] = (t - 700, *eng._full["MCD"][1:])     # 10 minutes later…
     assert len(eng.history(["MCD"], start)["MCD"]) == 300 and len(calls) == 2
+
+
+def test_live_events_stream_pushes_refreshes(client):
+    import threading
+    snap = client.app.state.snap
+
+    def push():
+        snap.refresh("port:EUR", lambda: {"positions": [{"id": 1, "price": 10.0, "quantity": 1}], "as_of": 1})
+        snap.refresh("port:EUR", lambda: {"positions": [{"id": 1, "price": 10.0, "quantity": 1}], "as_of": 2})
+        snap.refresh("heat:9:EUR", lambda: {"tiles": [], "as_of": 3})      # not watched: not sent
+        snap.refresh("port:EUR", lambda: {"positions": [{"id": 1, "price": 10.5, "quantity": 1}], "as_of": 4})
+    threading.Timer(0.5, push).start()
+    with client.stream("GET", "/api/events?watch=port:eur,bogus:1&limit=3") as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        body = "".join(r.iter_text())
+    events = [blk for blk in body.split("\n\n") if blk.startswith("event:")]
+    assert events[0].startswith("event: hello") and '"watch": ["port:EUR"]' in events[0]
+    ups = [json_load(e) for e in events[1:]]
+    assert [u["key"] for u in ups] == ["port:EUR"] * 3
+    assert [u["changed"] for u in ups] == [True, False, True]          # same prices → only the clock moves
+    assert client.app.state.bus.clients() == 0                            # unsubscribed when the stream ends
+
+
+def json_load(block):
+    import json
+    return json.loads(block.split("data: ", 1)[1])
+
+
+def test_view_preferences_dont_clear_shared_results(client):
+    snap = client.app.state.snap
+    client.get("/api/portfolio?base=EUR")
+    assert snap.age("port:EUR") is not None
+    client.put("/api/settings", json={"p_mapview": "pnl", "live_seconds": 20})
+    assert snap.age("port:EUR") is not None
+    client.put("/api/settings", json={"benchmark": "IWDA.AS"})
+    assert snap.age("port:EUR") is None
+    st = client.get("/api/worker").json()["live"]
+    assert st["seconds"] == 20 and st["clients"] == 0
+
+
+def test_chart_endpoint_ranges(client):
+    d1 = client.get("/api/chart?symbol=SAN.MC&range=1D").json()
+    assert d1["intraday"] and len(d1["points"]) >= 2 and d1["ref"] == pytest.approx(d1["prev_close"])
+    days = {time.strftime("%Y-%m-%d", time.localtime(t / 1000)) for t, _ in d1["points"]}
+    assert len(days) == 1                                                   # one session only
+    y = client.get("/api/chart?symbol=SAN.MC&range=1Y").json()
+    assert not y["intraday"] and 240 <= len(y["points"]) <= 270 and y["ref"] == y["points"][0][1]
+    assert y["change_pct"] == pytest.approx((y["last"] / y["ref"] - 1) * 100)
+    mx = client.get("/api/chart?symbol=SAN.MC&range=max").json()
+    assert len(mx["points"]) <= 500 and mx["points"][-1][0] <= time.time() * 1000 + 86400e3
+    assert client.get("/api/chart?symbol=SAN.MC&range=5Y").status_code == 400
+    assert client.get("/api/chart?symbol=bad sym&range=1Y").status_code == 400

@@ -164,7 +164,8 @@ window.StonksTA = function (ctx) {
     if (alt) { altParams(); altRender(); signals(); return; }
     const bg = css("--bg") || "#0e1014", text = css("--muted") || "#8b92a1", border = css("--border") || "#272c37";
     const panesOn = IND.filter((x) => x.g === "Panes" && !x.overlayPane && cfg(x.key).on && !(x.vol && !D.hasVol));
-    el.style.height = `${(window.innerWidth < 700 ? 360 : 440) + panesOn.length * 120}px`;
+    const phone = window.innerWidth < 720;
+    el.style.height = `${(phone ? Math.max(300, Math.min(440, Math.round(window.innerHeight * 0.48))) : 440) + panesOn.length * (phone ? 90 : 120)}px`;
     chart = L.createChart(el, {
       autoSize: true,
       layout: { background: { type: "solid", color: bg }, textColor: text, fontSize: 11, fontFamily: css("--font"),
@@ -173,6 +174,11 @@ window.StonksTA = function (ctx) {
       rightPriceScale: { borderColor: border }, timeScale: { borderColor: border, rightOffset: 6, minBarSpacing: 0.5 },
       crosshair: { mode: L.CrosshairMode.Normal },
       localization: { locale: LOCALE },
+      // phones: one finger pans sideways, vertical swipes scroll the page, pinch zooms;
+      // press and hold to read values (the crosshair goes away when you lift the finger)
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+      handleScale: { axisPressedMouseMove: true, mouseWheel: true, pinch: true },
+      trackingMode: { exitMode: L.TrackingModeExitMode ? L.TrackingModeExitMode.OnTouchEnd : 0 },
     });
     // main series
     const nFuture = Math.max(cfg("ichi").on ? cfg("ichi").b : 0, cfg("alli").on ? 8 : 0);

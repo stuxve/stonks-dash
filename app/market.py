@@ -345,6 +345,20 @@ class YahooProvider:
             log.info("earnings dates %s failed: %s", symbol, e)
         return out if (out["next"] or out["history"]) else {}
 
+    def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
+        """Closes of `interval` bars (5m, 30m, 60m…) over `period` (1d, 5d, 1mo), UTC timestamps, raw listing units."""
+        df = self.yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False,
+                              prepost=False, multi_level_index=False, timeout=20)
+        if df is None or df.empty:
+            return pd.Series(dtype=float)
+        col = df["Close"]
+        if isinstance(col, pd.DataFrame):
+            col = col.iloc[:, 0]
+        s = pd.to_numeric(col, errors="coerce").dropna()
+        idx = pd.DatetimeIndex(s.index)
+        s.index = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
+        return s[~s.index.duplicated(keep="last")].sort_index().astype(float)
+
     def dividends(self, symbol: str) -> dict:
         """Past dividends per share (ex-date, amount in the listing's currency as Yahoo quotes it, e.g. GBp) and
         the next ex-dividend / payment date when Yahoo's calendar has them."""
@@ -716,6 +730,30 @@ class MockProvider:
                          "surprise": round((act / est - 1) * 100, 2)})
         return {"next": [nxt.isoformat()], "eps_est": round(float(r.uniform(0.5, 3)), 2), "rev_est": None,
                 "ex_div": None, "div_date": None, "history": hist}
+
+    def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
+        """Synthetic intraday bars ending at the latest close: 09:00–17:30 Madrid sessions (24/7 for crypto)."""
+        step = {"5m": 5, "15m": 15, "30m": 30, "60m": 60, "1h": 60}[interval]
+        days = {"1d": 1, "5d": 5, "1mo": 22}[period]
+        daily = self._series(symbol, date.today() - timedelta(days=60))
+        crypto = self._quote_type(symbol) == "CRYPTOCURRENCY"
+        sess = daily.index[-days:] if not crypto else pd.date_range(end=pd.Timestamp(date.today()), periods=days)
+        r = np.random.default_rng(self._seed(symbol) + 99)
+        now = pd.Timestamp.now(tz="Europe/Madrid")
+        stamps, vals = [], []
+        for d in sess:
+            lo, hi = (pd.Timestamp(d).tz_localize("Europe/Madrid") + pd.Timedelta(hours=h) for h in ((0, 24) if crypto else (9, 17.5)))
+            t = pd.date_range(lo, min(hi, now), freq=f"{step}min")
+            if not len(t):
+                continue
+            prev = float(daily[daily.index < pd.Timestamp(d)].iloc[-1]) if (daily.index < pd.Timestamp(d)).any() else float(daily.iloc[0])
+            close = float(daily.get(pd.Timestamp(d), daily.iloc[-1]))
+            walk = np.cumsum(r.normal(0, 0.0025, len(t)))
+            path = prev * np.exp(walk - walk[-1] * np.linspace(0, 1, len(t)) + np.log(close / prev) * np.linspace(0, 1, len(t)))
+            stamps += list(t)
+            vals += list(path)
+        s = pd.Series(vals, index=pd.DatetimeIndex(stamps).tz_convert("UTC"), dtype=float)
+        return s[~s.index.duplicated(keep="last")].sort_index()
 
     def dividends(self, symbol: str) -> dict:
         """Quarterly payers among stocks (about 60%), a few semi-annual European ones; ETFs here accumulate."""
@@ -1156,6 +1194,27 @@ class QuoteEngine:
             old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
             have.update({s: old[keys[s]] for s in stale if keys[s] in old})
         return have
+
+    def intraday(self, symbol: str, period: str, interval: str, ttl: float = 60) -> pd.Series | None:
+        """Intraday closes (MAJOR currency units, UTC index) for the detail chart, cached `ttl` seconds in memory.
+        A listing priced from another one (IBCF.MU via IBCF.DE) uses that listing's bars."""
+        if not hasattr(self.p, "intraday"):
+            return None
+        src = self.sources.get(symbol, symbol)
+        key = (src, period, interval)
+        cache = self.__dict__.setdefault("_intra", {})
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            ser = hit[1]
+        else:
+            try:
+                ser = self.p.intraday(src, period, interval)
+            except Exception as e:  # noqa: BLE001
+                log.info("intraday %s %s/%s failed: %s", src, period, interval, e)
+                return hit[1] if hit else None
+            cache[key] = (time.time(), ser)
+        _, div = normalize_currency((self.meta([src]).get(src) or {}).get("currency"))
+        return ser / div if ser is not None and div != 1 else ser
 
     def dividends(self, symbols: list[str], ttl: float = 12 * 3600) -> dict[str, dict]:
         """Dividend history and calendar per symbol (cached 12 h in SQLite), amounts in MAJOR currency units.

@@ -147,7 +147,8 @@ window.StonksPortfolio = function (ctx) {
     const series = SERIES.filter((s) => s.key !== "bench" || perf.bench.length);
     $("#perf-legend").innerHTML = series.map((s) => `<span class="lk ${s.cls}"><i></i>${s.label}</span>`).join("");
 
-    const W = el.clientWidth || 800, H = 320, m = { t: 12, r: 16, b: 28, l: 64 };
+    const phone = matchMedia("(max-width: 720px)").matches;
+    const W = el.clientWidth || 800, H = phone ? 260 : 320, m = { t: 12, r: phone ? 8 : 16, b: 28, l: phone ? 48 : 64 };
     const x = d3.scaleTime().domain(d3.extent(pts, (p) => p.d)).range([m.l, W - m.r]);
     const vals = pts.flatMap((p) => series.map((s) => p[s.key])).filter((v) => v != null);
     let [lo, hi] = d3.extent(vals);
@@ -172,7 +173,15 @@ window.StonksPortfolio = function (ctx) {
     const svg = el.querySelector("svg"), xh = svg.querySelector(".xh"), dots = [...svg.querySelectorAll(".dot")];
     const bis = d3.bisector((p) => p.d).center;
     const hit = svg.querySelector(".hit");
+    // finger: drag sideways to read values (vertical swipes still scroll), lift to hide; mouse: hover
+    let down = false;
+    hit.style.touchAction = "pan-y";
+    hit.addEventListener("pointerdown", (e) => { down = true; try { hit.setPointerCapture(e.pointerId); } catch { /* */ } hit.dispatchEvent(new PointerEvent("pointermove", e)); });
+    const lift = (e) => { down = false; if (e.pointerType !== "mouse") { xh.hidden = true; dots.forEach((d) => (d.hidden = true)); hideTip(); } };
+    hit.addEventListener("pointerup", lift);
+    hit.addEventListener("pointercancel", lift);
     hit.addEventListener("pointermove", (e) => {
+      if (e.pointerType !== "mouse" && !down) return;
       const r = svg.getBoundingClientRect();
       const px = ((e.clientX - r.left) / r.width) * W;
       const p = pts[bis(pts, x.invert(px))];
