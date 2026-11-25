@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from .db import DB
 from . import alerts, crosses, dividends, exposure, implied, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from . import worker as wk
-from .market import PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
+from .market import ISIN_RE, ISIN_SYMBOL, PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"),
@@ -224,9 +224,89 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             snap.clear()        # e.g. the benchmark changed; view preferences (sort, colours…) don't need it
         return db.get_settings()
 
+    # ---- finding a listing that has prices
+    _GENERIC = {"ucits", "etf", "fund", "the", "acc", "dist", "inc", "1c", "1d", "c", "d", "a", "plc", "usd", "eur", "gbp", "chf", "shares", "class"}
+
+    def _name_words(name: str | None) -> set:
+        return {w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if w not in _GENERIC}
+
+    def _same_fund(a: str | None, b: str | None) -> bool:
+        """Two Yahoo names of the same fund (they're often cut short at different lengths)."""
+        A, B = _name_words(a), _name_words(b)
+        return len(A) >= 2 and len(B) >= 2 and len(A & B) / min(len(A), len(B)) >= 0.8
+
+    def _listings_by_name(name: str, exclude: set) -> list[dict]:
+        try:
+            res = prov.search(name, limit=15)
+        except Exception:  # noqa: BLE001
+            return []
+        return [r for r in res if r["symbol"].upper() not in exclude and not ISIN_SYMBOL.match(r["symbol"].upper())
+                and _same_fund(r.get("name"), name)]
+
+    EXCH_ORDER = (".DE", ".AS", ".PA", ".MI", ".MC", ".SW", ".L", ".F", ".SG", ".MU", ".BE", ".DU")
+
+    @app.get("/api/resolve")
+    def resolve_listing(symbol: str):
+        """A ticker with prices for what you picked. Yahoo lists many European funds under their ISIN on Stuttgart
+        ("IE00BNRQM384.SG") with no price data at all; the same fund trades under real tickers on Xetra, Euronext,
+        Milan or London. This finds those (same ISIN on Yahoo's search, or the same fund name) and returns the one
+        with prices, Xetra first. {symbol, resolved, from, name, reason}."""
+        S = symbol.strip().upper()
+        if not S or len(S) > 24:
+            raise HTTPException(400, "Invalid ticker")
+        q = engine.quotes([S]).get(S)
+        if q and q.ok:
+            return {"symbol": S, "resolved": False, "name": q.name}
+        key = f"resolve:{S}"
+        hit = db.get_meta([key], 7 * 86400).get(key)
+        if hit and hit.get("symbol"):
+            return hit
+        isin = S.split(".")[0] if ISIN_SYMBOL.match(S) else None
+        cands, name = [], None
+        try:
+            res = prov.search(isin or S.split(".")[0], limit=15)
+        except Exception:  # noqa: BLE001
+            res = []
+        for r in res:
+            if r["symbol"].upper() == S and r.get("name") and r["name"].upper() != S:
+                name = r["name"]
+        name = name or next((r.get("name") for r in res if r.get("name") and not ISIN_SYMBOL.match(r.get("name", "").upper())), None) \
+            or (engine.meta([S]).get(S) or {}).get("long_name") or (engine.meta([S]).get(S) or {}).get("name")
+        root = S.split(".")[0]
+        cands += [r["symbol"].upper() for r in res if not ISIN_SYMBOL.match(r["symbol"].upper())
+                  and (isin or r["symbol"].upper().split(".")[0] == root)]
+        if name:
+            cands += [r["symbol"].upper() for r in _listings_by_name(name, {S})]
+        cands = [c for c in dict.fromkeys(cands) if c != S]
+        out = {"symbol": None, "resolved": False, "from": S, "name": name,
+               "reason": f"No price data for {S} on Yahoo and no other listing of the same fund was found."}
+        if cands:
+            qs = engine.quotes(cands)
+            ok = [c for c in cands if qs.get(c) and qs[c].ok]
+            if ok:
+                rank = lambda c: (next((i for i, x in enumerate(EXCH_ORDER) if c.endswith(x)), len(EXCH_ORDER)), c)  # noqa: E731
+                best = min(ok, key=rank)
+                ex = {".DE": "Xetra", ".AS": "Euronext Amsterdam", ".PA": "Euronext Paris", ".MI": "Borsa Italiana",
+                      ".MC": "Madrid", ".SW": "SIX Swiss", ".L": "London"}.get("." + best.split(".")[-1] if "." in best else "", "another exchange")
+                out = {"symbol": best, "resolved": True, "from": S, "name": name or qs[best].name,
+                       "reason": f"{S} has no prices on Yahoo — using {best}, the same fund on {ex}."}
+        if out["symbol"]:
+            db.put_meta(key, out)
+        return out
+
     @app.get("/api/search")
     def search(q: str = Query(..., min_length=1), limit: int = 10):
-        return prov.search(q, limit=limit)
+        res = prov.search(q, limit=limit)
+        qq = q.strip().upper()
+        # an ISIN often returns only Yahoo's price-less "ISIN.SG" line: add the fund's real listings by name
+        if ISIN_RE.match(qq) and res and all(ISIN_SYMBOL.match(r["symbol"].upper()) for r in res):
+            name = next((r.get("name") for r in res if r.get("name") and r["name"].upper() != r["symbol"].upper()), None)
+            if name:
+                extra = _listings_by_name(name, {r["symbol"].upper() for r in res})
+                for r in res:
+                    r["no_prices"] = True
+                res = extra[:limit] + res
+        return res[:limit]
 
     @app.get("/api/quote/{symbol}")
     def quote(symbol: str):

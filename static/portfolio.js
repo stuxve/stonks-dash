@@ -727,12 +727,21 @@ window.StonksPortfolio = function (ctx) {
   attachSearch($("#alloc-new-name"), async (it) => {
     hint.textContent = "Looking up…";
     try {
-      const q = await api(`/api/quote/${encodeURIComponent(it.symbol)}`);
-      if (!q.ok) { pick = null; hint.innerHTML = `<span class="down">No price data for ${esc(it.symbol)} — pick another listing.</span>`; return; }
+      let q = await api(`/api/quote/${encodeURIComponent(it.symbol)}`);
+      if (!q.ok && !it.resolvedFrom) {          // no prices on this listing: try the same fund elsewhere
+        const r = await api(`/api/resolve?symbol=${encodeURIComponent(it.symbol)}`).catch(() => null);
+        if (r?.resolved && r.symbol) {
+          it = { ...it, symbol: r.symbol, name: r.name || it.name, resolvedFrom: r.from, note: r.reason };
+          $("#alloc-new-name").value = r.symbol;
+          q = await api(`/api/quote/${encodeURIComponent(r.symbol)}`);
+        } else if (r?.reason) it = { ...it, note: r.reason };
+      }
+      if (!q.ok) { pick = null; hint.innerHTML = `<span class="down">${esc(it.note || `No price data for ${it.symbol} on Yahoo, and no other listing of the same fund was found. Search the fund by its name or ticker instead.`)}</span>`; return; }
       const dim = allocDim();
       const switching = freeDims.includes(dim);
-      pick = { symbol: q.symbol, name: q.name || it.name, quote: q, bucket: bucketFor(q, switching ? "symbol" : dim), switching };
-      hint.innerHTML = `<b>${esc(q.symbol)}</b> · ${esc(pick.name)} · ${fmtPrice(q.price, q.currency)} <span class="${cls(q.changes?.["1D"])}">${fmtPct(q.changes?.["1D"])}</span>`
+      pick = { symbol: q.symbol, name: (it.resolvedFrom ? it.name : q.name) || it.name, quote: q, bucket: bucketFor(q, switching ? "symbol" : dim), switching };
+      hint.innerHTML = (it.resolvedFrom ? `<span class="warn-t">${esc(it.note)}</span><br>` : "")
+        + `<b>${esc(q.symbol)}</b> · ${esc(pick.name)} · ${fmtPrice(q.price, q.currency)} <span class="${cls(q.changes?.["1D"])}">${fmtPct(q.changes?.["1D"])}</span>`
         + (dim === "symbol" || switching ? "" : ` → counts toward the <b>${esc(pick.bucket)}</b> bucket`)
         + (switching ? ` · <span class="warn-t">targets for single assets live under “Allocate by: Each asset” — it will switch there</span>` : "");
     } catch (e) { pick = null; hint.textContent = e.message; }

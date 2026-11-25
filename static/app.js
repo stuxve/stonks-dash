@@ -926,7 +926,7 @@
     let timer, items = [], idx = -1;
     const close = () => { list.hidden = true; idx = -1; };
     const render = () => {
-      list.innerHTML = items.map((it, i) => `<li data-i="${i}" class="${i === idx ? "on" : ""}"><span><b>${esc(it.symbol)}</b> ${esc(it.name)}</span><small>${esc(it.type || "")} · ${esc(it.exchange || "")}</small></li>`).join("");
+      list.innerHTML = items.map((it, i) => `<li data-i="${i}" class="${i === idx ? "on" : ""}${it.no_prices ? " noprice" : ""}"><span><b>${esc(it.symbol)}</b> ${esc(it.name)}</span><small>${esc(it.type || "")} · ${esc(it.exchange || "")}${it.no_prices ? " · no prices on Yahoo" : ""}</small></li>`).join("");
       list.hidden = !items.length;
     };
     input.addEventListener("input", () => {
@@ -951,8 +951,21 @@
       if (li) { e.preventDefault(); pick(items[+li.dataset.i]); }
     });
     input.addEventListener("blur", () => setTimeout(close, 120));
-    function pick(it) { input.value = it.symbol; close(); onPick(it); }
+    // Yahoo lists many European funds under their ISIN on Stuttgart (IE00BNRQM384.SG) without any prices:
+    // swap such a pick for a listing of the same fund that has them (Xetra first), and say so
+    async function pick(it) {
+      input.value = it.symbol; close();
+      if (ISIN_SYM.test(it.symbol.toUpperCase())) {
+        try {
+          const r = await api(`/api/resolve?symbol=${encodeURIComponent(it.symbol)}`);
+          if (r.resolved && r.symbol) { it = { ...it, symbol: r.symbol, name: r.name || it.name, resolvedFrom: r.from, note: r.reason }; input.value = r.symbol; }
+          else if (!r.symbol) it = { ...it, note: r.reason };
+        } catch { /* keep the pick as it is */ }
+      }
+      onPick(it);
+    }
   }
+  const ISIN_SYM = /^[A-Z]{2}[A-Z0-9]{9}[0-9](\.[A-Z]{1,3})?$/;
 
   // ================================================================== board editor
   const dlgBoard = $("#dlg-board");

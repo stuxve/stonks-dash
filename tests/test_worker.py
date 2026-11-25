@@ -244,3 +244,14 @@ def test_premarket_includes_european_etfs(client):
     assert r["state"] == "closed" and r["profile"].startswith("MSCI World") and r["move_pct"] is not None
     assert r["drivers"][0]["country"] == "United States" and r["drivers"][0]["label"] == "S&P 500 futures"
     assert sum(x["weight_pct"] for x in r["drivers"]) <= 100.01
+
+
+def test_isin_listing_without_prices_is_resolved(client):
+    res = client.get("/api/search?q=IE00TEST0001").json()
+    assert res[0]["symbol"] == "DWXU.DE" and res[-1]["symbol"] == "IE00TEST0001.SG" and res[-1]["no_prices"]
+    assert not client.get("/api/quote/IE00TEST0001.SG").json()["ok"]
+    r = client.get("/api/resolve?symbol=ie00test0001.sg").json()
+    assert r["resolved"] and r["symbol"] == "DWXU.DE" and r["from"] == "IE00TEST0001.SG" and "Xetra" in r["reason"]
+    assert client.get("/api/resolve?symbol=MSFT").json() == {"symbol": "MSFT", "resolved": False, "name": "MSFT Corp"}
+    miss = client.get("/api/resolve?symbol=ZZ00NOPE0001.SG").json()
+    assert miss["symbol"] is None and "no other listing" in miss["reason"]

@@ -278,6 +278,8 @@ The size and group choices are saved per board. Period, range and currency are g
   - **Caveat:** it is an estimate, not a quote. The real opening price also reflects spreads and demand.
 - **Data.** From Yahoo's quote for each ticker, refreshed every 30 s while a page shows it. Yahoo has no pre-market trades for European listings. Some brokers, such as Trade Republic, quote them from 07:30 on their own venue, which is why the indicative value above exists.
 
+**Searching by ISIN.** Yahoo lists many European funds under their ISIN on Stuttgart (for example *IE00BNRQM384.SG*), and those lines have no prices. When a search by ISIN only finds such a line, the app looks up the same fund by name and lists its real tickers first. The ISIN line is greyed out as *no prices on Yahoo*. If you pick it anyway, in any search box, the app switches to the fund's listing with prices, Xetra first, and tells you so.
+
 **Dividends** (Market hours, **💰 Dividends ↓**) follows the payouts of everything you hold:
 
 - **Words used.** The *ex-dividend date* (ex-date) is the first day a buyer no longer gets the coming payment: you must own the units **before** it, and the units you held then are what you're paid on. The *pay date* is when the cash arrives, usually 1–6 weeks later.
@@ -350,6 +352,7 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | POST | `/api/risk/mix` | Volatility of any weighted mix of tickers (`{"weights": {"IWDA.AS": 60, "BTC-EUR": 10}}`) |
 | GET | `/api/ideas?universe=spain\|world\|commodities` | Screener: factor scores (0–100), reasons and flags per stock, your sector/region exposure vs the world; company data loads in the background (`progress`) |
 | GET | `/api/dividends?base=EUR` | Per holding: payout frequency, last and next ex-date and payment, expected amount, TTM yield, yield on cost, recorded dividends, past ex-dates to record; monthly received / expected; totals |
+| GET | `/api/resolve?symbol=IE00BNRQM384.SG` | A listing with prices for what you picked: Yahoo lists many European funds under their ISIN on Stuttgart without any prices, so this finds the same fund under a real ticker (same ISIN or same name on Yahoo's search; Xetra first) |
 | GET | `/api/premarket?base=EUR` | US session phase (pre-market / regular / after-hours / closed, holidays), index futures and other gauges, pre-market or after-hours price of your US holdings and watch list with the P&L effect |
 | GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
 | GET | `/api/events?watch=port:EUR,heat:1:EUR` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |

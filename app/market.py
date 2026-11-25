@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -19,6 +20,11 @@ log = logging.getLogger("stonks.market")
 PERIODS = ("1D", "1W", "1M", "3M", "6M", "YTD", "1Y")
 SUBUNITS = {"GBp": ("GBP", 100.0), "GBX": ("GBP", 100.0), "ZAc": ("ZAR", 100.0),
             "ILA": ("ILS", 100.0), "KWF": ("KWD", 1000.0)}
+
+
+# Yahoo lists some funds under their ISIN on Stuttgart ("IE00B4L5Y983.SG"): such lines usually have no prices
+ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+ISIN_SYMBOL = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9](\.[A-Z]{1,3})?$")
 
 
 def normalize_currency(ccy: str | None) -> tuple[str, float]:
@@ -477,7 +483,8 @@ class MockProvider:
         "Real Estate": "COL.MC MRL.MC",
     }
     ETFS = set("VWCE.DE IWDA.AS EUNL.DE SXR8.DE CSPX.L VUSA.AS IS3N.DE XDWD.DE MEUD.PA EQQQ.DE "
-               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD IBCF.MU IBCF.DE URTH IEMG VGK EZU EWP EWJ EWU BNDW".split())
+               "SPY VOO QQQ VTI VT VXUS VNQ BND AGG TLT GLD IBCF.MU IBCF.DE URTH IEMG VGK EZU EWP EWJ EWU BNDW "
+               "DWXU.DE DWXU.L DWXU.MI".split())
     NO_FUND_DATA = {"IBCF.MU"}   # simulates European listings Yahoo publishes no composition for
 
     def __init__(self):
@@ -565,7 +572,7 @@ class MockProvider:
             start = date.today() - timedelta(days=8)
         out = {}
         for s in symbols:
-            if s in self.fail:
+            if s in self.fail or ISIN_SYMBOL.match(s):        # ISIN-named lines have no prices, as on Yahoo
                 continue
             ser = self._series(s, start)
             if s in self.SHORT_HISTORY:
@@ -849,9 +856,18 @@ class MockProvider:
         pool |= {s for s, *_ in seeds.WORLD_INDICES + seeds.INDEX_FUNDS_ETFS + seeds.MACRO}
         pool |= {"IBCF.MU", "IBCF.DE"}
         q = query.strip().upper()
+        # an ISIN finds Yahoo's ISIN-named Stuttgart line (no prices), like the real thing; the name finds the listings
+        for isin, (name, listings) in self.ISIN_FUNDS.items():
+            if q == isin:
+                return [{"symbol": f"{isin}.SG", "name": name, "exchange": "Stuttgart", "type": "ETF"}]
+            if q and q in name.upper():
+                return [{"symbol": x, "name": name, "exchange": "MOCK", "type": "ETF"} for x in listings][:limit]
         hits = sorted(s for s in pool if q in s)[:limit]
         return [{"symbol": s, "name": self.info(s)["name"], "exchange": "MOCK",
                  "type": self._quote_type(s)} for s in hits]
+
+    # a fund Yahoo lists under its ISIN (no prices) and under real tickers (prices) — for the resolver tests
+    ISIN_FUNDS = {"IE00TEST0001": ("Demo MSCI World ex USA UCITS ETF 1C", ["DWXU.DE", "DWXU.L", "DWXU.MI"])}
 
 
 # --------------------------------------------------------------------------------------

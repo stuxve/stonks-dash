@@ -908,3 +908,5 @@ table.grid .pm-det td { white-space: normal; }
   .pm-table th:nth-child(2), .pm-table tr:not(.pm-det) > td:nth-child(2) { display: none; }   /* last close: the change says it */
   .pm-table th, .pm-table td { padding: 7px 6px; }
 }
+
+.suggest li.noprice b, .suggest li.noprice small { opacity: .55; }
