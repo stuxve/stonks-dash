@@ -1678,6 +1678,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         elif kind == "pre":
             snap.refresh(key, lambda: _premarket(rest[0]))
 
+    _live_last = [None]          # when the live job last refreshed something a page shows
+
     def _job_live():
         """Results open pages are showing: refresh each one every live_seconds (dividends: every 10 min)."""
         live = live_seconds()
@@ -1688,6 +1690,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             if age is None or age >= (600 if key.startswith("divs:") else max(live - 1, 30) if key.startswith("pre:") else live - 1):
                 try:
                     _refresh_key(key)
+                    _live_last[0] = time.time()
                 except HTTPException:
                     pass                                  # e.g. a board deleted in another tab
                 except Exception as e:  # noqa: BLE001
@@ -1718,7 +1721,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         out = worker.status()
         p = snap.age(f"port:{base_or_default(None)}")
         out["portfolio_age"] = p
-        out["live"] = {"seconds": live_seconds(), "clients": bus.clients(), "watched": sorted(bus.watched())}
+        out["live"] = {"seconds": live_seconds(), "clients": bus.clients(), "watched": sorted(bus.watched()),
+                       "last_refresh": _live_last[0]}
+        # the newest price refresh, whichever job did it (background every minute, or live for open pages)
+        port_ok = next((j["last_ok"] for j in out["jobs"] if j["name"] == "portfolio"), None)
+        out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)
         return out
 
     @app.get("/api/events")

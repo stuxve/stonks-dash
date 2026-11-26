@@ -853,6 +853,7 @@
       if (d.key.startsWith("divs:")) { if (state.view === "hours" && d.changed) divs.load(true); return; }
       if (d.key.startsWith("pre:")) { if (d.changed) pre.load(true); return; }
       if (!live.watch.split(",").includes(d.key)) return;
+      badgeFresh(d.at);
       if (d.changed) liveReload(); else stamp(d.at, true);   // same prices: just the time
     });
     es.addEventListener("clear", () => liveReload());          // an edit here or in another tab
@@ -867,19 +868,43 @@
     else { schedule(); reload(true); }                          // back on the tab: catch up, reconnect
   });
   // Pi background refresh: is the worker keeping prices and alerts current without this page? (app/worker.py)
+  // The badge says when the Pi last refreshed prices: the background job (every minute) or the live refresh
+  // of what this page shows (every live_seconds). It counts up every second and jumps back to 0 on each push.
+  const badge = { fresh: null, skew: 0, running: false, state: "ok" };
+  function badgeAgo(t) {
+    if (!t) return "never";
+    const s = Math.max(0, Math.round(Date.now() / 1000 + badge.skew - t));
+    return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`;
+  }
+  function badgeText() {
+    const el = $("#wk-badge");
+    if (el.hidden) return;
+    el.textContent = !badge.running ? "Pi refresh off" : `Pi ${badge.fresh ? badgeAgo(badge.fresh) : "starting"}`;
+  }
+  setInterval(badgeText, 1000);
+  setInterval(() => { if (!document.hidden && state.settings) workerBadge(); }, 60e3);   // health (errors, stuck jobs)
+  function badgeFresh(at) {                                    // a live push: the Pi just refreshed
+    if (at && (!badge.fresh || at > badge.fresh)) { badge.fresh = at; badgeText(); }
+  }
   async function workerBadge() {
     const el = $("#wk-badge");
     let w;
     try { w = await api("/api/worker"); } catch { el.hidden = true; return; }
+    badge.skew = w.now - Date.now() / 1000;                   // Pi clock vs this device
+    badge.running = w.running;
+    badge.fresh = Math.max(badge.fresh || 0, w.fresh_at || 0) || null;
     const j = Object.fromEntries((w.jobs || []).map((x) => [x.name, x]));
     const p = j.portfolio, bad = (w.jobs || []).filter((x) => x.stuck || (x.last_error && x.enabled));
     const ago = (t) => { if (!t) return "never"; const s = Math.round(w.now - t); return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)} min ago` : `${Math.round(s / 3600)} h ago`; };
+    const next = (x) => (x.next_in < 90 ? `${Math.round(x.next_in)}s` : `${Math.round(x.next_in / 60)} min`);
     const state = !w.running ? "bad" : bad.length || p?.late ? "warn" : "ok";
     el.hidden = false;
     el.className = `wk-badge wk-${state}`;
-    el.textContent = !w.running ? "Pi refresh off" : `Pi ${p?.last_ok ? ago(p.last_ok) : "starting"}`;
-    el.title = `Background refresh on the Pi (runs with no browser open) · ${w.busy ? "markets busy: fast schedule" : "quiet hours: slow schedule"}\n`
-      + (w.jobs || []).map((x) => `${x.label}: ${x.enabled ? (x.running_for != null ? `running ${Math.round(x.running_for)}s${x.stuck ? " (stuck)" : ""}` : `${ago(x.last_ok)}, next in ${Math.round((x.next_in || 0) / 60)} min`) : "off"}${x.last_error ? ` · error: ${x.last_error}` : ""}`).join("\n");
+    badgeText();
+    const lv = w.live || {};
+    el.title = `Last price refresh on the Pi. ${lv.clients ? `Live: what open pages show is refreshed every ${lv.seconds}s and pushed to them` : "No page open: background schedule only"}; ${w.busy ? "markets busy: prices every minute" : "quiet hours: slower schedule"}.\n`
+      + (w.jobs || []).filter((x) => x.name !== "live" && x.name !== "summary")
+        .map((x) => `${x.label}: ${x.enabled ? (x.running_for != null ? `running ${Math.round(x.running_for)}s${x.stuck ? " (stuck)" : ""}` : `${ago(x.last_ok)}, next in ${next(x)}`) : "off"}${x.last_error ? ` · error: ${x.last_error}` : ""}`).join("\n");
   }
   function schedule() {
     clearInterval(state.timer);
