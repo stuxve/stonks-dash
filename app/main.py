@@ -1717,6 +1717,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             bus.publish("ticks", {"ticks": out})
 
     streamer = streammod.Streamer(_make_feed, _on_ticks)
+    _stream_keep: list = [0.0, set()]           # keep-until time, last watched keys
     app.state.streamer = streamer
 
     def _stream_symbols(keys) -> list[str]:
@@ -1738,6 +1739,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         live = live_seconds()
         watched = bus.watched() if live else set()
         engine.recent_ttl = min(BASE_QUOTE_TTL, max(5.0, live - 2)) if watched else BASE_QUOTE_TTL
+        # keep the feed for 90 s after the last page went away (a hidden tab, a reload) so it doesn't flap
+        if realtime() and watched:
+            _stream_keep[0], _stream_keep[1] = time.time() + 90, set(watched)
+        elif realtime() and time.time() < _stream_keep[0]:
+            watched = set(_stream_keep[1]) | watched
         if realtime() and watched:
             ours = _stream_symbols(watched)
             m: dict[str, list[str]] = {}
@@ -1788,12 +1794,57 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         st = streamer.status() if realtime() else None
         if st:
             st["per_symbol"] = {ours: v for feed, v in st["per_symbol"].items() for ours in _stream_map.get(feed, [feed])}
+        if st is not None:
+            st["why_idle"] = (None if st["symbols"] else "no page is open (the feed follows what open pages show; a hidden "
+                              "browser tab disconnects after 90 s)" if not bus.clients() else "the open pages show no tickers")
         out["live"] = {"seconds": live_seconds(), "realtime": realtime(), "clients": bus.clients(), "watched": sorted(bus.watched()),
                        "last_refresh": _live_last[0], "stream": st}
         # the newest price refresh, whichever job did it (background every minute, or live for open pages)
         port_ok = next((j["last_ok"] for j in out["jobs"] if j["name"] == "portfolio"), None)
         out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)
         return out
+
+    @app.get("/api/stream/test")
+    def stream_test(symbols: str = "AAPL,BTC-USD", seconds: float = 10):
+        """Check Yahoo's real-time feed from the Pi without any page: connect, subscribe, listen for `seconds`
+        and report what arrived. curl 'localhost:8010/api/stream/test?symbols=ASML.AS,BTC-USD&seconds=15'"""
+        import threading as _th
+        syms = [x.strip().upper() for x in symbols.split(",") if x.strip() and SYMBOL_RE.match(x.strip().upper())][:20]
+        feed_syms = {engine.sources.get(s_, s_): s_ for s_ in syms}
+        got: dict[str, list] = {}
+        closing: list = []                       # set when we close the socket ourselves (not an error)
+        res = {"symbols": syms, "feed_symbols": sorted(feed_syms), "connected": False, "error": None, "messages": 0}
+        t0 = time.time()
+        try:
+            ws = _make_feed()
+            ws.subscribe(sorted(feed_syms))
+            res["connected"] = True
+            res["connect_s"] = round(time.time() - t0, 2)
+
+            def handler(d):
+                if d.get("id"):
+                    got.setdefault(d["id"], []).append({k: d.get(k) for k in ("price", "time", "market_hours", "change_percent")})
+
+            def run():
+                try:
+                    ws.listen(handler)
+                except Exception as e:  # noqa: BLE001
+                    if not res["error"] and not closing:
+                        res["error"] = f"listen: {type(e).__name__}: {e}"[:300]
+            th = _th.Thread(target=run, daemon=True)
+            th.start()
+            th.join(max(2.0, min(float(seconds), 60.0)))
+            closing.append(1)
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as e:  # noqa: BLE001
+            res["error"] = f"{type(e).__name__}: {e}"[:300]
+        res["messages"] = sum(len(v) for v in got.values())
+        res["per_symbol"] = {s_: {"messages": len(got.get(f, [])), "last": (got.get(f) or [None])[-1]} for f, s_ in feed_syms.items()}
+        res["seconds"] = round(time.time() - t0, 1)
+        return res
 
     @app.get("/api/events")
     async def events(request: Request, watch: str = "", limit: int = 0):

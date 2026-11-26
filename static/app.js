@@ -593,7 +593,7 @@
   const fmtPP = (v) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(1)} pp`);
   const vsCell = (p) => (p.vs_bench == null
     ? `<td class="num"><span class="sub">—</span></td>`
-    : `<td class="num ${cls(p.vs_bench)}" title="Index over the same dates: ${fmtPct(p.bench_ret)}">${fmtPP(p.vs_bench)}<div class="sub">idx ${fmtPct(p.bench_ret, 1)}</div></td>`);
+    : `<td class="num ${cls(p.vs_bench)}" title="Index over the same dates: ${fmtPct(p.bench_ret)}"><span class="${tkCls(p.symbol)}">${fmtPP(p.vs_bench)}</span><div class="sub">idx ${fmtPct(p.bench_ret, 1)}</div></td>`);
   // ---- daily moves: this week's best/worst day and the usual size of a day's move (from /api/moves)
   const pc = (v, d = 1) => (v == null || !isFinite(v) ? "—" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v * 100).toFixed(d)}%`);
   const dShort = (iso) => (iso ? new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" }).format(new Date(iso + "T00:00:00")) : "");
@@ -608,7 +608,7 @@
         unusual = `<div class="sub warn-t" title="${big ? "Bigger than 99% of the days in the last year" : "Outside the range of 90% of the days in the last year"} (90% of days: ${pc(m.q.p5)} … ${pc(m.q.p95)}; 98%: ${pc(m.q.p1)} … ${pc(m.q.p99)})">${big ? "rare move" : "unusual"}</div>`;
       }
     }
-    return `<td class="num ${cls(r)}">${fmtPct(r)}${unusual}</td>`;
+    return `<td class="num ${cls(r)}"><span class="${tkCls(p.symbol)}">${fmtPct(r)}</span>${unusual}</td>`;
   }
   function weekCell(p) {
     if (!state.moves?.[p.symbol] && p.quote_type !== "MANUAL") return noMoves(p);
@@ -671,9 +671,9 @@
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
       <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${p.symbol ? `<div>${pre.badge(p.symbol, p.price_currency)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
-      <td class="num">${fmtMoney(p.value, b)}</td>
-      <td class="num ${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</td>
-      <td class="num ${cls(p.pnl_pct)}">${fmtPct(p.pnl_pct)}</td>
+      <td class="num"><span class="${tkCls(p.symbol)}">${fmtMoney(p.value, b)}</span></td>
+      <td class="num ${cls(p.pnl)}"><span class="${tkCls(p.symbol)}">${fmtSigned(p.pnl, b)}</span></td>
+      <td class="num ${cls(p.pnl_pct)}"><span class="${tkCls(p.symbol)}">${fmtPct(p.pnl_pct)}</span></td>
       ${vsCell(p)}
       <td class="num">${p.weight == null ? "—" : p.weight.toFixed(1) + "%"}</td>
       <td>${p.lots ? `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart-btn" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
@@ -686,6 +686,11 @@
       <td class="num ${cls(tt.vs_bench)}">${tt.vs_bench == null ? "—" : fmtPP(tt.vs_bench)}</td><td class="num">100%</td><td></td></tr>` : "";
   }
   // real-time: a price that just changed flashes green / red; hover says when the last trade came in
+  // the cells computed from the price (value, P&L, 1D, vs index) flash with it
+  function tkCls(sym) {
+    const k = live.rt && sym ? state.ticks?.[sym] : null;
+    return k && k.moved && Date.now() - k.at < 1500 ? (k.dir > 0 ? "tk tk-up" : k.dir < 0 ? "tk tk-dn" : "") : "";
+  }
   function tickAttr(sym) {
     if (!live.rt || !sym) return "";
     const k = state.ticks?.[sym];
@@ -906,6 +911,7 @@
       r.pnl = r.value - r.cost;
       r.pnl_pct = r.cost ? (r.value / r.cost - 1) * 100 : null;
       if (r._prev) { r.day_pnl = r.quantity * (t.p - r._prev) * rate; r.changes = { ...r.changes, "1D": (t.p / r._prev - 1) * 100 }; }
+      if (r.bench_value != null && r.cost) r.vs_bench = (r.value - r.bench_value) / r.cost * 100;   // the index part doesn't move
       changed = true;
     }
     if (!changed) return false;
@@ -917,6 +923,11 @@
     T.day_pnl = ok.reduce((a, r) => a + (r.day_pnl || 0), 0);
     T.day_pct = T.value - T.day_pnl ? T.day_pnl / (T.value - T.day_pnl) * 100 : null;
     if (T.total_return != null) T.total_return += T.pnl - oldPnl;
+    const wb = ok.filter((r) => r.bench_value != null && r.cost);
+    if (wb.length && T.vs_bench != null) {
+      const c = wb.reduce((a, r) => a + r.cost, 0);
+      T.vs_bench = (wb.reduce((a, r) => a + r.value, 0) - wb.reduce((a, r) => a + r.bench_value, 0)) / c * 100;
+    }
     return true;
   }
   function patchHeat(d, by) {

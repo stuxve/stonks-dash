@@ -286,3 +286,10 @@ def test_ta_intraday_bars(client):
     h4 = client.get("/api/ta?symbol=SAN.MC&interval=4h").json()
     assert h4["interval"] == "4h" and len(h4["bars"]) < len(client.get("/api/ta?symbol=SAN.MC&interval=1h").json()["bars"])
     assert client.get("/api/ta?symbol=SAN.MC&interval=bogus").json()["interval"] == "D"
+
+
+def test_stream_test_endpoint_and_idle_reason(client):
+    r = client.get("/api/stream/test?symbols=SAN.MC,BTC-USD&seconds=2").json()
+    assert r["connected"] and r["error"] is None and r["per_symbol"]["SAN.MC"]["messages"] > 0
+    client.put("/api/settings", json={"live_seconds": 1})
+    assert "no page is open" in client.get("/api/worker").json()["live"]["stream"]["why_idle"]
