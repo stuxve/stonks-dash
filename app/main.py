@@ -22,6 +22,7 @@ from .db import DB
 from . import alerts, crosses, dividends, exposure, implied, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from . import worker as wk
 from . import stream as streammod
+from . import trlive
 from .market import ISIN_RE, ISIN_SYMBOL, PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -104,6 +105,30 @@ class AlertCfgIn(BaseModel):
 
 class TokenIn(BaseModel):
     token: str | None = Field(default=None, max_length=100)
+
+
+class TRPinIn(BaseModel):
+    pin: str | None = Field(default=None, pattern=r"^\d{4,8}$")          # current dashboard PIN (to change it)
+    new_pin: str | None = Field(default=None, pattern=r"^\d{4,8}$")
+
+
+class TRLoginIn(BaseModel):
+    phone: str = Field(pattern=r"^\+\d{6,15}$")                        # international format, e.g. +34600…
+    tr_pin: str = Field(pattern=r"^\d{4}$")                             # your Trade Republic PIN: used once, not stored
+    pin: str = Field(pattern=r"^\d{4,8}$")                              # dashboard PIN: encrypts the session
+
+
+class TRCodeIn(BaseModel):
+    code: str = Field(pattern=r"^\d{4,8}$")
+
+
+class TRUnlockIn(BaseModel):
+    pin: str = Field(pattern=r"^\d{4,8}$")
+
+
+class TRConfigIn(BaseModel):
+    lock_minutes: float | None = Field(default=None, ge=1, le=240)
+    map: dict[str, str | None] | None = None
 
 
 class FillIn(BaseModel):
@@ -1717,6 +1742,83 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             bus.publish("ticks", {"ticks": out})
 
     streamer = streammod.Streamer(_make_feed, _on_ticks)
+
+    # ---- Trade Republic: live LS Exchange prices for your TR holdings (app/trlive.py)
+    _tr_fx: dict = {"at": 0.0, "rates": {}}
+    _tr_symmap: dict[str, list[str]] = {}        # ISIN -> our symbols
+
+    def _tr_rate(ccy: str) -> float | None:
+        """Multiplier from `ccy` into EUR (TR quotes in EUR), refreshed every minute."""
+        if ccy == "EUR":
+            return 1.0
+        if time.time() - _tr_fx["at"] > 60:
+            _tr_fx["rates"], _tr_fx["at"] = {}, time.time()
+        if ccy not in _tr_fx["rates"]:
+            _tr_fx["rates"][ccy] = engine.fx_rates({ccy}, "EUR").get(ccy)
+        return _tr_fx["rates"][ccy]
+
+    _tr_mapped = [None]                          # holdings snapshot the ISIN → symbol map was built for
+
+    def _on_tr_ticks(batch: list[dict]):
+        if tr.portfolio_at != _tr_mapped[0]:      # new / refreshed holdings: (re)build the map once
+            _tr_mapped[0] = tr.portfolio_at
+            try:
+                _tr_mapping()
+            except Exception as e:  # noqa: BLE001
+                log.info("TR mapping failed: %s", e)
+        out = []
+        for t in batch:
+            for sym in _tr_symmap.get(t["isin"], []):
+                q = engine.quotes([sym]).get(sym)
+                ccy = (q.currency if q else None) or "EUR"
+                r = _tr_rate(ccy)
+                if not r:
+                    continue
+                conv = lambda v: v / r if v else None  # noqa: E731 — EUR → the listing's currency
+                engine.set_live(sym, conv(t["p"]))      # the Pi's own totals use it too, not only the page
+                out.append({"s": sym, "p": conv(t["p"]), "bid": conv(t["bid"]), "ask": conv(t["ask"]), "t": t["t"],
+                            "src": "TR", "eur": t["p"]})
+        if out:
+            _live_last[0] = time.time()
+            bus.publish("ticks", {"ticks": out})
+
+    def _tr_mapping() -> dict[str, dict]:
+        """ISIN of each TR holding -> our symbol: your choice (settings.tr_map), else Yahoo's search for the ISIN
+        (or the fund's name) matched against the tickers you hold, preferring ones in a 'Trade Republic' account."""
+        overrides = db.get_settings().get("tr_map") or {}
+        lots = [x for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None]
+        held = {x["symbol"].upper() for x in lots}
+        tr_acct = {x["symbol"].upper() for x in lots if re.search(r"trade\s*republic", x.get("account") or "", re.I)}
+        out = {}
+        for pos in tr.portfolio:
+            isin = pos["isin"]
+            if isin in overrides:
+                out[isin] = {"symbol": overrides[isin] or None, "how": "yours"}
+                continue
+            key = f"trmap:{isin}"
+            hit = db.get_meta([key], 86400).get(key)
+            if hit is None or (hit.get("symbol") and hit["symbol"] not in held):
+                cands = []
+                try:
+                    cands = [r["symbol"].upper() for r in prov.search(isin, limit=15)]
+                    if pos.get("name"):
+                        cands += [r["symbol"].upper() for r in _listings_by_name(pos["name"], set())]
+                except Exception:  # noqa: BLE001
+                    pass
+                pick = next((c for c in cands if c in tr_acct), None) or next((c for c in cands if c in held), None)
+                hit = {"symbol": pick}
+                db.put_meta(key, hit)
+            out[isin] = {"symbol": hit.get("symbol"), "how": "auto" if hit.get("symbol") else None}
+        _tr_symmap.clear()
+        for isin, m in out.items():
+            if m["symbol"]:
+                _tr_symmap.setdefault(isin, []).append(m["symbol"])
+        return out
+
+    tr = trlive.TRLive(db, trlive.Vault(db, trlive.load_pepper(os.path.dirname(os.path.abspath(db.path)) if hasattr(db, "path") else DATA_DIR)),
+                       _on_tr_ticks, api_factory=(lambda ph, pin: trlive.FakeTRApi(ph, pin)) if provider == "mock" else None,
+                       lock_minutes=lambda: float((db.get_settings().get("tr") or {}).get("lock_minutes") or 10))
+    app.state.tr = tr
     _stream_keep: list = [0.0, set()]           # keep-until time, last watched keys
     app.state.streamer = streamer
 
@@ -1745,7 +1847,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         elif realtime() and time.time() < _stream_keep[0]:
             watched = set(_stream_keep[1]) | watched
         if realtime() and watched:
-            ours = _stream_symbols(watched)
+            covered = {s_ for v in _tr_symmap.values() for s_ in v} if tr.state() == "live" else set()
+            ours = [s_ for s_ in _stream_symbols(watched) if s_ not in covered]      # TR's LS prices win
             m: dict[str, list[str]] = {}
             for s_ in ours:
                 m.setdefault(engine.sources.get(s_, s_), []).append(s_)
@@ -1803,6 +1906,96 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         port_ok = next((j["last_ok"] for j in out["jobs"] if j["name"] == "portfolio"), None)
         out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)
         return out
+
+    # ---- Trade Republic endpoints (no secret ever leaves the Pi: no cookies, no phone number, no PIN)
+    def _tr_status():
+        st = tr.status()
+        mp = _tr_mapping() if tr.portfolio else {}
+        dash: dict[str, float] = {}
+        for x in db.list_positions():
+            if x.get("symbol"):
+                dash[x["symbol"].upper()] = dash.get(x["symbol"].upper(), 0.0) + float(x["quantity"] or 0)
+        for x in db.list_transactions():                      # units sold are no longer held
+            if (x.get("type") or "").upper() == "SELL" and x.get("symbol") and x["symbol"].upper() in dash:
+                dash[x["symbol"].upper()] -= float(x.get("quantity") or 0)
+        st["held"] = sorted({x["symbol"].upper() for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None})
+        st["positions"] = [{**p, "symbol": (mp.get(p["isin"]) or {}).get("symbol"), "how": (mp.get(p["isin"]) or {}).get("how"),
+                            "dash_qty": dash.get(((mp.get(p["isin"]) or {}).get("symbol") or "").upper())} for p in tr.portfolio]
+        return st
+
+    def _tr_call(fn, *a):
+        try:
+            return fn(*a)
+        except trlive.VaultError as e:
+            raise HTTPException(400, str(e)) from None
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log.info("TR call failed: %s", type(e).__name__)
+            raise HTTPException(502, f"Trade Republic: {type(e).__name__}: {str(e)[:160]}") from None
+
+    @app.get("/api/tr")
+    def tr_status():
+        return _tr_status()
+
+    @app.post("/api/tr/pin")
+    def tr_pin(body: TRPinIn):
+        if not body.new_pin:
+            raise HTTPException(400, "Enter the new PIN.")
+        _tr_call(tr.set_pin, body.new_pin, body.pin)
+        return _tr_status()
+
+    @app.post("/api/tr/login")
+    def tr_login(body: TRLoginIn):
+        _tr_call(tr.start_login, body.phone, body.tr_pin, body.pin)
+        return _tr_status()
+
+    @app.post("/api/tr/login/code")
+    def tr_login_code(body: TRCodeIn):
+        _tr_call(tr.submit_code, body.code)
+        return _tr_status()
+
+    @app.post("/api/tr/unlock")
+    def tr_unlock(body: TRUnlockIn):
+        _tr_call(tr.unlock, body.pin)
+        return _tr_status()
+
+    @app.post("/api/tr/lock")
+    def tr_lock():
+        tr.lock()
+        engine.drop_live([s_ for v in _tr_symmap.values() for s_ in v])   # back to Yahoo's prices now
+        return _tr_status()
+
+    @app.post("/api/tr/forget")
+    def tr_forget(body: TRUnlockIn):
+        _tr_call(tr.forget, body.pin)
+        return _tr_status()
+
+    @app.post("/api/tr/reset")
+    def tr_reset():
+        """Forgot the dashboard PIN: delete it and the saved session (log in again afterwards)."""
+        engine.drop_live([s_ for v in _tr_symmap.values() for s_ in v])
+        tr.reset()
+        return _tr_status()
+
+    @app.put("/api/tr/config")
+    def tr_config(body: TRConfigIn):
+        if body.lock_minutes is not None:
+            db.update_settings({"tr": {**(db.get_settings().get("tr") or {}), "lock_minutes": body.lock_minutes}})
+        if body.map is not None:
+            cur = db.get_settings().get("tr_map") or {}
+            for isin, sym in body.map.items():
+                if not re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", isin):
+                    raise HTTPException(400, f"Not an ISIN: {isin}")
+                if sym in (None, "", "auto"):
+                    cur.pop(isin, None)
+                elif sym == "none":                            # don't use TR's price for this holding
+                    cur[isin] = ""
+                else:
+                    cur[isin] = sym.strip().upper()
+            db.update_settings({"tr_map": cur})
+            _tr_mapped[0] = None                               # rebuild on the next tick
+        return _tr_status()
 
     @app.get("/api/stream/test")
     def stream_test(symbols: str = "AAPL,BTC-USD", seconds: float = 10):

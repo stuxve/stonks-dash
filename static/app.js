@@ -43,7 +43,7 @@
     const r = await fetch(path, init);
     if (!r.ok) {
       let msg = r.statusText;
-      try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail); } catch {}
+      try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : Array.isArray(j.detail) ? j.detail.map((x) => `${(x.loc || []).slice(-1)[0] || ""}: ${x.msg}`).join("; ") : JSON.stringify(j.detail); } catch {}
       throw new Error(msg);
     }
     return r.status === 204 ? null : r.json();
@@ -687,15 +687,18 @@
   }
   // real-time: a price that just changed flashes green / red; hover says when the last trade came in
   // the cells computed from the price (value, P&L, 1D, vs index) flash with it
+  // Trade Republic ticks (Lang & Schwarz, static/trpanel.js) count as real-time even with Yahoo's stream off
+  const tkOn = (sym) => !!sym && (live.rt || (state.ticks?.[sym]?.src === "TR" && Date.now() - state.ticks[sym].at < 120e3));
   function tkCls(sym) {
-    const k = live.rt && sym ? state.ticks?.[sym] : null;
+    const k = tkOn(sym) ? state.ticks?.[sym] : null;
     return k && k.moved && Date.now() - k.at < 1500 ? (k.dir > 0 ? "tk tk-up" : k.dir < 0 ? "tk tk-dn" : "") : "";
   }
   function tickAttr(sym) {
-    if (!live.rt || !sym) return "";
+    if (!tkOn(sym)) return "";
     const k = state.ticks?.[sym];
     const fresh = k && k.moved && Date.now() - k.at < 1500;
-    const tip = k ? `Last real-time trade ${new Date(k.t).toLocaleTimeString()}` : "No real-time trade received yet (market closed, thin trading, or not covered by Yahoo's feed): the price refreshes every 15 s";
+    const tip = k?.src === "TR" ? `Lang & Schwarz via Trade Republic, ${new Date(k.t).toLocaleTimeString()}: bid/ask midpoint${k.bid ? ` (bid ${k.bid.toFixed(4)}, ask ${k.ask.toFixed(4)})` : ""}${k.eur ? `, ${k.eur.toFixed(4)} € converted` : ""}`
+      : k ? `Last real-time trade ${new Date(k.t).toLocaleTimeString()}` : "No real-time trade received yet (market closed, thin trading, or not covered by Yahoo's feed): the price refreshes every 15 s";
     return `class="tk ${fresh ? (k.dir > 0 ? "tk-up" : k.dir < 0 ? "tk-dn" : "") : ""} ${k && Date.now() - k.at < 120e3 ? "tk-live" : ""}" title="${esc(tip)}"`;
   }
 
@@ -888,7 +891,8 @@
     const by = Object.fromEntries(list.map((t) => [t.s, t]));
     for (const t of list) {
       const prev = state.ticks[t.s];
-      state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p };
+      state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p,
+        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur };
     }
     badgeFresh(Date.now() / 1000 + badge.skew);
     stamp(Date.now() / 1000, true);
@@ -1347,6 +1351,9 @@
     renderTable(state.port, shownPositions(state.port, pView()));
     sheet.refreshExt();
   });
+
+  // ================================================================== Trade Republic live prices (static/trpanel.js)
+  const trp = window.StonksTR({ api, esc, $, state });
 
   // ================================================================== symbol sheet (static/sheet.js)
   const sheet = window.StonksSheet({ ext: (s) => pre.row(s), extBadge: (s, c) => pre.badge(s, c), api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,

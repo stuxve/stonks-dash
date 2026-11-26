@@ -25,6 +25,7 @@
     <button data-v="EUR">EUR</button><button data-v="USD">USD</button>
   </div>
   <span id="status" class="status"></span><span id="wk-badge" class="wk-badge" hidden></span>
+  <button id="tr-btn" class="tr-pill" hidden title="Trade Republic">TR</button>
   <button id="refresh-btn" class="icon-btn" title="Refresh now" aria-label="Refresh">
     <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
   </button>
@@ -630,6 +631,11 @@
   </div>
 </dialog>
 
+<dialog id="dlg-tr" class="dlg wide">
+  <form method="dialog" class="dlg-head"><h2>Trade Republic live prices</h2><button class="icon-btn" aria-label="Close">✕</button></form>
+  <div class="dlg-body" id="tr-body"></div>
+</dialog>
+
 <dialog id="dlg-settings" class="dlg">
   <form method="dialog" class="dlg-head"><h2>Settings</h2><button class="icon-btn" aria-label="Close">✕</button></form>
   <div class="dlg-body">
@@ -686,6 +692,7 @@
 <script src="/static/dividends.js"></script>
 <script src="/static/sheet.js"></script>
 <script src="/static/premarket.js"></script>
+<script src="/static/trpanel.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

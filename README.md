@@ -39,6 +39,7 @@ The base image `python:3.12-slim` is multi-arch, so the same compose file also b
 | `STONKS_QUOTE_TTL` | `60` | Seconds to cache the latest prices |
 | `STONKS_HISTORY_TTL` | `21600` | Seconds to cache the 13-month daily history used for 1W…1Y changes |
 | `STONKS_SEC_UA` | `stonks-dash personal portfolio dashboard` | User-Agent for SEC EDGAR (long revenue / net income history). The SEC asks for a name and email, e.g. `Jane Doe jane@example.com`; set it if the chart reports a 403. |
+| `STONKS_SECRET` | random, in `/data/.stonks_secret` | Extra secret mixed into the key that encrypts the Trade Republic session. Setting or changing it later makes the saved session unreadable: use *Forgot the PIN?* in the TR panel and set it up again. |
 | `TZ` | `Europe/Madrid` | Container timezone |
 
 Data lives in the named volume `stonks-data` (`/data/stonks.db`). To back it up, use **Settings → Export JSON** in the UI or `docker cp stonks-dash:/data/stonks.db .`.
@@ -332,6 +333,31 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
   - It reconnects by itself if it drops.
   - `/api/worker` shows its state: connected, tickers, messages and last error.
 
+**Trade Republic live prices** (the **TR** button in the header). While unlocked, the Pi takes the prices of your Trade Republic holdings from Lang & Schwarz Exchange (LSX), the venue TR trades on, 07:30–23:00. That covers US stocks before the US open and the European ETFs Yahoo barely updates.
+
+- **First time.**
+  1. Choose a dashboard PIN (4–8 digits).
+  2. Log in with your phone number (`+34…`) and your Trade Republic PIN, plus the dashboard PIN.
+  3. Confirm the login in the Trade Republic app, or type the code from your authenticator app if TR asks for one.
+- **What you see.**
+  - The panel lists your TR holdings and the ticker each one is shown as. It matches them by ISIN (the 12-character security code) against the tickers you hold, preferring positions whose account contains "Trade Republic".
+  - You can pick another ticker, or *don't use*.
+  - Those tickers then get LSX prices (the midpoint between bid and ask, converted from euros to the listing's currency) instead of Yahoo's, on every page and in the Pi's own totals.
+  - Hover a price to see bid, ask and the euro price.
+- **Auto-lock.**
+  - After 10 minutes (Security settings: 1–240) the Pi locks the session and prices go back to Yahoo. The header pill counts down.
+  - *Lock now* locks at once. Unlocking takes only the dashboard PIN, as long as TR still accepts the saved session. TR ends sessions after a while or when you log in elsewhere; then log in again.
+- **Security.**
+  - Your TR PIN is sent to Trade Republic once, for the login, and never stored.
+  - The session cookies TR returns are stored encrypted (AES-GCM) in the database. The key is derived with scrypt from your dashboard PIN plus a random secret kept outside the database: `STONKS_SECRET` if set, otherwise `/data/.stonks_secret`, mode 600.
+  - A copy of the database alone can't be decrypted. Someone with the whole `/data` volume could try every 4–8-digit PIN, though, so use 6–8 digits and keep the volume private.
+  - 5 wrong PINs block attempts for 15 minutes. You can change the PIN in Security settings. *Forget the session* deletes it. *Forgot the PIN?* deletes the PIN and the session, so you start over.
+  - The dashboard itself has no login (see `STONKS_BIND`). Anyone who can open it can see the panel, but can't unlock it without the PIN.
+- **Unofficial.**
+  - Trade Republic has no public API. This uses [pytr](https://github.com/pytr-org/pytr), which talks to the private API of TR's web app as you.
+  - It is read-only: holdings and prices, no order calls.
+  - TR may change the API (rebuild with a newer pytr) or object to automated access under its terms. Use it at your own risk.
+
 **Live updates while a page is open.** The page opens one Server-Sent Events connection to the Pi (SSE: a single HTTP response the server keeps writing to; `/api/events`). It tells the Pi what it's showing: your portfolio, a Markets board, or the dividends in Market hours. Every **15 s** (Settings → *Live prices*: 10 s to 1 min, or off), the Pi refreshes exactly that and pushes an event the moment the new result is ready. The page reloads only when prices actually moved; otherwise just the *Updated* clock advances. The header then reads *Updated 10:31:05 · live 15s*.
 
 - An edit (a buy, a sale, a setting that changes the numbers) is pushed to every open tab, so they all reload.
@@ -368,7 +394,11 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | GET | `/api/premarket?base=EUR` | US session phase (pre-market / regular / after-hours / closed, holidays), index futures and other gauges, pre-market or after-hours price of your US holdings and watch list with the P&L effect |
 | GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
 | GET | `/api/ta?symbol=SAN.MC&interval=5m` | Bars for Analysis: `interval` 1m, 5m, 15m, 30m, 1h, 4h (intraday, UTC ISO times) or D (daily, default), plus support/resistance zones |
-| GET | `/api/events?watch=port:EUR,heat:1:EUR,sym:AAPL` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, `ticks` [{s, p, t, chp, dv}] in real-time mode, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
+| GET | `/api/events?watch=port:EUR,heat:1:EUR,sym:AAPL` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, `ticks` [{s, p, t, chp, dv}] in real-time mode (with `src: "TR"`, `bid`, `ask`, `eur` for Trade Republic prices), and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
+| GET | `/api/tr` | Trade Republic panel state (`no_pin`, `no_session`, `pending`, `locked`, `live`), countdown, holdings and their tickers |
+| POST | `/api/tr/pin` `{new_pin, pin?}` · `/api/tr/login` `{phone, tr_pin, pin}` · `/api/tr/login/code` `{code}` | Set or change the dashboard PIN; log in (confirm in the TR app, or send the authenticator code) |
+| POST | `/api/tr/unlock` `{pin}` · `/api/tr/lock` · `/api/tr/forget` `{pin}` | Unlock for `lock_minutes`, lock now, delete the saved session |
+| PUT | `/api/tr/config` `{lock_minutes?, map?: {ISIN: ticker \| "auto" \| "none"}}` | Auto-lock minutes and ticker choices |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

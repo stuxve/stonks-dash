@@ -922,3 +922,33 @@ table.grid .pm-det td { white-space: normal; }
 .tk { border-radius: 3px; padding: 0 2px; }
 .tk.tk-live::after { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--up); margin-left: 4px; vertical-align: 2px; }
 .status.feed-warn { color: #f5a623; }
+
+/* ---- Trade Republic panel (static/trpanel.js) */
+.tr-pill { font: 600 11px/1 var(--font, inherit); padding: 5px 9px; border-radius: 99px; cursor: pointer; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tr-pill:hover { color: var(--text); border-color: var(--accent); }
+.tr-pill.tr-live { color: var(--up); border-color: rgba(48, 204, 90, .45); background: rgba(48, 204, 90, .1); }
+.tr-pill.tr-live::before { content: "●"; margin-right: 4px; animation: tr-blink 2s infinite; }
+.tr-pill.tr-locked::before { content: "🔒"; margin-right: 3px; font-size: 10px; }
+.tr-pill.tr-pending { color: #f5a524; border-color: rgba(245, 165, 36, .45); }
+@keyframes tr-blink { 50% { opacity: .35; } }
+#tr-body p { margin: 0 0 12px; line-height: 1.5; }
+#tr-body .row { margin-bottom: 12px; }
+#tr-body .row input { width: 130px; }
+.tr-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 10px; align-items: end; margin-bottom: 12px; }
+.tr-live { color: var(--text); }
+.tr-live::first-letter { color: var(--up); }
+.tr-wait { font-size: 15px; }
+.tr-map select { max-width: 160px; }
+.tr-map .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+.tr-settings { margin: 14px 0 10px; border-top: 1px solid var(--border); padding-top: 10px; }
+.tr-settings summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+.tr-note { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px !important; }
+.linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.linkbtn:hover { text-decoration: underline; }
+@media (max-width: 720px) {
+  .tr-form { grid-template-columns: 1fr; }
+  #tr-body .row input { width: 100%; flex: 1 1 100%; }
+  #tr-body .row .btn { flex: 1 1 100%; }
+  .tr-map th:nth-child(4), .tr-map td:nth-child(4) { display: none; }
+  .tr-map select { max-width: 100%; width: 100%; }
+}

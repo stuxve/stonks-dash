@@ -881,6 +881,9 @@ class MockProvider:
         pool |= {"IBCF.MU", "IBCF.DE"}
         q = query.strip().upper()
         # an ISIN finds Yahoo's ISIN-named Stuttgart line (no prices), like the real thing; the name finds the listings
+        if q in self.ISIN_LISTINGS:                       # Trade Republic demo holdings
+            return [{"symbol": x, "name": self.info(x)["name"], "exchange": "MOCK", "type": self._quote_type(x)}
+                    for x in self.ISIN_LISTINGS[q]]
         for isin, (name, listings) in self.ISIN_FUNDS.items():
             if q == isin:
                 return [{"symbol": f"{isin}.SG", "name": name, "exchange": "Stuttgart", "type": "ETF"}]
@@ -890,6 +893,7 @@ class MockProvider:
         return [{"symbol": s, "name": self.info(s)["name"], "exchange": "MOCK",
                  "type": self._quote_type(s)} for s in hits]
 
+    ISIN_LISTINGS = {"ES0113900J37": ["SAN.MC"], "US5949181045": ["MSFT"]}
     # a fund Yahoo lists under its ISIN (no prices) and under real tickers (prices) — for the resolver tests
     ISIN_FUNDS = {"IE00TEST0001": ("Demo MSCI World ex USA UCITS ETF 1C", ["DWXU.DE", "DWXU.L", "DWXU.MI"])}
 
@@ -970,6 +974,18 @@ class QuoteEngine:
         self.meta_retry = 600.0
         self._lock = threading.Lock()
         self.last_update: float | None = None
+        self.live_px: dict[str, tuple[float, float]] = {}   # symbol -> (price in major units, received) from a live feed
+        self.live_ttl = 120.0
+
+    def set_live(self, symbol: str, price: float) -> None:
+        """A live price (Trade Republic's Lang & Schwarz feed) that overrides the last close in `quotes()` for
+        `live_ttl` seconds, so totals the Pi computes match the prices pushed to the page."""
+        if price and price > 0:
+            self.live_px[symbol] = (float(price), time.time())
+
+    def drop_live(self, symbols=None) -> None:
+        for s in list(self.live_px if symbols is None else symbols):
+            self.live_px.pop(s, None)
 
     # ---- price source substitution (e.g. a Munich listing priced from Xetra) ----
     def set_sources(self, mapping: dict[str, str]) -> None:
@@ -1430,6 +1446,13 @@ class QuoteEngine:
                 q.changes = ch
                 q.last_date = ld
                 q.spark = [round(float(v) / div, 6) for v in series.iloc[-30:].tolist()]
+                lv = self.live_px.get(s)
+                if lv and time.time() - lv[1] < self.live_ttl:
+                    # the reference for "1D" is yesterday's close: the last bar if it's from before today
+                    ref = q.price if ld and str(ld)[:10] < time.strftime("%Y-%m-%d") else q.prev_close
+                    q.price, q.prev_close = lv[0], ref or q.prev_close
+                    if ref:
+                        q.changes = {**(ch or {}), "1D": (lv[0] / ref - 1) * 100}
             out[s] = q
         return out
 

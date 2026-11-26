@@ -6,3 +6,5 @@ numpy==2.5.3
 yfinance>=1.7.0
 # Exchange holiday calendars are data that ships with each release: keep it current.
 exchange_calendars>=4.13.2
+# Trade Republic live prices (app/trlive.py): pytr speaks TR's private web API. Pinned: TR changes it now and then.
+pytr==0.4.10
