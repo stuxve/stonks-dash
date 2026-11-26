@@ -1785,8 +1785,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         out = worker.status()
         p = snap.age(f"port:{base_or_default(None)}")
         out["portfolio_age"] = p
+        st = streamer.status() if realtime() else None
+        if st:
+            st["per_symbol"] = {ours: v for feed, v in st["per_symbol"].items() for ours in _stream_map.get(feed, [feed])}
         out["live"] = {"seconds": live_seconds(), "realtime": realtime(), "clients": bus.clients(), "watched": sorted(bus.watched()),
-                       "last_refresh": _live_last[0], "stream": streamer.status() if realtime() else None}
+                       "last_refresh": _live_last[0], "stream": st}
         # the newest price refresh, whichever job did it (background every minute, or live for open pages)
         port_ok = next((j["last_ok"] for j in out["jobs"] if j["name"] == "portfolio"), None)
         out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)

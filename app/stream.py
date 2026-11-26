@@ -34,6 +34,7 @@ class Streamer:
         self.connected_at: float | None = None
         self.last_msg: float | None = None
         self.messages = 0
+        self.per: dict[str, list] = {}        # symbol -> [messages, last message time]
         self.error: str | None = None
 
     # ---- control
@@ -59,9 +60,12 @@ class Streamer:
         self._wake.set()
 
     def status(self) -> dict:
+        with self._lock:
+            per = {s: {"n": self.per[s][0], "last": self.per[s][1]} if s in self.per else {"n": 0, "last": None}
+                   for s in sorted(self.want)}
         return {"symbols": sorted(self.want), "subscribed": len(self.subscribed), "connected": self._ws is not None,
                 "connected_at": self.connected_at, "last_message": self.last_msg, "messages": self.messages,
-                "error": self.error}
+                "error": self.error, "per_symbol": per, "now": time.time()}
 
     # ---- internals
     def _close(self):
@@ -143,6 +147,9 @@ class Streamer:
             self.latest[sym] = tick
             self.last_msg = time.time()
             self.messages += 1
+            c = self.per.setdefault(sym, [0, None])
+            c[0] += 1
+            c[1] = self.last_msg
 
     def _flush(self):
         while not self._stop.wait(self.every):

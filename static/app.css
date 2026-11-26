@@ -913,3 +913,12 @@ table.grid .pm-det td { white-space: normal; }
 
 .status.rt::before { content: "●"; color: var(--down); margin-right: 5px; animation: rtpulse 1.6s ease-in-out infinite; }
 @keyframes rtpulse { 50% { opacity: .25; } }
+
+/* real-time: a price that just changed flashes; a dot marks tickers with a trade in the last 2 minutes */
+.tk.tk-up { animation: tkup 1.4s ease-out; }
+.tk.tk-dn { animation: tkdn 1.4s ease-out; }
+@keyframes tkup { 0% { background: rgba(48,204,90,.45); } 100% { background: transparent; } }
+@keyframes tkdn { 0% { background: rgba(246,53,56,.45); } 100% { background: transparent; } }
+.tk { border-radius: 3px; padding: 0 2px; }
+.tk.tk-live::after { content: ""; display: inline-block; width: 5px; height: 5px; border-radius: 50%; background: var(--up); margin-left: 4px; vertical-align: 2px; }
+.status.feed-warn { color: #f5a623; }

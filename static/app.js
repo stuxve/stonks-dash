@@ -669,7 +669,7 @@
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
-      <td class="num">${p.ok ? fmtPrice(p.price, p.price_currency) : '<span class="down">n/a</span>'}${p.symbol ? `<div>${pre.badge(p.symbol, p.price_currency)}</div>` : ""}</td>
+      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${p.symbol ? `<div>${pre.badge(p.symbol, p.price_currency)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
       <td class="num">${fmtMoney(p.value, b)}</td>
       <td class="num ${cls(p.pnl)}">${fmtSigned(p.pnl, b)}</td>
@@ -685,6 +685,15 @@
       <td class="num ${cls(tt.pnl)}">${fmtSigned(tt.pnl, b)}</td><td class="num ${cls(tt.pnl_pct)}">${fmtPct(tt.pnl_pct)}</td>
       <td class="num ${cls(tt.vs_bench)}">${tt.vs_bench == null ? "—" : fmtPP(tt.vs_bench)}</td><td class="num">100%</td><td></td></tr>` : "";
   }
+  // real-time: a price that just changed flashes green / red; hover says when the last trade came in
+  function tickAttr(sym) {
+    if (!live.rt || !sym) return "";
+    const k = state.ticks?.[sym];
+    const fresh = k && k.moved && Date.now() - k.at < 1500;
+    const tip = k ? `Last real-time trade ${new Date(k.t).toLocaleTimeString()}` : "No real-time trade received yet (market closed, thin trading, or not covered by Yahoo's feed): the price refreshes every 15 s";
+    return `class="tk ${fresh ? (k.dir > 0 ? "tk-up" : k.dir < 0 ? "tk-dn" : "") : ""} ${k && Date.now() - k.at < 120e3 ? "tk-live" : ""}" title="${esc(tip)}"`;
+  }
+
   // phones: holdings as a list (name, units, value, return); tap one for its sheet (static/sheet.js)
   const hueOf = (s) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
   function renderMobileList(d, rows) {
@@ -696,7 +705,7 @@
       return `<button class="ml-row" data-sym="${esc(sym)}" ${man ? "disabled" : ""}>
         <span class="ml-logo" style="background:hsl(${hueOf(sym || p.display_name || "?")} 45% 38%)">${esc((sym || p.display_name || "?").replace(/^\^/, "").replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase())}</span>
         <span class="ml-main"><b>${esc(p.display_name || sym)}</b><span>${fmtNum(p.quantity)} · ${esc(sym)}${p.lots ? ` · ${p.lots.length} lots` : ""}</span></span>
-        <span class="ml-num"><b>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
+        <span class="ml-num"><b ${tickAttr(sym)}>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
           <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span>${sym ? pre.badge(sym, p.price_currency) : ""}</span></button>`;
     }).join("") + `<div class="ml-total"><span>Total · ${list.length} positions</span><b>${fmtMoney(t.value, b)}</b><span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)} (${fmtPct(t.pnl_pct)})</span></div>`
       : '<div class="empty">No positions yet.</div>';
@@ -817,9 +826,11 @@
     const t = live.lastTs ? new Date(live.lastTs * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
     const r = +state.settings.refresh_seconds;
     const el = $("#status");
-    el.textContent = live.on() ? `Updated ${t} · ${live.rt ? "real-time" : `live ${live.secs}s`}` : `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
+    const feed = live.rt ? feedState() : null;
+    el.textContent = live.on() ? `Updated ${t} · ${live.rt ? feed.text : `live ${live.secs}s`}` : `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
+    el.classList.toggle("feed-warn", !!(live.on() && feed && feed.warn));
     el.classList.toggle("rt", live.on() && live.rt);
-    el.title = live.on() ? (live.rt ? "Real-time: prices stream from Yahoo as trades happen and are pushed to this page (about once a second); totals and charts refresh every 15 s. Change it in Settings → Live prices."
+    el.title = live.on() ? (live.rt ? `Real-time: prices stream from Yahoo as trades happen and are pushed to this page (about once a second); totals and charts refresh every 15 s. Change it in Settings → Live prices.\n${feed.detail}`
       : "Live: the Pi pushes each refresh to this page as it happens (Server-Sent Events). Change the rate in Settings → Live prices.")
       : live.es ? "Live connection lost: reconnecting; meanwhile the page polls on its own" : "";
     if (!quiet) workerBadge();
@@ -866,9 +877,14 @@
   }
   // ---- real-time ticks: patch prices in place (about once a second); tables right away, maps every few seconds
   const tickDraw = { fast: 0, slow: 0, t: null };
+  state.ticks = {};                                     // symbol -> {t: trade time ms, at: received, dir}
   function onTicks(list) {
     if (!list?.length) return;
     const by = Object.fromEntries(list.map((t) => [t.s, t]));
+    for (const t of list) {
+      const prev = state.ticks[t.s];
+      state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p };
+    }
     badgeFresh(Date.now() / 1000 + badge.skew);
     stamp(Date.now() / 1000, true);
     if (state.view === "ta") ta.tick(list);
@@ -935,6 +951,22 @@
     if (document.hidden) { live.es?.close(); live.es = null; live.ok = false; clearInterval(state.timer); }
     else { schedule(); reload(true); }                          // back on the tab: catch up, reconnect
   });
+  // the real-time feed as the Pi reports it (/api/worker → live.stream)
+  let feedInfo = null;
+  function feedState() {
+    const f = feedInfo;
+    if (!f) return { text: "real-time", warn: false, detail: "" };
+    const now = Date.now() / 1000 + badge.skew;
+    const per = Object.entries(f.per_symbol || {});
+    const fresh = per.filter(([, v]) => v.last && now - v.last < 120);
+    const detail = [`Feed ${f.connected ? "connected" : "not connected"}${f.error ? ` — ${f.error}` : ""} · ${f.messages} messages`,
+      `Trading now (a trade in the last 2 min): ${fresh.map(([s]) => s).join(", ") || "none"}`,
+      `Quiet: ${per.filter(([, v]) => !(v.last && now - v.last < 120)).map(([s, v]) => `${s}${v.last ? ` (last ${Math.round((now - v.last) / 60)} min ago)` : " (no trades yet)"}`).join(", ") || "none"}`].join("\n");
+    if (!f.connected) return { text: "real-time feed offline", warn: true, detail };
+    if (!fresh.length) return { text: "real-time · no trades", warn: false, detail };
+    return { text: `real-time · ${fresh.length}/${per.length} trading`, warn: false, detail };
+  }
+
   // Pi background refresh: is the worker keeping prices and alerts current without this page? (app/worker.py)
   // The badge says when the Pi last refreshed prices: the background job (every minute) or the live refresh
   // of what this page shows (every live_seconds). It counts up every second and jumps back to 0 on each push.
@@ -951,6 +983,7 @@
   }
   setInterval(badgeText, 1000);
   setInterval(() => { if (!document.hidden && state.settings) workerBadge(); }, 60e3);   // health (errors, stuck jobs)
+  setInterval(() => { if (!document.hidden && live.rt && live.on()) workerBadge().then(() => stamp(0, true)); }, 15e3);   // feed state
   function badgeFresh(at) {                                    // a live push: the Pi just refreshed
     if (at && (!badge.fresh || at > badge.fresh)) { badge.fresh = at; badgeText(); }
   }
@@ -959,6 +992,7 @@
     let w;
     try { w = await api("/api/worker"); } catch { el.hidden = true; return; }
     badge.skew = w.now - Date.now() / 1000;                   // Pi clock vs this device
+    feedInfo = w.live?.stream || null;
     badge.running = w.running;
     badge.fresh = Math.max(badge.fresh || 0, w.fresh_at || 0) || null;
     const j = Object.fromEntries((w.jobs || []).map((x) => [x.name, x]));
