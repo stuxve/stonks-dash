@@ -817,8 +817,10 @@
     const t = live.lastTs ? new Date(live.lastTs * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "—";
     const r = +state.settings.refresh_seconds;
     const el = $("#status");
-    el.textContent = live.on() ? `Updated ${t} · live ${live.secs}s` : `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
-    el.title = live.on() ? "Live: the Pi pushes each refresh to this page as it happens (Server-Sent Events). Change the rate in Settings → Live prices."
+    el.textContent = live.on() ? `Updated ${t} · ${live.rt ? "real-time" : `live ${live.secs}s`}` : `Updated ${t}${r ? ` · auto ${r >= 60 ? r / 60 + "m" : r + "s"}` : ""}`;
+    el.classList.toggle("rt", live.on() && live.rt);
+    el.title = live.on() ? (live.rt ? "Real-time: prices stream from Yahoo as trades happen and are pushed to this page (about once a second); totals and charts refresh every 15 s. Change it in Settings → Live prices."
+      : "Live: the Pi pushes each refresh to this page as it happens (Server-Sent Events). Change the rate in Settings → Live prices.")
       : live.es ? "Live connection lost: reconnecting; meanwhile the page polls on its own" : "";
     if (!quiet) workerBadge();
   }
@@ -826,13 +828,15 @@
   // ---- live updates: the Pi refreshes what this page shows every N seconds and pushes "new data" events
   // (Server-Sent Events, /api/events). The page reloads only when prices actually moved; the clock updates
   // either way. If the stream drops, the browser reconnects by itself and the page falls back to polling.
-  const live = { es: null, watch: null, ok: false, secs: 15, lastTs: 0, t: null, on() { return this.ok && !!this.watch; } };
+  const live = { es: null, watch: null, ok: false, rt: false, secs: 15, lastTs: 0, t: null, on() { return this.ok && !!this.watch; } };
   function liveWatch() {
-    const b = base();
-    if (state.view === "portfolio") return `port:${b},pre:${b}`;
-    if (state.view === "markets" && state.boardId != null) return `heat:${state.boardId}:${b}`;
-    if (state.view === "hours") return `divs:${b},pre:${b}`;
-    return "";
+    const b = base(), open = sheet?.isOpen() ? sheet.symbol() : null;
+    const w = state.view === "portfolio" ? [`port:${b}`, `pre:${b}`]
+      : state.view === "markets" && state.boardId != null ? [`heat:${state.boardId}:${b}`]
+      : state.view === "hours" ? [`divs:${b}`, `pre:${b}`]
+      : state.view === "ta" && ta.symbol() ? [`sym:${ta.symbol()}`] : [];
+    if (open) w.push(`sym:${open}`);                       // the ticker sheet streams its own price too
+    return w.join(",");
   }
   function liveConnect(force = false) {
     if (typeof EventSource === "undefined" || document.hidden || !state.settings) return;
@@ -845,9 +849,10 @@
     live.es = es;
     es.addEventListener("hello", (e) => {
       const d = JSON.parse(e.data);
-      live.ok = true; live.secs = d.live_seconds;
+      live.ok = true; live.secs = d.live_seconds; live.rt = !!d.realtime;
       schedule(); stamp(0, true);
     });
+    es.addEventListener("ticks", (e) => onTicks(JSON.parse(e.data).ticks));
     es.addEventListener("update", (e) => {
       const d = JSON.parse(e.data);
       if (d.key.startsWith("divs:")) { if (state.view === "hours" && d.changed) divs.load(true); return; }
@@ -858,6 +863,69 @@
     });
     es.addEventListener("clear", () => liveReload());          // an edit here or in another tab
     es.onerror = () => { if (live.ok) { live.ok = false; schedule(); stamp(0, true); } };
+  }
+  // ---- real-time ticks: patch prices in place (about once a second); tables right away, maps every few seconds
+  const tickDraw = { fast: 0, slow: 0, t: null };
+  function onTicks(list) {
+    if (!list?.length) return;
+    const by = Object.fromEntries(list.map((t) => [t.s, t]));
+    badgeFresh(Date.now() / 1000 + badge.skew);
+    stamp(Date.now() / 1000, true);
+    if (state.view === "ta") ta.tick(list);
+    sheet.tick(by);
+    let changed = false;
+    if (state.view === "portfolio" && state.port) changed = patchPortfolio(state.port, by);
+    if (state.view === "markets" && state.heat) changed = patchHeat(state.heat, by);
+    if (changed) drawTicks();
+  }
+  function patchPortfolio(d, by) {
+    const fx = d.fx || {}, T = d.totals;
+    let changed = false;
+    for (const r of d.positions) {
+      const t = by[r.symbol], rate = fx[r.price_currency];
+      if (!t || !r.ok || r.quote_type === "MANUAL" || !rate || t.p === r.price) continue;
+      if (r._prev == null) { const ch = r.changes?.["1D"]; r._prev = ch != null ? r.price / (1 + ch / 100) : 0; }
+      r.price = t.p;
+      r.value = r.quantity * t.p * rate;
+      r.pnl = r.value - r.cost;
+      r.pnl_pct = r.cost ? (r.value / r.cost - 1) * 100 : null;
+      if (r._prev) { r.day_pnl = r.quantity * (t.p - r._prev) * rate; r.changes = { ...r.changes, "1D": (t.p / r._prev - 1) * 100 }; }
+      changed = true;
+    }
+    if (!changed) return false;
+    const ok = d.positions.filter((r) => r.ok);
+    const oldPnl = T.pnl;
+    T.value = ok.reduce((a, r) => a + r.value, 0);
+    T.pnl = T.value - T.cost;
+    T.pnl_pct = T.cost ? T.pnl / T.cost * 100 : null;
+    T.day_pnl = ok.reduce((a, r) => a + (r.day_pnl || 0), 0);
+    T.day_pct = T.value - T.day_pnl ? T.day_pnl / (T.value - T.day_pnl) * 100 : null;
+    if (T.total_return != null) T.total_return += T.pnl - oldPnl;
+    return true;
+  }
+  function patchHeat(d, by) {
+    let changed = false;
+    for (const x of d.tiles) {
+      const t = by[x.symbol];
+      if (!t || !x.ok || t.p === x.price) continue;
+      x.price = t.p;
+      if (x.prev_close) x.changes = { ...x.changes, "1D": (t.p / x.prev_close - 1) * 100 };
+      changed = true;
+    }
+    return changed;
+  }
+  function drawTicks() {
+    const now = Date.now();
+    if (state.view === "markets") {                              // the heatmap is one drawing: every 2 s at most
+      if (now - tickDraw.slow > 2000) { tickDraw.slow = now; drawMarkets(); }
+      return;
+    }
+    const d = state.port;
+    if (now - tickDraw.slow > 5000) { tickDraw.slow = now; tickDraw.fast = now; drawPortfolio(); return; }
+    if (now - tickDraw.fast < 900) return;
+    tickDraw.fast = now;
+    const rows = shownPositions(d, pView());
+    renderKpis(d.totals); renderMobileList(d, rows); renderTable(d, rows);
   }
   function liveReload() {                                       // several events in a row → one reload
     clearTimeout(live.t);
@@ -909,7 +977,8 @@
   function schedule() {
     clearInterval(state.timer);
     // live views get pushed updates; polling stays for the others and as a fallback when the stream is down
-    const r = live.on() && state.view !== "hours" ? 0 : +state.settings.refresh_seconds;
+    const pushed = live.on() && (state.view === "portfolio" || state.view === "markets" || (state.view === "ta" && live.rt));
+    const r = pushed ? 0 : +state.settings.refresh_seconds;
     if (r > 0) state.timer = setInterval(() => { if (!document.hidden) reload(true); }, r * 1000);
   }
   $("#refresh-btn").addEventListener("click", () => reload(true));
@@ -1237,7 +1306,8 @@
   // ================================================================== symbol sheet (static/sheet.js)
   const sheet = window.StonksSheet({ ext: (s) => pre.row(s), extBadge: (s, c) => pre.badge(s, c), api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
     positionFor: (sym) => (state.port ? shownPositions(state.port, { ...pView(), combine: true, group: "none" }).find((p) => p.symbol === sym) : null),
-    openTx: (...a) => pf.openTx(...a), openPosition: (...a) => openPosition(...a), openChart: (s) => openChart(s), $ });
+    openTx: (...a) => pf.openTx(...a), openPosition: (...a) => openPosition(...a), openChart: (s) => openChart(s), $,
+    onOpenChange: () => liveConnect() });
 
   // ================================================================== dividends in Market hours (static/dividends.js)
   const divs = window.StonksDividends({ api, esc, state, base, fmtMoney, fmtPrice, fmtNum, fmtDate, fmtPct,
@@ -1254,7 +1324,7 @@
   });
 
   // ================================================================== technical analysis (static/ta.js)
-  const ta = window.StonksTA({ api, esc, state, saveSettings, base, fmtDate, attachSearch, $, $$ });
+  const ta = window.StonksTA({ api, esc, state, saveSettings, base, fmtDate, attachSearch, $, $$, onSymbol: () => liveConnect() });
   function openChart(sym) {
     state.settings.ta = { ...(state.settings.ta || {}), symbol: sym };
     switchView("ta");

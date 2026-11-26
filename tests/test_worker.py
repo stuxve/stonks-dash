@@ -255,3 +255,34 @@ def test_isin_listing_without_prices_is_resolved(client):
     assert client.get("/api/resolve?symbol=MSFT").json() == {"symbol": "MSFT", "resolved": False, "name": "MSFT Corp"}
     miss = client.get("/api/resolve?symbol=ZZ00NOPE0001.SG").json()
     assert miss["symbol"] is None and "no other listing" in miss["reason"]
+
+
+def test_realtime_ticks_stream_to_pages(client):
+    import threading
+    app = client.app
+    client.put("/api/settings", json={"live_seconds": 1})
+    app.state.streamer.start()
+    threading.Timer(0.5, app.state.worker.jobs["live"].fn).start()      # what the worker does every 3 s
+    got = []
+    with client.stream("GET", "/api/events?watch=sym:SAN.MC,port:EUR&limit=12") as r:
+        for blk in "".join(r.iter_text()).split("\n\n"):
+            if blk.startswith("event: hello"):
+                assert '"realtime": true' in blk
+            if blk.startswith("event: ticks"):
+                got += json_load(blk)["ticks"]
+                break
+    app.state.streamer.stop()
+    syms = {t["s"] for t in got}
+    assert "SAN.MC" in syms and all(t["p"] > 0 and t["t"] > 0 for t in got)
+    st = client.get("/api/worker").json()["live"]
+    assert st["realtime"] and "SAN.MC" in st["stream"]["symbols"]
+
+
+def test_ta_intraday_bars(client):
+    d = client.get("/api/ta?symbol=SAN.MC&interval=5m").json()
+    assert d["interval"] == "5m" and d["bars"][0][0].endswith("Z") and len(d["bars"]) > 100
+    t0, t1 = d["bars"][-2][0], d["bars"][-1][0]
+    assert t0 < t1 and all(r[3] <= min(r[1], r[4]) + 1e-9 and r[2] >= max(r[1], r[4]) - 1e-9 for r in d["bars"])
+    h4 = client.get("/api/ta?symbol=SAN.MC&interval=4h").json()
+    assert h4["interval"] == "4h" and len(h4["bars"]) < len(client.get("/api/ta?symbol=SAN.MC&interval=1h").json()["bars"])
+    assert client.get("/api/ta?symbol=SAN.MC&interval=bogus").json()["interval"] == "D"

@@ -79,21 +79,28 @@ window.StonksTA = function (ctx) {
   };
   function setCfg(k, patch) { const ind = { ...(S().ind || {}) }; ind[k] = { ...(ind[k] || {}), ...patch }; saveTA({ ind }); }
   const view = () => ({ sym: S().symbol || null, iv: S().interval || "D", range: S().range || "1Y", type: S().type || "candles", log: !!S().log });
+  // intraday bar sizes (seconds). Their times are UTC ISO strings ("2026-11-26T14:35:00Z"); daily ones "2026-11-26".
+  const INTRA = { "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400 };
+  const isIntra = (iv = view().iv) => !!INTRA[iv];
+  // time for Lightweight Charts: daily = the date string; intraday = epoch seconds shifted so the axis shows your local time
+  const lt = (t) => (t && t.length > 10 ? Date.parse(t) / 1000 - new Date(t).getTimezoneOffset() * 60 : t);
+  const toDate = (t) => new Date(t.length > 10 ? t : `${t}T00:00:00Z`);
   const drawings = () => ((S().drawings || {})[view().sym] || []);
   function setDrawings(list) { saveTA({ drawings: { ...(S().drawings || {}), [view().sym]: list } }); }
 
   // ------------------------------------------------------------------ data
-  let raw = null, rawSym = null, rawYears = 0, loading = false;
+  let raw = null, rawSym = null, rawYears = 0, rawIv = "D", loading = false, volS = null;
   let chart = null, main = null, D = null, legends = [], tool = "cursor", pending = null, measureLine = null;
 
   async function load(sym, years) {
     years = years || (view().range === "All" ? 30 : 10);
-    if (raw && rawSym === sym && rawYears >= years) return true;
+    const iv = isIntra() ? view().iv : "D";               // weekly / monthly are built from daily bars
+    if (raw && rawSym === sym && rawIv === iv && (iv !== "D" || rawYears >= years)) return true;
     loading = true;
     $("#ta-head").innerHTML = `<span class="hint">Loading ${esc(sym)}…</span>`;
     try {
-      raw = await api(`/api/ta?symbol=${encodeURIComponent(sym)}&years=${years}`);
-      rawSym = sym; rawYears = years; loadedAt = Date.now();
+      raw = await api(`/api/ta?symbol=${encodeURIComponent(sym)}&years=${years}&interval=${iv}`);
+      rawSym = sym; rawYears = years; rawIv = iv; loadedAt = Date.now();
       return true;
     } catch (e) {
       raw = null; rawSym = null;
@@ -106,13 +113,19 @@ window.StonksTA = function (ctx) {
 
   // derived data for the current interval
   function prepare() {
-    const bars = T.resample(raw.bars.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v })), view().iv);
+    const b0 = raw.bars.map(([t, o, h, l, c, v]) => ({ t, o, h, l, c, v }));
+    const bars = isIntra() ? b0 : T.resample(b0, view().iv);
     const t = bars.map((b) => b.t), o = bars.map((b) => b.o), h = bars.map((b) => b.h), l = bars.map((b) => b.l), c = bars.map((b) => b.c), v = bars.map((b) => b.v);
     return { bars, t, o, h, l, c, v, n: bars.length, hasVol: raw.has_volume, crypto: raw.quote_type === "CRYPTOCURRENCY" };
   }
-  const per52 = () => ({ D: 252, W: 52, M: 12 })[view().iv];
+  // bars in a year (intraday: from the bars actually loaded, capped at what's there)
+  const per52 = () => ({ D: 252, W: 52, M: 12 })[view().iv] || Math.min(D.n, Math.max(20, Math.round(D.n * 365 * 864e5 / Math.max(1, toDate(D.t[D.n - 1]) - toDate(D.t[0])))));
   function futureTimes(k) {
-    const out = [], last = new Date(D.t[D.n - 1] + "T00:00:00Z");
+    if (isIntra()) {                                     // naive: equal steps after the last bar
+      const s0 = Date.parse(D.t[D.n - 1]);
+      return Array.from({ length: k }, (_, j) => new Date(s0 + (j + 1) * INTRA[view().iv] * 1000).toISOString().replace(".000Z", "Z"));
+    }
+    const out = [], last = toDate(D.t[D.n - 1]);
     const d = new Date(last);
     while (out.length < k) {
       if (view().iv === "M") d.setUTCMonth(d.getUTCMonth() + 1, 1);
@@ -145,7 +158,7 @@ window.StonksTA = function (ctx) {
   function lineOpts(color, extra = {}) {
     return { color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...extra };
   }
-  const pts = (vals, times = D.t) => vals.map((v, i) => (v == null || !isFinite(v) ? { time: times[i] } : { time: times[i], value: v })).filter((p, i) => times[i]);
+  const pts = (vals, times = D.t) => vals.map((v, i) => (v == null || !isFinite(v) ? { time: lt(times[i]) } : { time: lt(times[i]), value: v })).filter((p, i) => times[i]);
 
   // fresh = new symbol / interval / range: show the selected range instead of keeping the current zoom
   function build(fresh = false) {
@@ -153,7 +166,7 @@ window.StonksTA = function (ctx) {
     if (!raw || !el) return;
     let keep = null;
     if (chart) { if (!fresh) try { keep = chart.timeScale().getVisibleLogicalRange(); } catch {} chart.remove(); chart = null; }
-    lines = []; drawn = []; measureLine = null; markerApi = null; legendState = null; main = null;
+    lines = []; drawn = []; measureLine = null; markerApi = null; legendState = null; main = null; volS = null;
     legends.forEach((x) => x.remove()); legends = [];
     D = prepare();
     const vw = view();
@@ -171,7 +184,7 @@ window.StonksTA = function (ctx) {
       layout: { background: { type: "solid", color: bg }, textColor: text, fontSize: 11, fontFamily: css("--font"),
         panes: { separatorColor: border, separatorHoverColor: "rgba(41,98,255,.4)", enableResize: true } },
       grid: { vertLines: { color: "rgba(255,255,255,.04)" }, horzLines: { color: "rgba(255,255,255,.04)" } },
-      rightPriceScale: { borderColor: border }, timeScale: { borderColor: border, rightOffset: 6, minBarSpacing: 0.5 },
+      rightPriceScale: { borderColor: border }, timeScale: { borderColor: border, rightOffset: 6, minBarSpacing: 0.5, timeVisible: isIntra(), secondsVisible: false },
       crosshair: { mode: L.CrosshairMode.Normal },
       localization: { locale: LOCALE },
       // phones: one finger pans sideways, vertical swipes scroll the page, pinch zooms;
@@ -187,7 +200,7 @@ window.StonksTA = function (ctx) {
     const ohlc = vw.type === "heikin" ? T.heikinAshi(D.o, D.h, D.l, D.c) : D;
     const imp = cfg("elder").on ? T.elderImpulse(D.c) : null, IMP = { 1: "#26a69a", "-1": "#ef5350", 0: "#42a5f5" };
     const candle = (i) => {
-      const b = { time: D.t[i], open: ohlc.o[i], high: ohlc.h[i], low: ohlc.l[i], close: ohlc.c[i] };
+      const b = { time: lt(D.t[i]), open: ohlc.o[i], high: ohlc.h[i], low: ohlc.l[i], close: ohlc.c[i] };
       if (imp && imp[i] != null) { const col = IMP[imp[i]]; b.color = col; b.wickColor = col; b.borderColor = col; }
       return b;
     };
@@ -196,8 +209,8 @@ window.StonksTA = function (ctx) {
     else if (vw.type === "area") main = chart.addSeries(L.AreaSeries, { lineColor: "#3987e5", topColor: "rgba(57,135,229,.35)", bottomColor: "rgba(57,135,229,0)", lineWidth: 2 });
     else if (vw.type === "bars") main = chart.addSeries(L.BarSeries, { upColor: C.up, downColor: C.down, thinBars: false });
     else main = chart.addSeries(L.CandlestickSeries, upDn);
-    const mainData = vw.type === "line" || vw.type === "area" ? D.t.map((t, i) => ({ time: t, value: D.c[i] })) : D.t.map((_, i) => candle(i));
-    main.setData(mainData.concat(future.map((t) => ({ time: t }))));
+    const mainData = vw.type === "line" || vw.type === "area" ? D.t.map((t, i) => ({ time: lt(t), value: D.c[i] })) : D.t.map((_, i) => candle(i));
+    main.setData(mainData.concat(future.map((t) => ({ time: lt(t) }))));
     const prec = dec(Math.abs(D.c[D.n - 1]));
     main.applyOptions({ priceFormat: { type: "price", precision: prec, minMove: 10 ** -prec } });
     main.priceScale().applyOptions({ mode: vw.log ? L.PriceScaleMode.Logarithmic : L.PriceScaleMode.Normal, scaleMargins: { top: 0.06, bottom: cfg("vol").on && D.hasVol ? 0.22 : 0.06 } });
@@ -241,13 +254,13 @@ window.StonksTA = function (ctx) {
     if (cfg("sar").on) {
       const x = cfg("sar"), r = T.psar(D.h, D.l, x.s, x.m);
       const s = chart.addSeries(L.LineSeries, lineOpts(C.sar, { lineVisible: false, pointMarkersVisible: true, pointMarkersRadius: 1.5 }));
-      s.setData(r.sar.map((v, i) => (v == null ? { time: D.t[i] } : { time: D.t[i], value: v, color: r.up[i] ? C.up : C.down })));
+      s.setData(r.sar.map((v, i) => (v == null ? { time: lt(D.t[i]) } : { time: lt(D.t[i]), value: v, color: r.up[i] ? C.up : C.down })));
       leg.main.push({ label: "SAR", color: C.sar, vals: r.sar, fmt: fp });
     }
     if (cfg("st").on) {
       const x = cfg("st"), r = T.supertrend(D.h, D.l, D.c, x.n, x.m);
       const s = chart.addSeries(L.LineSeries, lineOpts(C.st[0], { lineWidth: 1.5 }));
-      s.setData(r.line.map((v, i) => (v == null ? { time: D.t[i] } : { time: D.t[i], value: v, color: r.up[i] ? C.st[0] : C.st[1] })));
+      s.setData(r.line.map((v, i) => (v == null ? { time: lt(D.t[i]) } : { time: lt(D.t[i]), value: v, color: r.up[i] ? C.st[0] : C.st[1] })));
       leg.main.push({ label: `Supertrend ${x.n},${x.m}`, color: C.st[0], vals: r.line, fmt: fp });
     }
     if (cfg("vwap").on && D.hasVol) {
@@ -277,7 +290,7 @@ window.StonksTA = function (ctx) {
     if (cfg("atrts").on) {
       const x = cfg("atrts"), r = T.atrTrail(D.h, D.l, D.c, x.n, x.k);
       const s = chart.addSeries(L.LineSeries, lineOpts("#ffca28", { lineWidth: 1.5, lineStyle: 2 }));
-      s.setData(r.stop.map((v, i) => (v == null ? { time: D.t[i] } : { time: D.t[i], value: v, color: r.up[i] ? C.up : C.down })));
+      s.setData(r.stop.map((v, i) => (v == null ? { time: lt(D.t[i]) } : { time: lt(D.t[i]), value: v, color: r.up[i] ? C.up : C.down })));
       leg.main.push({ label: `ATR stop ${x.n}×${x.k}`, color: "#ffca28", vals: r.stop, fmt: fp });
     }
     if (cfg("lrf").on) add(T.linreg(D.c, cfg("lrf").n), "#ffee58", `LinReg ${cfg("lrf").n}`, { lineWidth: 1.5 });
@@ -285,19 +298,20 @@ window.StonksTA = function (ctx) {
       const x = cfg("lrc"), a = Math.max(0, D.n - x.n), f = T.linFit(D.c, a, D.n - 1);
       if (f) for (const [k, st] of [[0, 0], [x.k, 2], [-x.k, 2]]) {
         const s = chart.addSeries(L.LineSeries, lineOpts("#ce93d8", { lineWidth: k ? 1 : 1.5, lineStyle: st, autoscaleInfoProvider: () => null }));
-        s.setData([{ time: D.t[a], value: f.at(a) + k * f.sd }, { time: D.t[D.n - 1], value: f.at(D.n - 1) + k * f.sd }]);
+        s.setData([{ time: lt(D.t[a]), value: f.at(a) + k * f.sd }, { time: lt(D.t[D.n - 1]), value: f.at(D.n - 1) + k * f.sd }]);
       }
     }
     if (cfg("zz").on) {
       const zz = T.zigzag(D.h, D.l, cfg("zz").pct);
       const s = chart.addSeries(L.LineSeries, lineOpts("#fff59d", { lineWidth: 1.5 }));
-      s.setData(zz.map((z) => ({ time: D.t[z.i], value: z.p })));
+      s.setData(zz.map((z) => ({ time: lt(D.t[z.i]), value: z.p })));
     }
     // volume (overlay at the bottom of the price pane)
     if (cfg("vol").on && D.hasVol) {
       const vs = chart.addSeries(L.HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "vol", lastValueVisible: false, priceLineVisible: false });
+      volS = vs;
       vs.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
-      vs.setData(D.t.map((t, i) => ({ time: t, value: D.v[i], color: D.c[i] >= D.o[i] ? "rgba(38,166,154,.45)" : "rgba(239,83,80,.45)" })));
+      vs.setData(D.t.map((t, i) => ({ time: lt(t), value: D.v[i], color: D.c[i] >= D.o[i] ? "rgba(38,166,154,.45)" : "rgba(239,83,80,.45)" })));
       const avg = chart.addSeries(L.LineSeries, lineOpts("rgba(255,255,255,.45)", { priceScaleId: "vol" }));
       avg.setData(pts(T.sma(D.v, cfg("vol").n)));
       leg.main.push({ label: "Vol", color: text, vals: D.v, fmt: fv });
@@ -315,7 +329,7 @@ window.StonksTA = function (ctx) {
       } else if (d.key === "macd") {
         const p = newPane(`MACD ${x.f},${x.s},${x.g}`), r = T.macd(D.c, x.f, x.s, x.g);
         const hs = chart.addSeries(L.HistogramSeries, { priceLineVisible: false, lastValueVisible: false, priceFormat: { type: "price", precision: 4, minMove: 0.0001 } }, p);
-        hs.setData(r.hist.map((v, i) => (v == null ? { time: D.t[i] } : { time: D.t[i], value: v, color: v >= 0 ? (i && v >= r.hist[i - 1] ? "rgba(38,166,154,.8)" : "rgba(38,166,154,.4)") : (i && v <= r.hist[i - 1] ? "rgba(239,83,80,.8)" : "rgba(239,83,80,.4)") })));
+        hs.setData(r.hist.map((v, i) => (v == null ? { time: lt(D.t[i]) } : { time: lt(D.t[i]), value: v, color: v >= 0 ? (i && v >= r.hist[i - 1] ? "rgba(38,166,154,.8)" : "rgba(38,166,154,.4)") : (i && v <= r.hist[i - 1] ? "rgba(239,83,80,.8)" : "rgba(239,83,80,.4)") })));
         leg.panes[p - 1].items.push({ label: "Hist", color: text, vals: r.hist, fmt: (v) => fn(v, 3) });
         const pf = { priceFormat: { type: "price", precision: 4, minMove: 0.0001 } };
         add(r.macd, "#2196f3", "MACD", { lineWidth: 1.5, ...pf }, p, (v) => fn(v, 3)); add(r.signal, "#ff9800", "Signal", pf, p, (v) => fn(v, 3));
@@ -388,7 +402,8 @@ window.StonksTA = function (ctx) {
     }
     if (cfg("hl52").on) {
       const k = Math.max(0, D.n - per52());
-      pl(Math.max(...D.h.slice(k)), C.hl52, "52w high", L.LineStyle.Dotted); pl(Math.min(...D.l.slice(k)), C.hl52, "52w low", L.LineStyle.Dotted);
+      const w = isIntra() ? `${new Set(D.t.slice(k).map((t) => t.slice(0, 10))).size}d` : "52w";   // intraday: the days loaded
+      pl(Math.max(...D.h.slice(k)), C.hl52, `${w} high`, L.LineStyle.Dotted); pl(Math.min(...D.l.slice(k)), C.hl52, `${w} low`, L.LineStyle.Dotted);
     }
     if (cfg("piv").on) {
       const pv = prevPeriodPivots();
@@ -426,7 +441,7 @@ window.StonksTA = function (ctx) {
   function prevPeriodPivots() {
     const last = D.t[D.n - 1];
     const daily = raw.bars;
-    const key = view().iv === "D" ? (t) => t.slice(0, 7) : (t) => t.slice(0, 4);
+    const key = isIntra() ? (t) => t.slice(0, 10) : view().iv === "D" ? (t) => t.slice(0, 7) : (t) => t.slice(0, 4);   // intraday: yesterday's pivots
     const cur = key(last);
     const prev = daily.filter((b) => key(b[0]) < cur);
     if (!prev.length) return null;
@@ -454,7 +469,7 @@ window.StonksTA = function (ctx) {
     const list = [];
     if (cfg("cross").on && D.n > 200) {
       for (const [i, dir] of T.crosses(T.sma(D.c, 50), T.sma(D.c, 200))) {
-        list.push({ time: D.t[i], position: dir > 0 ? "belowBar" : "aboveBar", color: dir > 0 ? "#f5c542" : "#9e9e9e",
+        list.push({ time: lt(D.t[i]), position: dir > 0 ? "belowBar" : "aboveBar", color: dir > 0 ? "#f5c542" : "#9e9e9e",
           shape: dir > 0 ? "arrowUp" : "arrowDown", text: dir > 0 ? "Golden cross" : "Death cross" });
       }
     }
@@ -464,7 +479,7 @@ window.StonksTA = function (ctx) {
         if (!p.bought_at) continue;
         const i = idxOnOrBefore(p.bought_at.slice(0, 10));
         if (i < 0) continue;
-        list.push({ time: D.t[i], position: "belowBar", color: C.mine, shape: "circle", text: `Buy ${p.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })} @ ${fp(p.avg_cost)}` });
+        list.push({ time: lt(D.t[i]), position: "belowBar", color: C.mine, shape: "circle", text: `Buy ${p.quantity.toLocaleString(undefined, { maximumFractionDigits: 4 })} @ ${fp(p.avg_cost)}` });
       }
     }
     if (cfg("cdl").on) {
@@ -474,7 +489,7 @@ window.StonksTA = function (ctx) {
         const b = best.get(p.i);
         if (!b || p.bars > b.bars || (p.bars === b.bars && p.dir && !b.dir)) best.set(p.i, p);
       }
-      for (const p of best.values()) list.push({ time: D.t[p.i], position: p.dir > 0 ? "belowBar" : "aboveBar", color: p.dir > 0 ? "#26a69a" : p.dir < 0 ? "#ef5350" : "#9e9e9e",
+      for (const p of best.values()) list.push({ time: lt(D.t[p.i]), position: p.dir > 0 ? "belowBar" : "aboveBar", color: p.dir > 0 ? "#26a69a" : p.dir < 0 ? "#ef5350" : "#9e9e9e",
         shape: p.dir > 0 ? "arrowUp" : p.dir < 0 ? "arrowDown" : "circle", text: p.i >= D.n - 20 ? short(p.name) : "", size: 0.6 });   // names only on recent bars; hover shows them in the legend
     }
     list.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
@@ -491,8 +506,8 @@ window.StonksTA = function (ctx) {
       const ia = idxOnOrBefore(d.a.t), ib = idxOnOrBefore(d.b.t);
       if (ia < 0 || ib < 0 || ia === ib) continue;
       const slope = (d.b.p - d.a.p) / (ib - ia);
-      const pts2 = [{ time: D.t[ia], value: d.a.p }, { time: D.t[ib], value: d.b.p }];
-      if (d.ext !== false && ib < D.n - 1) pts2.push({ time: D.t[D.n - 1], value: d.b.p + slope * (D.n - 1 - ib) });
+      const pts2 = [{ time: lt(D.t[ia]), value: d.a.p }, { time: lt(D.t[ib]), value: d.b.p }];
+      if (d.ext !== false && ib < D.n - 1) pts2.push({ time: lt(D.t[D.n - 1]), value: d.b.p + slope * (D.n - 1 - ib) });
       const s = chart.addSeries(L.LineSeries, lineOpts(d.color || C.draw, { lineWidth: 2, ...noScale }));
       s.setData(pts2);
       drawn.push(s);
@@ -507,7 +522,9 @@ window.StonksTA = function (ctx) {
       raff: () => `Raff ${dS(d.a.t)}→${dS(d.b.t)}`, speed: () => `Speed lines ${dS(d.a.t)}`, cycle: () => `Cycles ${dS(d.a.t)}` })[d.type]?.() || d.type;
     $("#ta-drawings").innerHTML = ds.length ? `<span class="sub">Drawings:</span> ${ds.map((d, i) => `<span class="chip-in">${esc(lbl(d))}<button data-i="${i}" title="Delete">×</button></span>`).join("")} <button class="linkbtn" id="ta-clear">clear all</button>` : "";
   }
-  const dS = (iso) => new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "2-digit" }).format(new Date(iso + "T00:00:00"));
+  const dS = (iso) => (iso && iso.length > 10
+    ? new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(iso))
+    : new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", year: "2-digit" }).format(new Date(iso + "T00:00:00")));
 
   // clicks each tool needs, and what to ask for next
   const NEED = { hline: 1, vwap: 1, fibtime: 1, trend: 2, fib: 2, measure: 2, fibfan: 2, fibarc: 2, raff: 2, speed: 2, cycle: 2, pitchfork: 3 };
@@ -541,7 +558,7 @@ window.StonksTA = function (ctx) {
   function measure(a, b) {
     if (measureLine) { try { chart.removeSeries(measureLine); } catch {} }
     measureLine = chart.addSeries(L.LineSeries, lineOpts("#ffd54f", { lineWidth: 2, lineStyle: L.LineStyle.Dashed, autoscaleInfoProvider: () => null }));
-    measureLine.setData([{ time: a.t, value: a.p }, { time: b.t, value: b.p }]);
+    measureLine.setData([{ time: lt(a.t), value: a.p }, { time: lt(b.t), value: b.p }]);
     const bars = idxOnOrBefore(b.t) - idxOnOrBefore(a.t), days = Math.round((new Date(b.t) - new Date(a.t)) / 864e5);
     hint(`Measure: ${fp(a.p)} → ${fp(b.p)} = <b class="${b.p >= a.p ? "up" : "down"}">${pc(b.p / a.p - 1)}</b> (${fp(b.p - a.p)}) over ${bars} bars · ${days} days <button class="linkbtn" id="ta-mclear">clear</button>`, true);
     setTool("cursor", true);
@@ -948,12 +965,17 @@ window.StonksTA = function (ctx) {
 
   // ------------------------------------------------------------------ ranges
   function startIndexForRange() {
-    const r = view().range, last = new Date(D.t[D.n - 1] + "T00:00:00Z");
+    const r = view().range, last = toDate(D.t[D.n - 1]);
     if (r === "All") return 0;
     const d = new Date(last);
     if (r === "YTD") d.setUTCMonth(0, 1);
-    else { const m = { "1M": 1, "3M": 3, "6M": 6, "1Y": 12, "2Y": 24, "5Y": 60, "10Y": 120 }[r] || 12; d.setUTCMonth(d.getUTCMonth() - m); }
-    return Math.max(0, idxOnOrBefore(d.toISOString().slice(0, 10)) + 1);
+    else if (r === "1D" || r === "5D") {                     // sessions, not calendar days
+      const days = [...new Set(D.t.map((t) => t.slice(0, 10)))];
+      const from = days[Math.max(0, days.length - (r === "1D" ? 1 : 5))];
+      const i = D.t.findIndex((t) => t >= from);
+      return Math.max(0, i);
+    } else { const m = { "1M": 1, "3M": 3, "6M": 6, "1Y": 12, "2Y": 24, "5Y": 60, "10Y": 120 }[r] || 12; d.setUTCMonth(d.getUTCMonth() - m); }
+    return Math.max(0, idxOnOrBefore(isIntra() ? d.toISOString() : d.toISOString().slice(0, 10)) + 1);
   }
   function setRange(keep) {
     if (keep) { chart.timeScale().setVisibleLogicalRange(keep); return; }
@@ -968,7 +990,7 @@ window.StonksTA = function (ctx) {
     const row = (g, name, value, reading, bias, tip = "") => rows.push({ g, name, value, reading, bias, tip });
     const last = (a) => a[i];
     const pctFrom = (a) => (a == null ? null : px / a - 1);
-    const unit = { D: "day", W: "week", M: "month" }[view().iv];
+    const unit = { D: "day", W: "week", M: "month" }[view().iv] || `${view().iv} bar`;
     // trend
     for (const len of [20, 50, 200]) {
       const m = last(T.sma(c, len));
@@ -1546,6 +1568,7 @@ window.StonksTA = function (ctx) {
     if (!(await load(sym))) return;
     header(); controls();
     build(true);
+    ctx.onSymbol?.(sym);
     loadVal(sym);
     loadFin(sym);
     loadRevNi(sym);
@@ -1555,7 +1578,19 @@ window.StonksTA = function (ctx) {
   attachSearch($("#ta-search"), (it) => open(it.symbol));
   $("#ta-search").addEventListener("keydown", (e) => { if (e.key === "Enter" && $("#ta-search").value.trim()) setTimeout(() => $("#ta-search").value.trim() && open($("#ta-search").value), 0); });
   $("#ta-chips").addEventListener("click", (e) => { const b = e.target.closest("button[data-sym]"); if (b) open(b.dataset.sym); });
-  $("#ta-iv").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; saveTA({ interval: b.dataset.v }); controls(); if (raw) build(true); });
+  $("#ta-iv").addEventListener("click", async (e) => {
+    const b = e.target.closest("button"); if (!b) return;
+    const was = view().iv;
+    saveTA({ interval: b.dataset.v });
+    // a range shorter than a bar makes no sense: 1D/5D with weekly bars → 1Y; months of 1-minute bars → 5D
+    const r = view().range;
+    if (!isIntra() && (r === "1D" || r === "5D")) saveTA({ range: "1Y" });
+    if (isIntra() && !isIntra(was) && !["1D", "5D", "1M"].includes(r)) saveTA({ range: b.dataset.v === "1m" ? "1D" : "5D" });
+    controls();
+    if (!view().sym) return;
+    if (!(await load(view().sym))) return;
+    header(); build(true);
+  });
   $("#ta-range").addEventListener("click", async (e) => {
     const b = e.target.closest("button"); if (!b) return;
     saveTA({ range: b.dataset.v }); controls();
@@ -1619,13 +1654,59 @@ window.StonksTA = function (ctx) {
   // periodic / manual refresh: refetch at most every 5 minutes (or on demand) and redraw keeping the zoom
   let loadedAt = 0;
   async function refresh(silent) {
-    if (!view().sym || (silent && Date.now() - loadedAt < 5 * 60e3)) return;
+    if (!view().sym || (silent && Date.now() - loadedAt < (isIntra() ? 30e3 : 5 * 60e3))) return;
     const prevLast = raw?.bars?.[raw.bars.length - 1]?.join();
     raw = null;
     if (!(await load(view().sym))) return;
     header();
     if (!silent || raw.bars[raw.bars.length - 1].join() !== prevLast) build();
   }
+  // ------------------------------------------------------------------ live ticks (Settings → Live prices → Real-time)
+  // Each tick moves the last candle (high / low / close, volume from the day's running total); a tick past the
+  // end of the bar opens a new one, and then the indicators are recomputed. Heikin-Ashi and the price-only
+  // chart types redraw every 15 s instead.
+  let lastDv = null, rebuildT = 0;
+  function tick(list) {
+    if (!raw || !D || !list) return;
+    const x = list.find((k) => k.s === raw.symbol);
+    if (!x || !(x.p > 0)) return;
+    raw.price = x.p;
+    if (x.chp != null) raw.day = x.chp;
+    const bars = raw.bars, last = bars[bars.length - 1];
+    const intra = isIntra(), ivs = INTRA[view().iv];
+    const tsec = x.t / 1000;
+    let fresh = false;
+    if (intra) {
+      const ls = Date.parse(last[0]) / 1000;
+      if (tsec < ls) return;
+      if (tsec >= ls + ivs) {
+        const start = ls + Math.floor((tsec - ls) / ivs) * ivs;
+        bars.push([new Date(start * 1000).toISOString().replace(".000Z", "Z"), x.p, x.p, x.p, x.p, 0]);
+        fresh = true;
+      }
+    } else {
+      const day = new Date(x.t).toISOString().slice(0, 10);
+      if (day < last[0]) return;
+      if (day > last[0]) { bars.push([day, x.p, x.p, x.p, x.p, 0]); fresh = true; }
+    }
+    const b = bars[bars.length - 1];
+    b[2] = Math.max(b[2], x.p); b[3] = Math.min(b[3], x.p); b[4] = x.p;
+    if (x.dv != null) { if (lastDv != null && x.dv >= lastDv) b[5] += x.dv - lastDv; lastDv = +x.dv; }
+    header();
+    if (fresh || Date.now() - rebuildT > 15e3 && !["candles", "bars", "line", "area"].includes(view().type)) { rebuildT = Date.now(); build(); return; }
+    if (!main || ALT.has(view().type)) return;
+    // patch the derived arrays and the last point of the price (and volume) series
+    const E = prepare(), i = E.n - 1;
+    if (E.n !== D.n) { build(); return; }
+    D.o[i] = E.o[i]; D.h[i] = E.h[i]; D.l[i] = E.l[i]; D.c[i] = E.c[i]; D.v[i] = E.v[i];
+    const t = lt(D.t[i]);
+    try {
+      if (view().type === "line" || view().type === "area") main.update({ time: t, value: D.c[i] });
+      else if (["candles", "bars"].includes(view().type)) main.update({ time: t, open: D.o[i], high: D.h[i], low: D.l[i], close: D.c[i] });
+      volS?.update({ time: t, value: D.v[i], color: D.c[i] >= D.o[i] ? "rgba(38,166,154,.45)" : "rgba(239,83,80,.45)" });
+    } catch { /* a series that doesn't take updates (future whitespace points): redraw instead */ build(); }
+  }
+
   if (location.search.includes("debug")) window.__ta = { chart: () => chart, main: () => main, D: () => D };
-  return { show, open, refresh };
+  return { show, open, refresh, tick, symbol: () => (raw ? raw.symbol : view().sym) };
 };

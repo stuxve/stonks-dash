@@ -433,8 +433,9 @@
     </div>
     <div id="ta-head" class="ta-head"></div>
     <div class="toolbar">
-      <span class="seg" id="ta-iv" title="Bar size"><button data-v="D">Daily</button><button data-v="W">Weekly</button><button data-v="M">Monthly</button></span>
-      <span class="seg" id="ta-range"><button data-v="1M">1M</button><button data-v="3M">3M</button><button data-v="6M">6M</button><button data-v="YTD">YTD</button><button data-v="1Y">1Y</button><button data-v="2Y">2Y</button><button data-v="5Y">5Y</button><button data-v="10Y">10Y</button><button data-v="All">All</button></span>
+      <span class="seg" id="ta-iv" title="Bar size: one candle = 1 minute … 1 month. Intraday history on Yahoo: 1-minute bars for the last 7 days, 5–30-minute bars for 60 days, hourly for 2 years.">
+        <button data-v="1m">1m</button><button data-v="5m">5m</button><button data-v="15m">15m</button><button data-v="30m">30m</button><button data-v="1h">1H</button><button data-v="4h">4H</button><button data-v="D">D</button><button data-v="W">W</button><button data-v="M">M</button></span>
+      <span class="seg" id="ta-range" title="What the chart shows first; scroll or pinch to see more"><button data-v="1D">1D</button><button data-v="5D">5D</button><button data-v="1M">1M</button><button data-v="3M">3M</button><button data-v="6M">6M</button><button data-v="YTD">YTD</button><button data-v="1Y">1Y</button><button data-v="2Y">2Y</button><button data-v="5Y">5Y</button><button data-v="10Y">10Y</button><button data-v="All">All</button></span>
       <label class="ctl"><select id="ta-type">
         <optgroup label="Time-based"><option value="candles">Candles</option><option value="heikin">Heikin-Ashi</option><option value="bars">OHLC bars</option><option value="line">Line</option><option value="area">Area</option></optgroup>
         <optgroup label="Price-only (no time axis)"><option value="renko">Renko</option><option value="kagi">Kagi</option><option value="lb">Three Line Break</option><option value="pnf">Point &amp; Figure</option></optgroup>
@@ -644,9 +645,9 @@
         <option value="name">Name / custom label</option>
       </select>
     </label>
-    <label class="field" title="While a page is open, the Pi refreshes what it shows at this rate and pushes each update to it. Faster means more requests to Yahoo, which can rate-limit (block for a while) clients that ask too often.">Live prices
+    <label class="field" title="Real-time: the Pi keeps Yahoo's streaming feed open for the tickers on screen and pushes every price change to the page (about once a second). Otherwise it refreshes what the page shows at the chosen rate. Faster polling means more requests to Yahoo, which can rate-limit (block for a while) clients that ask too often.">Live prices
       <select id="s-live">
-        <option value="0">Off (background rate only)</option><option value="10">Every 10 s</option><option value="15">Every 15 s</option>
+        <option value="1">Real-time (stream every trade)</option><option value="0">Off (background rate only)</option><option value="10">Every 10 s</option><option value="15">Every 15 s</option>
         <option value="20">Every 20 s</option><option value="30">Every 30 s</option><option value="60">Every minute</option>
       </select>
     </label>

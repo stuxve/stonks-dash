@@ -128,6 +128,24 @@
       body.scrollTop = 0;
       refreshExt();
       load();
+      ctx.onOpenChange?.();
+    }
+    dlg.addEventListener("close", () => { scrubbing = false; ctx.onOpenChange?.(); });
+    // real-time ticks (Settings → Live prices → Real-time): move the price and the end of the 1D line
+    let scrubbing = false, tickDrawn = 0;
+    function tick(by) {
+      if (!dlg.open || !cur?.data) return;
+      const t = by[cur.symbol];
+      if (!t) return;
+      const d = cur.data;
+      d.price = t.p; d.last = t.p;
+      if (d.range === "1D" && d.intraday && d.points.length) {
+        const lastPt = d.points[d.points.length - 1];
+        if (t.t - lastPt[0] >= 5 * 60e3) d.points.push([t.t, t.p]); else lastPt[1] = t.p;
+      }
+      if (scrubbing) return;
+      if (Date.now() - tickDrawn > 2000) { tickDrawn = Date.now(); draw(); }
+      else { const el = $("#sh-px"); if (el) el.textContent = fmtPrice(t.p, d.currency); }
     }
     // US pre-market / after-hours line under the price (static/premarket.js)
     function refreshExt() {
@@ -203,7 +221,7 @@
       const xf = xFormatter(d);
       chart = window.StonksLine($("#sh-chart"), d, {
         fmt: (v) => fmtPrice(v, ccy), axisFmt: (v) => axisPrice(v, ccy), markers, avg: p ? avgBuy(p) : null,
-        onScrub: (pt) => (pt ? head(pt.v, pt.v - d.ref, (pt.v / d.ref - 1) * 100, xf(pt.t, false)) : base0()),
+        onScrub: (pt) => { scrubbing = !!pt; return pt ? head(pt.v, pt.v - d.ref, (pt.v / d.ref - 1) * 100, xf(pt.t, false)) : base0(); },
       });
     }
 
@@ -279,6 +297,6 @@
       if (!dlg.open || !cur) return;
       if (rng() === "1D") { cache.delete(`${cur.symbol}|1D`); load(); }
     }
-    return { open, refresh, refreshExt, isOpen: () => dlg.open };
+    return { open, refresh, refreshExt, tick, isOpen: () => dlg.open, symbol: () => cur?.symbol };
   };
 })();

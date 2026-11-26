@@ -182,7 +182,7 @@ The size and group choices are saved per board. Period, range and currency are g
   - The app won't save a sale (or an edit or deletion of a buy) that would leave you selling more than you held on that date.
   - Hacienda applies FIFO across all your brokers for the same security. If you hold the same ISIN in two accounts, check the result.
 
-**Analysis.** A candlestick chart for any ticker: search one, or pick from your holdings, your Highs & lows watch list or recent tickers. **Chart** in Holdings and *chart* in Highs & lows open the ticker here.
+**Analysis.** Bar sizes go from **1m, 5m, 15m, 30m, 1H, 4H** to **D, W, M**, like TradingView. Yahoo keeps 1-minute bars for about 7 days, 5–30-minute bars for 60 days and hourly bars for 2 years; 4H bars are built from the hourly ones. *1D* and *5D* in the range bar show the last 1 or 5 sessions. Intraday times are in your time zone. With *Real-time* prices the last candle moves with each trade. Otherwise intraday charts reload every 30 s while you're on the tab. A candlestick chart for any ticker: search one, or pick from your holdings, your Highs & lows watch list or recent tickers. **Chart** in Holdings and *chart* in Highs & lows open the ticker here.
 
 - **Chart:**
   - **Bars and types:** daily, weekly or monthly bars; candles, Heikin-Ashi, OHLC bars, line or area; optional log scale.
@@ -320,6 +320,18 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
 
 \* Weekdays 08:00–22:30 in the container's time zone (`TZ`, Europe/Madrid by default), which covers the European and US sessions, or always if you hold crypto. To stop the heatmap refresh on a slow Pi, set `"worker": {"boards": false}` in settings.
 
+**Real-time prices** (Settings → *Live prices* → *Real-time*):
+
+- **How it works.** The Pi opens Yahoo's streaming feed (a WebSocket that pushes each new trade price) for the tickers on screen: your holdings, the Markets board shown, the Analysis chart, or the open ticker sheet. It pushes every change to the page, about once a second.
+- **What updates.** Prices, values, P&L (profit and loss) and the summary boxes update in place. The heatmap redraws every few seconds. In Analysis the last candle moves with each trade, and a trade past the end of the bar opens a new one.
+- **What still refreshes on a timer.** The full results (totals, alerts, charts) refresh every 15 s as before.
+- **Status.** The header shows a pulsing red dot and *real-time*.
+- **Limits.**
+  - Yahoo's feed is as real-time as its website: most US and many European exchanges are live, and some are delayed.
+  - The feed only covers what's on screen, and closes when no page is open.
+  - It reconnects by itself if it drops.
+  - `/api/worker` shows its state: connected, tickers, messages and last error.
+
 **Live updates while a page is open.** The page opens one Server-Sent Events connection to the Pi (SSE: a single HTTP response the server keeps writing to; `/api/events`). It tells the Pi what it's showing: your portfolio, a Markets board, or the dividends in Market hours. Every **15 s** (Settings → *Live prices*: 10 s to 1 min, or off), the Pi refreshes exactly that and pushes an event the moment the new result is ready. The page reloads only when prices actually moved; otherwise just the *Updated* clock advances. The header then reads *Updated 10:31:05 · live 15s*.
 
 - An edit (a buy, a sale, a setting that changes the numbers) is pushed to every open tab, so they all reload.
@@ -355,7 +367,8 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | GET | `/api/resolve?symbol=IE00BNRQM384.SG` | A listing with prices for what you picked: Yahoo lists many European funds under their ISIN on Stuttgart without any prices, so this finds the same fund under a real ticker (same ISIN or same name on Yahoo's search; Xetra first) |
 | GET | `/api/premarket?base=EUR` | US session phase (pre-market / regular / after-hours / closed, holidays), index futures and other gauges, pre-market or after-hours price of your US holdings and watch list with the P&L effect |
 | GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
-| GET | `/api/events?watch=port:EUR,heat:1:EUR` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
+| GET | `/api/ta?symbol=SAN.MC&interval=5m` | Bars for Analysis: `interval` 1m, 5m, 15m, 30m, 1h, 4h (intraday, UTC ISO times) or D (daily, default), plus support/resistance zones |
+| GET | `/api/events?watch=port:EUR,heat:1:EUR,sym:AAPL` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, `ticks` [{s, p, t, chp, dv}] in real-time mode, and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

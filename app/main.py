@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from .db import DB
 from . import alerts, crosses, dividends, exposure, implied, ideas, ledger, levels, risk, sec, seeds, tax, valuation
 from . import worker as wk
+from . import stream as streammod
 from .market import ISIN_RE, ISIN_SYMBOL, PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -163,13 +164,21 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                                "sell_targets", "worker", "risk_proxies"}
     BASE_QUOTE_TTL = engine.recent_ttl
 
-    def live_seconds() -> int:
-        """How often prices refresh while a page is open (settings.live_seconds; 0 = only the background rate)."""
+    def _live_raw() -> int:
         try:
-            v = int(db.get_settings().get("live_seconds", 15))
+            return int(db.get_settings().get("live_seconds", 15))
         except (TypeError, ValueError):
-            v = 15
-        return 0 if v <= 0 else max(10, min(v, 300))
+            return 15
+
+    def realtime() -> bool:
+        """Settings → Live prices → Real-time (stored as live_seconds = 1): stream Yahoo's ticks to open pages."""
+        return _live_raw() == 1
+
+    def live_seconds() -> int:
+        """How often whole results refresh while a page is open (settings.live_seconds; 0 = only the background
+        rate). In real-time mode prices stream in between and the full refresh runs every 15 s."""
+        v = _live_raw()
+        return 0 if v <= 0 else 15 if v == 1 else max(10, min(v, 300))
 
     class _ClearOnWrite:
         """Pure ASGI middleware (keeps streaming responses like /api/events untouched): after a successful
@@ -1665,7 +1674,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         snap.refresh("crosses", _crosses)
         monitor.check()
 
-    _watch_re = re.compile(r"^(port:[A-Z]{3}|heat:\d{1,9}:[A-Z]{3}|divs:[A-Z]{3}|pre:[A-Z]{3})$")
+    _watch_re = re.compile(r"^(port:[A-Z]{3}|heat:\d{1,9}:[A-Z]{3}|divs:[A-Z]{3}|pre:[A-Z]{3}|sym:[A-Z0-9^][A-Z0-9.\-=^]{0,19})$")
 
     def _refresh_key(key: str):
         kind, *rest = key.split(":")
@@ -1680,12 +1689,66 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     _live_last = [None]          # when the live job last refreshed something a page shows
 
+    # ---- real-time ticks (app/stream.py): which tickers the open pages show, and the feed itself
+    _stream_map: dict[str, list[str]] = {}       # feed symbol (IBCF.DE) -> our symbols (IBCF.MU)
+    _stream_div: dict[str, float] = {}           # feed symbol -> divisor to major units (GBp → GBP)
+
+    def _price_raw(sym: str):
+        q = engine.quotes([sym]).get(sym)
+        _, div = normalize_currency((engine.meta([sym]).get(sym) or {}).get("currency"))
+        return q.price * div if q and q.ok else None
+
+    def _make_feed():
+        if provider == "mock":
+            return streammod.MockFeed(_price_raw)
+        import yfinance as yf
+        return yf.WebSocket(verbose=False)
+
+    def _on_ticks(batch: list[dict]):
+        out = []
+        for t in batch:
+            div = _stream_div.get(t["s"])
+            if div is None:
+                div = _stream_div[t["s"]] = normalize_currency((engine.meta([t["s"]]).get(t["s"]) or {}).get("currency"))[1]
+            for ours in _stream_map.get(t["s"], [t["s"]]):
+                out.append({**t, "s": ours, "p": t["p"] / div})
+        if out:
+            _live_last[0] = time.time()
+            bus.publish("ticks", {"ticks": out})
+
+    streamer = streammod.Streamer(_make_feed, _on_ticks)
+    app.state.streamer = streamer
+
+    def _stream_symbols(keys) -> list[str]:
+        """Our tickers behind the results open pages watch: holdings, the board shown, the chart / sheet open."""
+        out: list[str] = []
+        for key in keys:
+            kind, _, rest = key.partition(":")
+            if kind == "port":
+                out += [x["symbol"] for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None]
+            elif kind == "heat":
+                bd = db.get_board(int(rest.split(":")[0]))
+                out += [it["symbol"] for it in (bd or {}).get("items", [])]
+            elif kind == "sym":
+                out.append(rest)
+        return list(dict.fromkeys(s_.upper() for s_ in out))[:150]
+
     def _job_live():
         """Results open pages are showing: refresh each one every live_seconds (dividends: every 10 min)."""
         live = live_seconds()
         watched = bus.watched() if live else set()
         engine.recent_ttl = min(BASE_QUOTE_TTL, max(5.0, live - 2)) if watched else BASE_QUOTE_TTL
-        for key in sorted(watched):
+        if realtime() and watched:
+            ours = _stream_symbols(watched)
+            m: dict[str, list[str]] = {}
+            for s_ in ours:
+                m.setdefault(engine.sources.get(s_, s_), []).append(s_)
+            _stream_map.clear()
+            _stream_map.update(m)
+            streamer.set_symbols(m)
+        else:
+            streamer.set_symbols(())
+        for key in sorted(k for k in watched if not k.startswith("sym:")):
             age = snap.age(key)
             if age is None or age >= (600 if key.startswith("divs:") else max(live - 1, 30) if key.startswith("pre:") else live - 1):
                 try:
@@ -1715,14 +1778,15 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     if os.getenv("STONKS_NO_WARMUP") != "1":
         monitor.start()
         worker.start()
+        streamer.start()
 
     @app.get("/api/worker")
     def worker_status():
         out = worker.status()
         p = snap.age(f"port:{base_or_default(None)}")
         out["portfolio_age"] = p
-        out["live"] = {"seconds": live_seconds(), "clients": bus.clients(), "watched": sorted(bus.watched()),
-                       "last_refresh": _live_last[0]}
+        out["live"] = {"seconds": live_seconds(), "realtime": realtime(), "clients": bus.clients(), "watched": sorted(bus.watched()),
+                       "last_refresh": _live_last[0], "stream": streamer.status() if realtime() else None}
         # the newest price refresh, whichever job did it (background every minute, or live for open pages)
         port_ok = next((j["last_ok"] for j in out["jobs"] if j["name"] == "portfolio"), None)
         out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)
@@ -1740,7 +1804,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def norm(x):
             k, _, r = x.strip().partition(":")
             return f"{k.lower()}:{r.upper()}"
-        keys = [k for k in dict.fromkeys(norm(x) for x in watch.split(",") if x.strip()) if _watch_re.match(k)][:4]
+        keys = [k for k in dict.fromkeys(norm(x) for x in watch.split(",") if x.strip()) if _watch_re.match(k)][:6]
         sub = bus.subscribe(keys)
         if any((snap.age(k) or 1e9) > max(5, live_seconds() - 1) for k in keys):
             worker.run_now("live")
@@ -1752,7 +1816,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             n = 0
             try:
                 yield "retry: 3000\n\n"
-                yield fmt("hello", {"watch": keys, "live_seconds": live_seconds(), "ages": {k: snap.age(k) for k in keys}})
+                yield fmt("hello", {"watch": keys, "live_seconds": live_seconds(), "realtime": realtime(),
+                                    "ages": {k: snap.age(k) for k in keys}})
                 while not limit or n < limit:
                     if await request.is_disconnected():
                         break
@@ -2158,8 +2223,11 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         return "Europe/Madrid"
 
     # ------------------------------------------------------------------ technical analysis
+    TA_INTRADAY = {"1m": ("7d", "1m", 15), "5m": ("60d", "5m", 30), "15m": ("60d", "15m", 45), "30m": ("60d", "30m", 60),
+                   "1h": ("730d", "60m", 90), "4h": ("730d", "60m", 120)}
+
     @app.get("/api/ta")
-    def ta_view(symbol: str, years: int = 10):
+    def ta_view(symbol: str, years: int = 10, interval: str = "D"):
         """Daily OHLCV for the Analysis tab (indicators are computed in the browser), plus the support /
         resistance zones and volatility the Sell targets tab uses. Bad ticks are cleaned like everywhere else:
         closes by the Hampel filter, highs/lows that overshoot both closes by far fall back to the close, and an
@@ -2196,11 +2264,27 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             zones = {"resistance": an["resistance"], "support": an["support"], "breakout": an["breakout"],
                      "breakdown": an["breakdown"], "vol": an["vol"]}
         ccy = normalize_currency(meta.get("currency") or (q.currency if q else None))[0]
-        return {"symbol": sym, "name": meta.get("long_name") or meta.get("name") or sym, "currency": ccy,
+        has_volume = bool((vol > 0).sum() > len(vol) * 0.5)
+        iv = interval if interval in TA_INTRADAY else "D"
+        if iv != "D":
+            # intraday bars (UTC ISO times: "2026-11-26T14:35:00Z"); zones and volatility stay daily
+            period, bar, ttl = TA_INTRADAY[iv]
+            ib = engine.intraday_bars(sym, period, bar, ttl)
+            if ib is None or ib.empty:
+                raise HTTPException(404, f"No {iv} bars for {sym} on Yahoo")
+            if iv == "4h":
+                ib = ib.resample("4h", origin="start_day").agg({"open": "first", "high": "max", "low": "min", "close": "last",
+                                                               "volume": "sum"}).dropna(subset=["close"])
+            ib = ib[(ib["close"] > 0)]
+            rows = [[t.strftime("%Y-%m-%dT%H:%M:%SZ"), r6(o), r6(max(h, o, c)), r6(min(l_, o, c)), r6(c), int(v or 0)]
+                    for t, o, h, l_, c, v in zip(ib.index, ib["open"].fillna(ib["close"]), ib["high"].fillna(ib["close"]),
+                                                  ib["low"].fillna(ib["close"]), ib["close"], ib["volume"].fillna(0))]
+            has_volume = bool((ib["volume"].fillna(0) > 0).sum() > len(ib) * 0.5)
+        return {"symbol": sym, "name": meta.get("long_name") or meta.get("name") or sym, "currency": ccy, "interval": iv,
                 "quote_type": meta.get("quote_type"), "exchange": meta.get("exchange"),
                 "sector": meta.get("sector"), "source": engine.sources.get(sym),
                 "price": q.price if q and q.ok else rows[-1][4], "day": (q.changes or {}).get("1D") if q and q.ok else None,
-                "has_volume": bool((vol > 0).sum() > len(vol) * 0.5), "bars": rows, "zones": zones, "as_of": time.time()}
+                "has_volume": has_volume, "bars": rows, "zones": zones, "as_of": time.time()}
 
     # ------------------------------------------------------------------ valuation (Analysis tab)
     VAL_MARKETS = [("S&P 500", "SPY"), ("Europe", "VGK")]

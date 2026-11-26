@@ -372,6 +372,20 @@ class YahooProvider:
                             "time": ts(i.get("regularMarketTime"))},
                 "pre": blk("pre"), "post": blk("post")}
 
+    def intraday_bars(self, symbol: str, period: str, interval: str) -> pd.DataFrame:
+        """Intraday OHLCV bars (UTC index, raw listing units). Yahoo keeps 1-minute bars for ~7 days, 2–30-minute
+        bars for 60 days and hourly bars for 2 years."""
+        df = self.yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False,
+                              prepost=False, multi_level_index=False, timeout=25)
+        if df is None or df.empty:
+            return pd.DataFrame()
+        out = pd.DataFrame({k: pd.to_numeric(df[c].iloc[:, 0] if isinstance(df[c], pd.DataFrame) else df[c], errors="coerce")
+                            for k, c in (("open", "Open"), ("high", "High"), ("low", "Low"), ("close", "Close"), ("volume", "Volume"))
+                            if c in df}).dropna(subset=["close"])
+        idx = pd.DatetimeIndex(out.index)
+        out.index = idx.tz_convert("UTC") if idx.tz is not None else idx.tz_localize("UTC")
+        return out[~out.index.duplicated(keep="last")].sort_index()
+
     def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
         """Closes of `interval` bars (5m, 30m, 60m…) over `period` (1d, 5d, 1mo), UTC timestamps, raw listing units."""
         df = self.yf.download(symbol, period=period, interval=interval, auto_adjust=False, progress=False,
@@ -777,9 +791,9 @@ class MockProvider:
 
     def intraday(self, symbol: str, period: str, interval: str) -> pd.Series:
         """Synthetic intraday bars ending at the latest close: 09:00–17:30 Madrid sessions (24/7 for crypto)."""
-        step = {"5m": 5, "15m": 15, "30m": 30, "60m": 60, "1h": 60}[interval]
-        days = {"1d": 1, "5d": 5, "1mo": 22}[period]
-        daily = self._series(symbol, date.today() - timedelta(days=60))
+        step = {"1m": 1, "2m": 2, "5m": 5, "15m": 15, "30m": 30, "60m": 60, "1h": 60}[interval]
+        days = {"1d": 1, "5d": 5, "7d": 7, "1mo": 22, "60d": 60, "730d": 500}[period]
+        daily = self._series(symbol, date.today() - timedelta(days=days * 1.6 + 30))
         crypto = self._quote_type(symbol) == "CRYPTOCURRENCY"
         sess = daily.index[-days:] if not crypto else pd.date_range(end=pd.Timestamp(date.today()), periods=days)
         r = np.random.default_rng(self._seed(symbol) + 99)
@@ -798,6 +812,16 @@ class MockProvider:
             vals += list(path)
         s = pd.Series(vals, index=pd.DatetimeIndex(stamps).tz_convert("UTC"), dtype=float)
         return s[~s.index.duplicated(keep="last")].sort_index()
+
+    def intraday_bars(self, symbol: str, period: str, interval: str) -> pd.DataFrame:
+        c = self.intraday(symbol, period, interval)
+        if not len(c):
+            return pd.DataFrame()
+        r = np.random.default_rng(self._seed(symbol) + 31)
+        o = c.shift(1).fillna(c)
+        span = np.abs(r.normal(0, 0.0012, len(c)))
+        return pd.DataFrame({"open": o, "high": np.maximum(o, c) * (1 + span), "low": np.minimum(o, c) * (1 - span),
+                             "close": c, "volume": r.integers(1_000, 50_000, len(c)).astype(float)}, index=c.index)
 
     def dividends(self, symbol: str) -> dict:
         """Quarterly payers among stocks (about 60%), a few semi-annual European ones; ETFs here accumulate."""
@@ -1247,6 +1271,32 @@ class QuoteEngine:
             old = self.db.get_meta([keys[s] for s in stale], max_age=30 * 86400)
             have.update({s: old[keys[s]] for s in stale if keys[s] in old})
         return have
+
+    def intraday_bars(self, symbol: str, period: str, interval: str, ttl: float = 30) -> pd.DataFrame | None:
+        """Intraday OHLCV in MAJOR currency units (UTC index), cached `ttl` seconds in memory; a listing priced
+        from another one uses that listing's bars."""
+        if not hasattr(self.p, "intraday_bars"):
+            return None
+        src = self.sources.get(symbol, symbol)
+        key = (src, period, interval)
+        cache = self.__dict__.setdefault("_ibars", {})
+        hit = cache.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            df = hit[1]
+        else:
+            try:
+                df = self.p.intraday_bars(src, period, interval)
+            except Exception as e:  # noqa: BLE001
+                log.info("intraday bars %s %s/%s failed: %s", src, period, interval, e)
+                return hit[1] if hit else None
+            cache[key] = (time.time(), df)
+        if df is None or df.empty:
+            return df
+        _, div = normalize_currency((self.meta([src]).get(src) or {}).get("currency"))
+        if div != 1:
+            df = df.copy()
+            df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]] / div
+        return df
 
     def extended(self, symbols: list[str], ttl: float = 60) -> dict[str, dict]:
         """Pre-market / after-hours quotes per symbol (cached `ttl` seconds in memory, fetched in parallel)."""

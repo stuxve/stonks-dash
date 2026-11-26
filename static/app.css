@@ -910,3 +910,6 @@ table.grid .pm-det td { white-space: normal; }
 }
 
 .suggest li.noprice b, .suggest li.noprice small { opacity: .55; }
+
+.status.rt::before { content: "●"; color: var(--down); margin-right: 5px; animation: rtpulse 1.6s ease-in-out infinite; }
+@keyframes rtpulse { 50% { opacity: .25; } }
