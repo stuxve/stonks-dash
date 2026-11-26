@@ -1526,6 +1526,7 @@ window.StonksTA = function (ctx) {
       <span class="sub">${esc([x.exchange, x.currency, x.quote_type, x.sector].filter(Boolean).join(" · "))}</span>
       <b class="ta-px">${fp(x.price)}</b> ${x.day != null ? `<span class="${x.day >= 0 ? "up" : "down"}">${x.day > 0 ? "+" : ""}${x.day.toFixed(2)}%</span>` : ""}
       ${x.source ? `<span class="pill" title="Yahoo's data for ${esc(x.symbol)} is short or stale, so prices come from ${esc(x.source)}, another listing of the same fund">via ${esc(x.source)}</span>` : ""}
+      ${x.tr_from ? `<span class="pill" title="Bars since ${esc(new Date(x.tr_from).toLocaleString())} come from Trade Republic's price history (${esc(x.tr_source || "")}), converted to ${esc(x.currency || "")}; older bars are Yahoo's">last 5 days: TR</span>` : ""}
       ${!x.has_volume ? '<span class="pill" title="Yahoo has no volume for this listing; volume indicators are hidden">no volume data</span>' : ""}`;
   }
   async function chips() {

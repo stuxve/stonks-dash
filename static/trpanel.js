@@ -38,9 +38,11 @@ window.StonksTR = function (ctx) {
   function draw(force = false) {
     if (!st) { body.innerHTML = '<div class="loading">Loading…</div>'; return; }
     const s = st.state;
-    const sig = JSON.stringify([s, st.error, st.pending?.needs_code, s === "live" ? (st.positions || []).map((p) => [p.isin, p.name, p.symbol, p.how, p.qty, p.dash_qty, p.venue, p.issue]) : 0, st.held]);
+    const sig = JSON.stringify([s, st.error, st.pending?.needs_code, s === "live" ? (st.positions || []).map((p) => [p.isin, p.name, p.symbol, p.how, p.qty, p.dash_qty, p.venue, p.issue]) : 0, st.held,
+      s === "live" ? (st.others || []).map((o) => [o.symbol, o.isin, o.name, o.how, o.venue, o.issue]) : 0, st.not_on_tr]);
     if (!force && sig === shown && body.firstChild) {
       const c = $("#tr-count"); if (c) c.textContent = `${st.ticks} updates, last ${ago(st.last_tick)}`;
+      for (const o of st.others || []) { const el = body.querySelector(`[data-live="${CSS.escape(o.symbol)}"]`); if (el) el.innerHTML = liveDot(o); }
       return;
     }
     const keepMsg = $("#tr-msg") && !$("#tr-msg").hidden ? $("#tr-msg").outerHTML : '<div id="tr-msg" class="error" hidden></div>';
@@ -80,10 +82,28 @@ window.StonksTR = function (ctx) {
           <button class="btn ghost xs" data-a="disconnect">Disconnect</button></p>
         <div class="table-wrap"><table class="grid tr-map"><thead><tr><th>Trade Republic holding</th><th class="num">TR units</th><th>Shown as</th><th class="num">Dashboard units</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="4" class="hint">Loading your holdings…</td></tr>'}</tbody></table></div>
-        <p class="hint">Prices are the bid/ask midpoint in euros, converted to each listing's currency (e.g. US$ for MSFT). They replace Yahoo's for these tickers while they flow (Lang &amp; Schwarz trades 07:30–23:00).</p>`;
+        <p class="hint">Prices are the bid/ask midpoint in euros, converted to each listing's currency (e.g. US$ for MSFT). They replace Yahoo's for these tickers while they flow (Lang &amp; Schwarz trades 07:30–23:00).</p>
+        ${othersTable()}`;
     }
     body.innerHTML = `${keepMsg}${st.error ? `<p class="warn-t">${esc(st.error)}</p>` : ""}${html}
       <p class="hint tr-note">Trade Republic has no public API: this uses pytr, which talks to TR's private web API as you, read-only (holdings and prices; no order calls). TR can end the session at any time.</p>`;
+  }
+
+  // every other ticker you hold or a page shows: TR prices it too when it lists the instrument
+  function liveDot(o) {
+    return o.live ? '<span class="up">● live</span>' : o.isin ? (o.issue ? `<span class="warn-t">${esc(o.issue)}</span>` : '<span class="muted-t">waiting for a price</span>')
+      : `<span class="muted-t">${esc({ "looking up": "looking it up…", "no match": "no match on TR", "not on TR": "not on TR", "lookup failed": "lookup failed", yours: "off (your choice)" }[o.how] || o.how || "—")}</span>`;
+  }
+  function othersTable() {
+    const rows = (st.others || []).map((o) => `<tr>
+        <td><b>${esc(o.symbol)}</b></td>
+        <td>${o.isin ? `${esc(o.name || "")}<div class="sub">${esc(o.isin)}${o.venue ? ` · ${esc(o.venue === "LSX" ? "Lang & Schwarz" : o.venue)}` : ""}${o.how === "price" ? " · matched by price" : o.how === "yours" ? " · your choice" : ""}</div>` : "—"}</td>
+        <td data-live="${esc(o.symbol)}">${liveDot(o)}</td>
+        <td><span class="row tr-isin"><input data-sym="${esc(o.symbol)}" value="${esc(o.how === "yours" ? (o.isin || "none") : "")}" placeholder="ISIN, none or auto" maxlength="12" autocomplete="off"><button class="btn ghost xs" data-a="isin" data-sym="${esc(o.symbol)}">Set</button></span></td></tr>`).join("");
+    const yahoo = st.not_on_tr?.length ? `<p class="hint">Yahoo only (not on Trade Republic): ${st.not_on_tr.map(esc).join(", ")}.</p>` : "";
+    return `<h3 class="tr-h">Other tickers on screen</h3>
+      <p class="hint">Your other holdings (any broker) and whatever the open pages show. Each is matched to a Trade Republic instrument by its ticker (or, failing that, by price); type an ISIN to choose one yourself, <i>none</i> to keep Yahoo's price, <i>auto</i> to look it up again. 1D / 1W charts and the last 5 days of intraday Analysis bars also come from TR.</p>
+      ${rows ? `<div class="table-wrap"><table class="grid tr-map tr-others"><thead><tr><th>Ticker</th><th>Trade Republic instrument</th><th>Price</th><th>Instrument</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<p class="hint">Nothing else on screen yet.</p>'}${yahoo}`;
   }
 
   body.addEventListener("click", async (e) => {
@@ -96,6 +116,9 @@ window.StonksTR = function (ctx) {
       if (!ok && $("#tr-trpin")) $("#tr-trpin").value = "";
     } else if (a === "code") {
       if (!(await call("/api/tr/login/code", "POST", { code: v("tr-code") })) && $("#tr-code")) { $("#tr-code").value = ""; $("#tr-code").focus(); }
+    } else if (a === "isin") {
+      const inp = body.querySelector(`input[data-sym="${CSS.escape(b.dataset.sym)}"]`);
+      await call("/api/tr/config", "PUT", { isin: { [b.dataset.sym]: (inp?.value || "auto").trim() } });
     } else if (a === "reconnect") await call("/api/tr/reconnect");
     else if (a === "disconnect") {
       if (confirm("Disconnect Trade Republic? The saved session is deleted; you'll log in again (and confirm in the app) to get its prices back.")) await call("/api/tr/disconnect");
@@ -103,6 +126,8 @@ window.StonksTR = function (ctx) {
     if (b.isConnected) b.disabled = false;
   });
   body.addEventListener("keydown", (e) => { if (e.key === "Enter" && e.target.tagName === "INPUT") { e.preventDefault(); e.target.closest(".row, .tr-form")?.querySelector("[data-a]")?.click(); } });
+  // the list changes while pages come and go: refresh it every 5 s while the panel is open (typing is kept)
+  setInterval(() => { if (dlg.open && st?.state === "live" && !document.hidden) load(); }, 5e3);
   body.addEventListener("change", (e) => {
     const sel = e.target.closest("select[data-isin]");
     if (sel) call("/api/tr/config", "PUT", { map: { [sel.dataset.isin]: sel.value } });

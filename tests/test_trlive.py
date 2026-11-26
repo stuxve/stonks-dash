@@ -274,3 +274,64 @@ def test_tick_price_and_weekend_1d(app):
     eng.set_live("SAN.MC", q0.price * 1.01, last_day + 86400)                       # the next day
     q = eng.quotes(["SAN.MC"])["SAN.MC"]
     assert q.prev_close == pytest.approx(q0.price) and q.changes["1D"] == pytest.approx(1.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------------------------- TR for every ticker
+def _live_job(app):
+    app.state.worker.jobs["live"].fn()
+
+
+def _others_live(client, app, syms, timeout=15):
+    def ok():
+        _live_job(app)
+        d = client.get("/api/tr").json()
+        live = {o["symbol"] for o in d.get("others", []) if o["live"]}
+        return syms <= live and d
+    return _wait(ok, timeout)
+
+
+def test_other_holdings_get_tr_prices(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    want = {"NVDA", "ASML.AS", "VWCE.DE", "IWDA.AS", "IS3N.DE", "ETH-USD"}   # demo holdings at other brokers
+    d = _others_live(client, app, want)
+    assert d, client.get("/api/tr").json().get("others")
+    by = {o["symbol"]: o for o in d["others"]}
+    assert by["IWDA.AS"]["isin"] == "IE00B4L5Y983" and by["IWDA.AS"]["how"] == "ticker"
+    assert by["ETH-USD"]["isin"] == "XF000ETH0019" and by["ETH-USD"]["venue"] == "BHS"
+    eng = app.state.engine
+    assert eng.quotes(["NVDA"])["NVDA"].price == eng.live_px["NVDA"][0]
+    # your choice wins: "none" keeps Yahoo's price, "auto" looks it up again
+    d = client.put("/api/tr/config", json={"isin": {"NVDA": "none"}}).json()
+    assert "NVDA" not in eng.live_px
+    assert any(o["symbol"] == "NVDA" and o["how"] == "yours" and not o["isin"] for o in d["others"])
+    client.put("/api/tr/config", json={"isin": {"NVDA": "auto"}})
+    assert _others_live(client, app, {"NVDA"})
+    assert client.put("/api/tr/config", json={"isin": {"NVDA": "XX"}}).status_code == 400
+
+
+def test_lookup_skips_indices_and_finds_by_ticker(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    assert client.get("/api/tr/lookup?symbol=^GSPC").json()["how"] == "not on TR"
+    d = client.get("/api/tr/lookup?symbol=ASML.AS").json()
+    assert d["isin"] == "NL0010273215" and d["instrument"]["venue"] == "LSX"
+
+
+def test_charts_take_intraday_from_tr(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    assert _others_live(client, app, {"NVDA"})
+    d = client.get("/api/chart?symbol=NVDA&range=1D").json()
+    assert d["intraday"] and "Trade Republic" in d["chart_source"] and len(d["points"]) > 10
+    d = client.get("/api/chart?symbol=NVDA&range=1Y").json()
+    assert d["chart_source"] is None                      # longer ranges stay Yahoo's
+    t = client.get("/api/ta?symbol=NVDA&interval=5m").json()
+    assert t["tr_from"] and t["bars"][-1][0] >= t["tr_from"]
+    assert t["bars"][0][0] < t["tr_from"]                  # older bars from Yahoo
+    times = [b[0] for b in t["bars"]]
+    assert times == sorted(times) and len(set(times)) == len(times)
+    # TR not connected: Yahoo only
+    app.state.tr.stop()
+    app.state.tr._aloop = None
+    assert client.get("/api/chart?symbol=NVDA&range=1D").json()["chart_source"] is None

@@ -136,7 +136,8 @@ class TRCodeIn(BaseModel):
 
 
 class TRConfigIn(BaseModel):
-    map: dict[str, str | None] | None = None
+    map: dict[str, str | None] | None = None        # your TR holdings: ISIN -> ticker | "auto" | "none"
+    isin: dict[str, str | None] | None = None       # any other ticker -> ISIN | "auto" | "none"
 
 
 class FillIn(BaseModel):
@@ -1754,7 +1755,9 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
 
     # ---- Trade Republic: live prices for your TR holdings, mostly from Lang & Schwarz (app/trlive.py)
     _tr_fx: dict = {"at": 0.0, "rates": {}}
-    _tr = {"map": {}, "mapped": None}            # map: ISIN -> [our symbols] (swapped whole, never edited in place)
+    # map: your TR holdings' ISIN -> [our symbols]; extra: other tickers on screen, ISIN -> [our symbols]
+    # (both swapped whole, never edited in place, so readers on other threads see a consistent dict)
+    _tr = {"map": {}, "mapped": None, "extra": {}, "pending": [], "hist": {}}
     LIVE_FRESH = 120.0
 
     def _tr_rate(ccy: str) -> float | None:
@@ -1767,9 +1770,16 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
             _tr_fx["rates"][ccy] = engine.fx_rates({ccy}, "EUR").get(ccy)
         return _tr_fx["rates"][ccy]
 
+    def _tr_all() -> dict[str, list[str]]:
+        """ISIN -> our symbols: your TR holdings first, then the other tickers pages show (resolved by _tr_isin)."""
+        out = {k: list(v) for k, v in _tr["extra"].items()}
+        for k, v in _tr["map"].items():
+            out[k] = list(dict.fromkeys(v + out.get(k, [])))
+        return out
+
     def _tr_covered() -> set[str]:
         """Our tickers TR priced in the last 2 minutes (only those leave Yahoo's stream)."""
-        now, mapped = time.time(), {s_ for v in _tr["map"].values() for s_ in v}
+        now, mapped = time.time(), {s_ for v in _tr_all().values() for s_ in v}
         return {s_ for s_, (_, at, *_) in list(engine.live_px.items()) if s_ in mapped and now - at < LIVE_FRESH}
 
     def _on_tr_ticks(batch: list[dict]):
@@ -1780,7 +1790,7 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                 _tr_mapping()
             except Exception as e:  # noqa: BLE001
                 log.info("TR mapping failed: %s", e)
-        out, m = [], _tr["map"]
+        out, m = [], _tr_all()
         for t in batch:
             for sym in m.get(t["isin"], []):
                 q = engine.quotes([sym]).get(sym)
@@ -1835,17 +1845,189 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         _tr["map"] = new
         return out
 
+    # ---- any ticker on screen -> its Trade Republic instrument (ISIN), so TR can price it too
+    TR_TYPES = {"EQUITY": "stock", "ETF": "fund", "MUTUALFUND": "fund", "CRYPTOCURRENCY": "crypto"}
+
+    def _tr_isin_known(sym: str) -> dict | None:
+        """What's decided for `sym` without asking TR: your choice, a TR holding, an ISIN ticker, or the cache.
+        None = not looked up yet."""
+        sym = sym.upper()
+        mine = db.get_settings().get("tr_isin") or {}
+        if sym in mine:
+            return {"isin": mine[sym] or None, "how": "yours"}
+        for isin, syms in _tr["map"].items():
+            if sym in syms:
+                return {"isin": isin, "how": "holding"}
+        root = sym.split(".")[0]
+        if ISIN_RE.match(root):
+            return {"isin": root, "how": "isin"}
+        key = f"trisin:{sym}"
+        hit = db.get_meta([key], 7 * 86400).get(key)
+        if hit and (hit.get("isin") or time.time() - hit.get("at", 0) < 86400):   # a miss is retried after a day
+            return hit
+        return None
+
+    def _tr_eur_price(sym: str) -> float | None:
+        """Our own (Yahoo) price in EUR, ignoring TR's, to check a TR instrument against."""
+        q = engine.quotes([sym], live=False).get(sym)
+        if not (q and q.ok and q.price):
+            return None
+        r = _tr_rate(q.currency or "EUR")
+        return q.price * r if r else None
+
+    def _tr_isin_lookup(sym: str) -> dict:
+        """Ask TR: search by ticker and name, keep the instrument whose ticker matches (or, failing that, whose
+        price is within 2.5% of ours). Cached a week; a miss for a day."""
+        sym = sym.upper()
+        meta = engine.meta([sym]).get(sym) or {}
+        qt = (meta.get("quote_type") or "").upper()
+        key = f"trisin:{sym}"
+        if sym.startswith("^") or "=" in sym or qt not in TR_TYPES:
+            hit = {"isin": None, "how": "not on TR", "at": time.time()}
+            db.put_meta(key, hit)
+            return hit
+        typ = TR_TYPES[qt]
+        root = re.split(r"[.\-]", sym)[0]
+        queries = list(dict.fromkeys(q_ for q_ in (root, meta.get("name")) if q_))
+        cands: list[str] = []
+        for q_ in queries:
+            res = tr.ask("search", q_, typ)
+            for r in (res.get("results") or res.get("items") or []):
+                i = r.get("isin") or r.get("instrumentId")
+                if i and i not in cands:
+                    cands.append(i)
+        cands = cands[:6]
+        ours = _tr_eur_price(sym)
+        pick, how = None, None
+        for isin in cands:
+            d = tr.details(isin)
+            names = {d.get("intl"), d.get("home"), *(d.get("symbols") or [])} - {None, ""}
+            if root in names or (typ == "crypto" and isin.startswith(f"XF000{root}")):
+                pick, how = isin, "ticker"
+                break
+        if pick is None and ours:
+            for isin in cands[:3]:
+                d = tr.details(isin)
+                if not d.get("venue"):
+                    continue
+                try:
+                    p = trlive.tick_price(tr.ask("ticker", isin, d["venue"], timeout=6))[0]
+                except Exception:  # noqa: BLE001
+                    p = None
+                if p and abs(p / ours - 1) < 0.025:
+                    pick, how = isin, "price"
+                    break
+        hit = {"isin": pick, "how": how or "no match", "at": time.time(),
+               "name": (tr.instruments.get(pick) or {}).get("name") if pick else None}
+        db.put_meta(key, hit)
+        return hit
+
+    def _tr_resolver():
+        """Background: look up the tickers pages show that aren't decided yet, a few at a time."""
+        while True:
+            time.sleep(2)
+            if not tr.connected:
+                continue
+            for sym in list(_tr["pending"])[:3]:
+                try:
+                    if _tr_isin_known(sym) is None:
+                        _tr_isin_lookup(sym)
+                except Exception as e:  # noqa: BLE001
+                    log.info("TR lookup for %s failed: %s", sym, e)
+                    db.put_meta(f"trisin:{sym}", {"isin": None, "how": "lookup failed", "at": time.time()})
+                _tr["pending"] = [x for x in _tr["pending"] if x != sym]
+
+    def _tr_sync_wanted(syms) -> None:
+        """Price these tickers from TR (besides your TR holdings): decided ones are subscribed, others queued."""
+        extra: dict[str, list[str]] = {}
+        pending = []
+        held = {x for v in _tr["map"].values() for x in v}
+        for s_ in dict.fromkeys(x.upper() for x in syms if x):
+            if s_ in held:
+                continue
+            k = _tr_isin_known(s_)
+            if k is None:
+                pending.append(s_)
+            elif k.get("isin"):
+                extra.setdefault(k["isin"], []).append(s_)
+        _tr["extra"], _tr["pending"] = extra, pending
+        tr.want(set(extra))
+
+    def _tr_bars(sym: str, timeframe: str, step_s: int) -> pd.DataFrame | None:
+        """Intraday OHLCV from TR's price history ('1d' = the last session, '5d' = five), converted to the listing's
+        currency, at `step_s` seconds per bar. None when TR doesn't have it (then the caller uses Yahoo)."""
+        if not tr.connected:
+            return None
+        sym = sym.upper()
+        isin = next((i for i, v in _tr_all().items() if sym in v), None) or (_tr_isin_known(sym) or {}).get("isin")
+        ins = tr.instruments.get(isin or "") or {}
+        if not isin or not ins.get("venue"):
+            return None
+        q = engine.quotes([sym]).get(sym)
+        r = _tr_rate((q.currency if q else None) or "EUR")
+        if not r:
+            return None
+        ck = (isin, timeframe, step_s)
+        hit = _tr["hist"].get(ck)
+        if hit and time.time() - hit[0] < 60:
+            df = hit[1]
+        else:
+            df = None
+            for res in (step_s * 1000, None):                 # the bar size we want, else TR's default
+                try:
+                    payload = tr.ask("performance_history", isin, timeframe, ins["venue"], res)
+                except Exception:  # noqa: BLE001
+                    continue
+                rows = payload.get("aggregates") or []
+                if not rows:
+                    continue
+                got = int(payload.get("resolution") or 0) // 1000
+                if got and got > step_s:
+                    break                                     # coarser than asked: not useful
+                df = pd.DataFrame({"open": [float(x.get("open") or x.get("close")) for x in rows],
+                                   "high": [float(x.get("high") or x.get("close")) for x in rows],
+                                   "low": [float(x.get("low") or x.get("close")) for x in rows],
+                                   "close": [float(x.get("close")) for x in rows],
+                                   "volume": [float(x.get("volume") or 0) for x in rows]},
+                                  index=pd.to_datetime([int(x["time"]) for x in rows], unit="ms", utc=True))
+                break
+            _tr["hist"][ck] = (time.time(), df)
+        if df is None or df.empty:
+            return None
+        out = df.copy()
+        for c in ("open", "high", "low", "close"):
+            out[c] = out[c] / r
+        if len(out) > 1 and (out.index[1] - out.index[0]).total_seconds() < step_s:
+            out = out.resample(f"{step_s}s", origin="start_day").agg(
+                {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}).dropna(subset=["close"])
+        return out
+
+    def _tr_venue_label(sym: str) -> str:
+        isin = next((i for i, v in _tr_all().items() if sym.upper() in v), None)
+        v = (tr.instruments.get(isin or "") or {}).get("venue")
+        return f"{'Lang & Schwarz' if v in (None, 'LSX') else v} via Trade Republic"
+
+    def _demo_eur(isin: str) -> float | None:
+        """Demo mode: the fake TR feed starts from the dashboard's own price of the ticker an ISIN maps to."""
+        sym = next(iter(_tr_all().get(isin) or []), None)
+        q = engine.quotes([sym], live=False).get(sym) if sym else None
+        r = _tr_rate(q.currency or "EUR") if q and q.ok else None
+        return q.price * r if r else None
+
     # ---- dashboard PIN lock (app/auth.py); the same PIN encrypts the Trade Republic session
     vault = trlive.Vault(db, trlive.load_pepper(os.path.dirname(os.path.abspath(db.path)) if hasattr(db, "path") else DATA_DIR))
     auth = authmod.Auth(vault, lambda: float((db.get_settings().get("auth") or {}).get("idle_minutes") or 10),
                         enabled=REQUIRE_PIN if require_pin is None else require_pin)
     app.state.auth = auth
     tr = trlive.TRLive(db, vault, _on_tr_ticks, key=lambda: auth.key,
-                       api_factory=(lambda ph, pin: trlive.FakeTRApi(ph, pin)) if provider == "mock" else None)
+                       api_factory=(lambda ph, pin: trlive.FakeTRApi(ph, pin, price_of=_demo_eur)) if provider == "mock" else None)
     app.state.tr = tr
+    import threading as _th
+    _th.Thread(target=_tr_resolver, name="stonks-tr-resolve", daemon=True).start()
     if auth.enabled:
         app.add_middleware(authmod.AuthMiddleware, auth=auth)       # outermost: nothing below runs while locked
     _stream_keep: list = [0.0, set()]           # keep-until time, last watched keys
+    _tr_keep: list = [0.0, set()]
     app.state.streamer = streamer
 
     def _stream_symbols(keys) -> list[str]:
@@ -1872,6 +2054,15 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
             _stream_keep[0], _stream_keep[1] = time.time() + 90, set(watched)
         elif realtime() and time.time() < _stream_keep[0]:
             watched = set(_stream_keep[1]) | watched
+        # Trade Republic prices every holding plus what open pages show, real-time mode or not
+        tw = bus.watched()
+        if tw:
+            _tr_keep[0], _tr_keep[1] = time.time() + 90, set(tw)
+        elif time.time() < _tr_keep[0]:
+            tw = set(_tr_keep[1])
+        if tr.connected:
+            held = [x["symbol"] for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None]
+            _tr_sync_wanted(held + _stream_symbols(tw))
         if realtime() and watched:
             covered = _tr_covered()
             ours = [s_ for s_ in _stream_symbols(watched) if s_ not in covered]      # TR's prices win while they flow
@@ -2023,6 +2214,24 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
             ins = tr.instruments.get(p["isin"]) or {}
             st["positions"].append({**p, "name": ins.get("name"), "venue": ins.get("venue"), "issue": ins.get("error"),
                                     "symbol": m.get("symbol"), "how": m.get("how"), "dash_qty": units(m.get("symbol"))})
+        # the other tickers TR prices: everything else you hold, and what open pages show
+        now = time.time()
+        others = []
+        for isin, syms in _tr["extra"].items():
+            ins = tr.instruments.get(isin) or {}
+            for s_ in syms:
+                lv = engine.live_px.get(s_)
+                others.append({"symbol": s_, "isin": isin, "name": ins.get("name"), "venue": ins.get("venue"),
+                               "issue": ins.get("error"), "how": (_tr_isin_known(s_) or {}).get("how"),
+                               "live": bool(lv and now - lv[1] < LIVE_FRESH)})
+        for s_ in _tr["pending"]:
+            others.append({"symbol": s_, "isin": None, "how": "looking up", "live": False})
+        mine = db.get_settings().get("tr_isin") or {}
+        for s_, v in mine.items():
+            if not v:
+                others.append({"symbol": s_, "isin": None, "how": "yours", "live": False})
+        st["others"] = sorted(others, key=lambda x: (not x["live"], x["symbol"]))
+        st["not_on_tr"] = sorted({s_ for s_ in _stream_symbols(_tr_keep[1]) if (_tr_isin_known(s_) or {}).get("how") in ("not on TR", "no match", "lookup failed")})
         return st
 
     def _tr_call(fn, *a):
@@ -2061,8 +2270,42 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         engine.drop_live([s_ for v in _tr["map"].values() for s_ in v])   # back to Yahoo's prices now
         return _tr_status()
 
+    @app.get("/api/tr/lookup")
+    def tr_lookup(symbol: str):
+        """Look a ticker up on Trade Republic now (ignores the cache): which instrument, and how it was matched."""
+        sym = symbol.strip().upper()
+        if not SYMBOL_RE.match(sym):
+            raise HTTPException(400, "Invalid ticker")
+        known = _tr_isin_known(sym)
+        if known and known.get("how") in ("yours", "holding", "isin"):
+            hit = known
+        else:
+            hit = _tr_call(_tr_isin_lookup, sym)
+        isin = hit.get("isin")
+        ins = _tr_call(tr.details, isin) if isin else {}
+        return {"symbol": sym, **hit, "instrument": ins}
+
     @app.put("/api/tr/config")
     def tr_config(body: TRConfigIn):
+        if body.isin is not None:                              # ticker -> ISIN (or "none" / "auto")
+            mine = db.get_settings().get("tr_isin") or {}
+            for sym, v in body.isin.items():
+                sym = sym.strip().upper()
+                v = (v or "").strip().upper()
+                if not SYMBOL_RE.match(sym):
+                    raise HTTPException(400, f"Invalid ticker: {sym}")
+                if v in ("", "AUTO"):
+                    mine.pop(sym, None)
+                    db.put_meta(f"trisin:{sym}", {})           # look it up again
+                elif v == "NONE":
+                    mine[sym] = ""
+                elif re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", v):
+                    mine[sym] = v
+                else:
+                    raise HTTPException(400, f"Not an ISIN: {v}")
+            db.update_settings({"tr_isin": mine})
+            gone = {s_ for s_, v in mine.items() if not v}
+            engine.drop_live(gone)
         cur = db.get_settings().get("tr_map") or {}
         for isin, sym in (body.map or {}).items():
             if not re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", isin):
@@ -2498,7 +2741,17 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         meta = engine.meta([sym]).get(sym) or {}
         intraday = CHART_RANGES[rng] is not None
         ser, ref = None, None
-        if intraday:
+        chart_src = None
+        if intraday and rng in ("1D", "1W"):                # Trade Republic first, when it has the instrument
+            try:
+                tb = _tr_bars(sym, "1d" if rng == "1D" else "5d", 300 if rng == "1D" else 1800)
+            except Exception as e:  # noqa: BLE001
+                log.info("TR history for %s failed: %s", sym, e)
+                tb = None
+            if tb is not None and len(tb) > 1:
+                ser, chart_src = tb["close"], _tr_venue_label(sym)
+                ref = q.prev_close if rng == "1D" and q and q.ok and q.prev_close else None
+        if intraday and chart_src is None:
             period, bar, ttl = CHART_RANGES[rng]
             ser = engine.intraday(sym, period, bar, ttl)
             if ser is not None and len(ser):
@@ -2537,7 +2790,7 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                 "change": last - ref, "change_pct": (last / ref - 1) * 100 if ref else None,
                 "price": q.price if q and q.ok else last, "prev_close": q.prev_close if q else None,
                 "sector": meta.get("sector"), "industry": meta.get("industry"), "exchange": meta.get("exchange"),
-                "source": engine.sources.get(sym), "as_of": time.time()}
+                "source": engine.sources.get(sym), "chart_source": chart_src, "as_of": time.time()}
 
     def sessions_tz(exchange: str | None) -> str:
         """Time zone of a Yahoo exchange code, to cut 1D charts at the session's local date."""
@@ -2557,6 +2810,7 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
     # ------------------------------------------------------------------ technical analysis
     TA_INTRADAY = {"1m": ("7d", "1m", 15), "5m": ("60d", "5m", 30), "15m": ("60d", "15m", 45), "30m": ("60d", "30m", 60),
                    "1h": ("730d", "60m", 90), "4h": ("730d", "60m", 120)}
+    TA_STEP = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 3600}   # 4h: resampled from hourly
 
     @app.get("/api/ta")
     def ta_view(symbol: str, years: int = 10, interval: str = "D"):
@@ -2598,10 +2852,21 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         ccy = normalize_currency(meta.get("currency") or (q.currency if q else None))[0]
         has_volume = bool((vol > 0).sum() > len(vol) * 0.5)
         iv = interval if interval in TA_INTRADAY else "D"
+        tr_from = tr_src = None
         if iv != "D":
             # intraday bars (UTC ISO times: "2026-11-26T14:35:00Z"); zones and volatility stay daily
             period, bar, ttl = TA_INTRADAY[iv]
             ib = engine.intraday_bars(sym, period, bar, ttl)
+            # the last five days from Trade Republic when it has the instrument; older bars stay Yahoo's
+            try:
+                tb = _tr_bars(sym, "5d", TA_STEP[iv])
+            except Exception as e:  # noqa: BLE001
+                log.info("TR history for %s failed: %s", sym, e)
+                tb = None
+            if tb is not None and len(tb) > 1:
+                tr_from = tb.index[0].strftime("%Y-%m-%dT%H:%M:%SZ")
+                tr_src = _tr_venue_label(sym)
+                ib = tb if ib is None or ib.empty else pd.concat([ib[ib.index < tb.index[0]][list(tb.columns)], tb])
             if ib is None or ib.empty:
                 raise HTTPException(404, f"No {iv} bars for {sym} on Yahoo")
             if iv == "4h":
@@ -2616,7 +2881,8 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                 "quote_type": meta.get("quote_type"), "exchange": meta.get("exchange"),
                 "sector": meta.get("sector"), "source": engine.sources.get(sym),
                 "price": q.price if q and q.ok else rows[-1][4], "day": (q.changes or {}).get("1D") if q and q.ok else None,
-                "has_volume": has_volume, "bars": rows, "zones": zones, "as_of": time.time()}
+                "has_volume": has_volume, "bars": rows, "zones": zones, "tr_from": tr_from, "tr_source": tr_src,
+                "as_of": time.time()}
 
     # ------------------------------------------------------------------ valuation (Analysis tab)
     VAL_MARKETS = [("S&P 500", "SPY"), ("Europe", "VGK")]

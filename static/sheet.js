@@ -215,7 +215,7 @@
         $("#sh-when").textContent = when;
       };
       const base0 = () => head(d.price ?? d.last, (d.price ?? d.last) - d.ref, ((d.price ?? d.last) / d.ref - 1) * 100,
-        `${SINCE[d.range]}${d.range === "1D" ? " · vs previous close" : ""}${d.source ? ` · prices via ${d.source}` : ""}`);
+        `${SINCE[d.range]}${d.range === "1D" ? " · vs previous close" : ""}${d.chart_source ? ` · chart: ${d.chart_source}` : d.source ? ` · prices via ${d.source}` : ""}`);
       base0();
       const markers = p ? (p.lots || [p]).map((l) => (l.bought_at ? new Date(`${l.bought_at}T12:00:00`).getTime() : null)).filter(Boolean) : [];
       const xf = xFormatter(d);

@@ -199,6 +199,11 @@ class TRLive:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._pending_ticks: dict[str, dict] = {}
+        self._want: set[str] = set()             # ISINs to price besides your holdings (tickers other pages show)
+        self._aloop: asyncio.AbstractEventLoop | None = None
+        self._waiters: dict[str, asyncio.Future] = {}
+        self._early: dict[str, dict] = {}        # one-shot answers that arrived before their waiter
+        self.subscribed: set[str] = set()
         self._lock = threading.Lock()
         threading.Thread(target=self._flush, name="stonks-tr-flush", daemon=True).start()
 
@@ -359,6 +364,53 @@ class TRLive:
                 self.connected = False
             stop.wait(wait)
 
+    MAX_TICKERS = 150
+    ONESHOT = {"neonSearch", "aggregateHistory", "instrument"}
+
+    # ---- other threads: what to price, and one-off questions (search, details, history) on the feed's connection
+    def want(self, isins) -> None:
+        self._want = {i for i in isins if i}
+
+    def ask(self, method: str, *args, timeout: float = 12.0) -> dict:
+        """Run one pytr subscription (e.g. "search", "instrument_details", "performance_history") on the feed's
+        connection and return its first answer. Raises if the feed isn't connected."""
+        loop = self._aloop
+        if loop is None or not self.connected or loop.is_closed():
+            raise VaultError("Trade Republic isn't connected.")
+        fut = asyncio.run_coroutine_threadsafe(self._oneshot(method, *args, timeout=timeout), loop)
+        return fut.result(timeout + 2)
+
+    async def _oneshot(self, method: str, *args, timeout: float):
+        api = self.api
+        sid = await getattr(api, method)(*args)
+        if sid in self._early:
+            return self._early.pop(sid)
+        fut = asyncio.get_running_loop().create_future()
+        self._waiters[sid] = fut
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            self._waiters.pop(sid, None)
+
+    def details(self, isin: str) -> dict:
+        """Instrument details (name, tickers, venues), cached."""
+        ins = self.instruments.get(isin)
+        if ins and "intl" in ins:
+            return ins
+        self._take_details(isin, self.ask("instrument_details", isin))
+        return self.instruments[isin]
+
+    def _take_details(self, isin: str, payload: dict):
+        ids = payload.get("exchangeIds") or [e.get("slug") for e in payload.get("exchanges") or [] if e.get("slug")]
+        syms = {str(e.get("symbolAtExchange") or "").upper() for e in payload.get("exchanges") or []} - {""}
+        self.instruments[isin] = {"name": payload.get("shortName") or payload.get("name"),
+                                  "venue": "LSX" if "LSX" in ids else (ids[0] if ids else None),
+                                  "error": None if ids else "Not traded on any Trade Republic venue",
+                                  "intl": str(payload.get("intlSymbol") or "").upper() or None,
+                                  "home": str(payload.get("homeSymbol") or "").upper() or None,
+                                  "symbols": sorted(syms), "type": payload.get("typeId") or payload.get("type")}
+
+    # ---- the feed loop
     async def _loop(self, api, stop: threading.Event, got: list):
         loop = asyncio.get_running_loop()
 
@@ -375,19 +427,38 @@ class TRLive:
         api.subscriptions, api._previous_responses = {}, {}
         api._ws = None
         details: dict[str, str] = {}                             # subscription id -> ISIN
+        asked: set[str] = set()                                  # ISINs whose details were requested
         tickers: dict[str, str] = {}                             # subscription id -> ISIN
-        subscribed: set[str] = set()
+        by_isin: dict[str, str] = {}                             # ISIN -> ticker subscription id
+        self.subscribed = set()
+        self._waiters, self._early = {}, {}
         try:
             await api.compact_portfolio()
+            self._aloop = loop
             self.connected = True
             keepalive = refreshed = time.time()
 
-            async def want_ticker(isin):
-                ins = self.instruments.get(isin) or {}
-                if isin in subscribed or not ins.get("venue"):
-                    return
-                subscribed.add(isin)
-                tickers[await api.ticker(isin, exchange=ins["venue"])] = isin
+            async def sync_tickers():
+                """Subscribe what's wanted (holdings first), drop what no page shows any more."""
+                held = [p["isin"] for p in self.portfolio]
+                want = list(dict.fromkeys(held + sorted(self._want)))[:self.MAX_TICKERS]
+                for isin in want:
+                    if isin in by_isin:
+                        continue
+                    ins = self.instruments.get(isin)
+                    if ins is None:
+                        if isin not in asked:
+                            asked.add(isin)
+                            details[await api.instrument_details(isin)] = isin
+                        continue
+                    if ins.get("venue"):
+                        sid = await api.ticker(isin, exchange=ins["venue"])
+                        tickers[sid], by_isin[isin] = isin, sid
+                for isin in set(by_isin) - set(want):
+                    sid = by_isin.pop(isin)
+                    tickers.pop(sid, None)
+                    await api.unsubscribe(sid)
+                self.subscribed = set(by_isin)
 
             while not stop.is_set():
                 try:
@@ -398,32 +469,35 @@ class TRLive:
                     if type(e).__name__ != "TradeRepublicError":
                         raise
                     bad = getattr(e, "subscription_id", None) or (e.args[0] if e.args else None)
+                    w = self._waiters.pop(bad, None)
+                    if w and not w.done():
+                        w.set_exception(VaultError("Trade Republic refused the request."))
                     isin = tickers.pop(bad, None) or details.pop(bad, None)
                     if isin:
+                        by_isin.pop(isin, None)
                         self.instruments.setdefault(isin, {})["error"] = "Trade Republic sends no price for it"
+                        self.instruments[isin].setdefault("venue", None)
                     log.info("TR subscription error for %s", isin or bad)
                     sid = None
                 if sid is not None:
                     got[0] = True
                     kind = sub.get("type")
-                    if kind == "compactPortfolioByType":
+                    if sid in self._waiters:                     # a one-off question from another thread
+                        w = self._waiters.pop(sid)
+                        if kind == "instrument" and sub.get("id"):
+                            self._take_details(sub["id"], payload)
+                        if not w.done():
+                            w.set_result(payload)
+                        await api.unsubscribe(sid)
+                    elif kind == "compactPortfolioByType":
                         self._take_portfolio(payload)
                         await api.unsubscribe(sid)
-                        for pos in self.portfolio:
-                            if pos["isin"] not in self.instruments:
-                                details[await api.instrument_details(pos["isin"])] = pos["isin"]
-                            else:
-                                await want_ticker(pos["isin"])
-                    elif kind == "instrument":
-                        isin = details.pop(sid, None) or sub.get("id")
+                    elif kind == "instrument" and sid in details:
+                        isin = details.pop(sid)
                         await api.unsubscribe(sid)
-                        ids = payload.get("exchangeIds") or []
-                        self.instruments[isin] = {"name": payload.get("shortName") or payload.get("name"),
-                                                  "venue": "LSX" if "LSX" in ids else (ids[0] if ids else None),
-                                                  "error": None if ids else "Not traded on any Trade Republic venue"}
-                        await want_ticker(isin)
-                    elif kind == "ticker":
-                        isin = tickers.get(sid) or sub.get("id", "").split(".")[0]
+                        self._take_details(isin, payload)
+                    elif kind == "ticker" and sid in tickers:
+                        isin = tickers[sid]
                         p, bid, ask, t = tick_price(payload)
                         if p:
                             with self._lock:
@@ -432,6 +506,12 @@ class TRLive:
                                                              "venue": (self.instruments.get(isin) or {}).get("venue")}
                             self.last_tick, self.ticks = time.time(), self.ticks + 1
                             self.error = None
+                    elif kind in self.ONESHOT:                   # answered before its waiter was registered
+                        self._early[sid] = payload
+                        if kind == "instrument" and sub.get("id"):
+                            self._take_details(sub["id"], payload)
+                        await api.unsubscribe(sid)
+                await sync_tickers()
                 now = time.time()
                 if now - keepalive > 240:                        # TR web sessions need a refresh every ~5 min
                     keepalive = now
@@ -441,6 +521,10 @@ class TRLive:
                     refreshed = now
                     await api.compact_portfolio()
         finally:
+            self._aloop = None
+            for w in list(self._waiters.values()):
+                if not w.done():
+                    w.cancel()
             try:
                 await api.close()
             except Exception:  # noqa: BLE001
@@ -479,15 +563,28 @@ class TRLive:
 # ------------------------------------------------------------------------------------------------ demo
 class FakeTRApi:
     """Stand-in for pytr in demo mode and tests, shaped like the real thing: the portfolio has no names (they come
-    from `instrument_details`, with the venues), prices stream per venue, and it can be told to drop the
-    connection, end the session, or leave out the ask."""
+    from `instrument_details`, with the tickers and venues), search finds instruments by name or ticker, prices
+    stream per venue, `performance_history` returns intraday bars, and it can be told to drop the connection, end
+    the session, or leave out the ask."""
 
     HOLDINGS = [("ES0113900J37", "Banco Santander", 900.0, 80.0, ["LSX", "TDG"]),
                 ("US5949181045", "Microsoft", 12.0, 420.0, ["LSX", "TDG"]),
                 ("XF000BTC0017", "Bitcoin", 0.15, 80000.0, ["BHS"])]
+    # ISIN -> (name, intlSymbol, homeSymbol, venues, type, EUR price): what search and details know about
+    CATALOG = {
+        "ES0113900J37": ("Banco Santander", "SAN", "SAN", ["LSX", "TDG"], "stock", 8.0),
+        "US5949181045": ("Microsoft", "MSFT", "MSFT", ["LSX", "TDG"], "stock", 420.0),
+        "XF000BTC0017": ("Bitcoin", "BTC", "BTC", ["BHS"], "crypto", 80000.0),
+        "XF000ETH0019": ("Ethereum", "ETH", "ETH", ["BHS"], "crypto", 3000.0),
+        "US67066G1040": ("NVIDIA", "NVDA", "NVDA", ["LSX", "TDG"], "stock", 160.0),
+        "NL0010273215": ("ASML Holding", "ASML", "ASML", ["LSX", "TDG"], "stock", 700.0),
+        "IE00BK5BQT80": ("Vanguard FTSE All-World (Acc)", "VWCE", "VWCE", ["LSX"], "fund", 130.0),
+        "IE00B4L5Y983": ("iShares Core MSCI World (Acc)", "IWDA", "EUNL", ["LSX"], "fund", 100.0),
+        "IE00BKM4GZ66": ("iShares Core MSCI EM IMI (Acc)", "IS3N", "IS3N", ["LSX"], "fund", 35.0),
+    }
 
     def __init__(self, phone, pin, holdings=None, confirm_after: float = 1.0, drop_after: int | None = None,
-                 no_ask: bool = False, needs_code: bool = False):
+                 no_ask: bool = False, needs_code: bool = False, price_of: Callable[[str], float | None] | None = None):
         import requests
         self.phone_no, self.pin = phone, pin
         self._websession = requests.Session()
@@ -498,7 +595,9 @@ class FakeTRApi:
         self.subscriptions, self._previous_responses = {}, {}
         self._q: asyncio.Queue | None = None
         self._n = self._recvs = 0
-        self._px = {h[0]: h[3] for h in self.holdings}
+        self._px = {i: c[5] for i, c in self.CATALOG.items()}
+        self._px.update({h[0]: h[3] for h in self.holdings})
+        self.price_of = price_of                 # ISIN -> EUR price to start from (demo: the dashboard's prices)
 
     def initiate_weblogin(self):
         return 60
@@ -538,8 +637,47 @@ class FakeTRApi:
             {"isin": h[0], "netSize": str(h[2]), "averageBuyIn": str(h[3])} for h in self.holdings]}]})
 
     async def instrument_details(self, isin):
-        h = next(x for x in self.holdings if x[0] == isin)
-        return await self._sub({"type": "instrument", "id": isin}, {"shortName": h[1], "exchangeIds": h[4]})
+        c = self.CATALOG.get(isin)
+        h = next((x for x in self.holdings if x[0] == isin), None)
+        if c is None and h is None:
+            return await self._sub({"type": "instrument", "id": isin}, {"shortName": None, "exchangeIds": []})
+        name, intl, home, venues, typ, _ = c or (h[1], None, None, h[4], "stock", h[3])
+        return await self._sub({"type": "instrument", "id": isin}, {
+            "shortName": name, "intlSymbol": intl, "homeSymbol": home, "exchangeIds": venues, "typeId": typ,
+            "exchanges": [{"slug": v, "symbolAtExchange": home} for v in venues]})
+
+    async def search(self, query, asset_type="stock", page=1, page_size=20, **_):
+        q = str(query).lower()
+        hits = [{"isin": i, "name": c[0], "type": c[4]} for i, c in self.CATALOG.items()
+                if (c[4] == asset_type or asset_type is None)
+                and (q == c[1].lower() or q == c[2].lower() or any(w in c[0].lower() for w in q.split() if len(w) > 3))]
+        return await self._sub({"type": "neonSearch", "data": {"q": query}}, {"results": hits[:page_size], "resultCount": len(hits)})
+
+    async def performance_history(self, isin, timeframe, exchange="LSX", resolution=None):
+        import random
+        step = int(resolution or (60_000 if timeframe == "1d" else 300_000))
+        days = 1 if timeframe == "1d" else 5
+        end = int(time.time() * 1000) // step * step
+        p = self._start(isin)
+        aggs = []
+        for k in range(min(days * 930 * 60_000 // step, 3000)):
+            t = end - k * step
+            o = p
+            p = p * (1 + random.gauss(0, 0.0008))
+            aggs.append({"time": t, "open": str(round(p, 4)), "high": str(round(max(o, p) * 1.0004, 4)),
+                         "low": str(round(min(o, p) * 0.9996, 4)), "close": str(round(o, 4)), "volume": random.randint(0, 50)})
+        aggs.reverse()
+        return await self._sub({"type": "aggregateHistory", "id": f"{isin}.{exchange}", "range": timeframe},
+                               {"aggregates": aggs, "resolution": step, "lastAggregateEndTime": end + step})
+
+    def _start(self, isin):
+        seeded = self.__dict__.setdefault("_seeded", set())
+        if self.price_of and isin not in seeded:
+            p0 = self.price_of(isin)
+            if p0:
+                self._px[isin] = p0
+                seeded.add(isin)
+        return self._px.get(isin, 100.0)
 
     async def ticker(self, isin, exchange="LSX"):
         return await self._sub({"type": "ticker", "id": f"{isin}.{exchange}"})
@@ -563,8 +701,7 @@ class FakeTRApi:
             raise asyncio.TimeoutError
         sid, s = random.choice(tick)
         isin = s["id"].split(".")[0]
-        self._px[isin] *= 1 + random.gauss(0, 0.0006)
-        p = self._px[isin]
+        p = self._px[isin] = self._start(isin) * (1 + random.gauss(0, 0.0006))
         out = {"bid": {"price": round(p * 0.9995, 4)}, "last": {"price": round(p, 4), "time": int(time.time() * 1000)}}
         if not self.no_ask:
             out["ask"] = {"price": round(p * 1.0005, 4)}

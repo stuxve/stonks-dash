@@ -354,7 +354,13 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
   - A copy of the database alone reveals nothing.
   - Someone with the whole `/data` volume could try every 4–8-digit PIN offline, so keep the volume private and use 6–8 digits.
 
-**Trade Republic live prices** (the **TR** button in the header). The Pi takes the prices of your Trade Republic holdings from TR's own feed: Lang & Schwarz Exchange (LSX, 07:30–23:00) for stocks and ETFs, or each instrument's own venue when it isn't on LSX (crypto, for example). That covers US stocks before the US open and the European ETFs Yahoo barely updates.
+**Trade Republic live prices** (the **TR** button in the header). Once you connect Trade Republic, it becomes the first source of live prices for **every ticker on screen**, not just your TR holdings:
+
+- **What it covers.** Your holdings at any broker (Revolut, Coinbase…) plus what the open page shows: the Markets board, the Analysis chart, the ticker sheet. The tickers stay priced for 90 s after the last page closes.
+- **Venues.** Prices come from Lang & Schwarz Exchange (LSX, 07:30–23:00) for stocks and ETFs, or from each instrument's own venue when it isn't on LSX (crypto, for example). That covers US stocks before the US open and the European ETFs Yahoo barely updates.
+- **Fallback.** Anything TR doesn't list (indices, FX, futures), or hasn't priced in the last 2 minutes (venue closed, connection down), keeps its current source: Yahoo, or another listing of the same fund (*via IBCF.DE*).
+- **Matching.** Each ticker is matched to a TR instrument through TR's search: by ticker first, or failing that by price (within 2.5%). The result is cached for a week; a miss is retried after a day. The panel's *Other tickers on screen* table shows each match: type an ISIN to choose one yourself, *none* to keep the current source, *auto* to look it up again.
+- **Charts.** The ticker sheet's **1D** and **1W** charts, and the **last 5 days of intraday bars** in Analysis (1m–4H), come from TR's price history, converted to the listing's currency. Older bars and longer ranges stay Yahoo's; Analysis tags the chart *last 5 days: TR*.
 
 - **Connecting.** Click **TR**, enter your phone number (`+34…`) and your Trade Republic PIN, then confirm the login in the Trade Republic app (or type the code from your authenticator app; a wrong code can be retried).
 - **Matching.**
@@ -419,7 +425,8 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | POST | `/api/auth/ping` · `/api/auth/pin` `{pin, new_pin}` · PUT `/api/auth/config` `{idle_minutes}` | Report that you used the page; change the PIN; auto-lock minutes |
 | GET | `/api/tr` | Trade Republic feed state (`no_session`, `pending`, `connecting`, `live`, `stopped`), holdings with names, venues and tickers |
 | POST | `/api/tr/login` `{phone, tr_pin}` · `/api/tr/login/code` `{code}` · `/api/tr/reconnect` · `/api/tr/disconnect` | Log in (confirm in the TR app, or send the authenticator code), restart the feed, delete the session |
-| PUT | `/api/tr/config` `{map: {ISIN: ticker \| "auto" \| "none"}}` | Ticker choices |
+| GET | `/api/tr/lookup?symbol=NVDA` | Look a ticker up on TR now: the instrument (ISIN, name, venue) and how it matched |
+| PUT | `/api/tr/config` `{map: {ISIN: ticker \| "auto" \| "none"}, isin: {ticker: ISIN \| "auto" \| "none"}}` | Choices for your TR holdings, and for any other ticker |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

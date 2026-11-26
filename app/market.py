@@ -1425,7 +1425,8 @@ class QuoteEngine:
         return have
 
     # ---- quotes ----
-    def quotes(self, symbols: list[str]) -> dict[str, Quote]:
+    def quotes(self, symbols: list[str], live: bool = True) -> dict[str, Quote]:
+        """Latest quotes; `live=False` ignores live-feed prices (set_live) and returns the provider's own."""
         symbols = [s for s in dict.fromkeys(symbols) if s]
         ser = self.series(symbols)
         meta = self.meta(symbols)
@@ -1447,7 +1448,7 @@ class QuoteEngine:
                 q.changes = ch
                 q.last_date = ld
                 q.spark = [round(float(v) / div, 6) for v in series.iloc[-30:].tolist()]
-                lv = self.live_px.get(s)
+                lv = self.live_px.get(s) if live else None
                 if lv and time.time() - lv[1] < self.live_ttl:
                     # "1D" compares with the close before the quote's day: the last bar if it's from an earlier day
                     # (a weekend quote of Friday evening still compares with Thursday's close, like Yahoo)
