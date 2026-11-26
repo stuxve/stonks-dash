@@ -928,8 +928,8 @@ table.grid .pm-det td { white-space: normal; }
 .tr-pill:hover { color: var(--text); border-color: var(--accent); }
 .tr-pill.tr-live { color: var(--up); border-color: rgba(48, 204, 90, .45); background: rgba(48, 204, 90, .1); }
 .tr-pill.tr-live::before { content: "●"; margin-right: 4px; animation: tr-blink 2s infinite; }
-.tr-pill.tr-locked::before { content: "🔒"; margin-right: 3px; font-size: 10px; }
-.tr-pill.tr-pending { color: #f5a524; border-color: rgba(245, 165, 36, .45); }
+.tr-pill.tr-pending, .tr-pill.tr-connecting { color: #f5a524; border-color: rgba(245, 165, 36, .45); }
+.tr-pill.tr-stopped, .tr-pill.tr-err { color: var(--down); border-color: rgba(246, 53, 56, .45); }
 @keyframes tr-blink { 50% { opacity: .35; } }
 #tr-body p { margin: 0 0 12px; line-height: 1.5; }
 #tr-body .row { margin-bottom: 12px; }
@@ -940,8 +940,6 @@ table.grid .pm-det td { white-space: normal; }
 .tr-wait { font-size: 15px; }
 .tr-map select { max-width: 160px; }
 .tr-map .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
-.tr-settings { margin: 14px 0 10px; border-top: 1px solid var(--border); padding-top: 10px; }
-.tr-settings summary { cursor: pointer; color: var(--muted); font-size: 13px; margin-bottom: 10px; }
 .tr-note { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px !important; }
 .linkbtn { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
 .linkbtn:hover { text-decoration: underline; }
@@ -950,5 +948,23 @@ table.grid .pm-det td { white-space: normal; }
   #tr-body .row input { width: 100%; flex: 1 1 100%; }
   #tr-body .row .btn { flex: 1 1 100%; }
   .tr-map th:nth-child(4), .tr-map td:nth-child(4) { display: none; }
-  .tr-map select { max-width: 100%; width: 100%; }
+  .tr-map { table-layout: fixed; width: 100%; }
+  .tr-map th:nth-child(1) { width: 42%; } .tr-map th:nth-child(2) { width: 22%; }
+  .tr-map td { overflow-wrap: anywhere; }
+  .tr-map select { max-width: 100%; width: 100%; font-size: 12px; padding: 4px; }
 }
+
+/* ---- dashboard lock (static/lock.js) */
+body.locked > *:not(#lockscreen) { display: none !important; }
+#lockscreen { position: fixed; inset: 0; display: grid; place-items: center; background: var(--bg); padding: 16px; z-index: 1000; }
+.lock-card { width: min(340px, 100%); background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 24px; display: flex; flex-direction: column; gap: 12px; }
+.lock-card .brand { font-size: 18px; margin-bottom: 4px; }
+.lock-card h2 { margin: 0; font-size: 18px; color: var(--text-strong); }
+.lock-card input { font-size: 18px; padding: 10px 12px; letter-spacing: .3em; text-align: center; }
+.lock-card .btn { padding: 10px; font-size: 15px; }
+.lock-card .error, .lock-card .hint, .lock-card .warn-t { margin: 0; }
+.lock-help summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.lock-help code { font-size: 11px; word-break: break-all; }
+#s-security .row { margin: 6px 0; }
+#s-security .row input { width: 120px; }
+@media (max-width: 720px) { #s-security .row input { width: 100%; } #lock-btn { display: none; } }

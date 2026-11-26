@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -23,6 +23,7 @@ from . import alerts, crosses, dividends, exposure, implied, ideas, ledger, leve
 from . import worker as wk
 from . import stream as streammod
 from . import trlive
+from . import auth as authmod
 from .market import ISIN_RE, ISIN_SYMBOL, PERIODS, MockProvider, QuoteEngine, YahooProvider, normalize_currency
 from .sessions import CATALOG, DEFAULT_EXCHANGES, SessionService
 
@@ -34,6 +35,7 @@ SYMBOL_RE = re.compile(r"^[A-Z0-9^][A-Z0-9.\-=^]{0,19}$")
 DATA_DIR = os.getenv("STONKS_DATA_DIR", "/data")
 PROVIDER = os.getenv("STONKS_PROVIDER", "yahoo").lower()
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+REQUIRE_PIN = os.getenv("STONKS_REQUIRE_PIN", "1") != "0"   # dashboard PIN lock (app/auth.py); 0 only for tests
 BASES = ("EUR", "USD")
 DEFAULT_BENCHMARK = "IWDA.AS"   # iShares Core MSCI World (EUR, accumulating)
 
@@ -107,27 +109,33 @@ class TokenIn(BaseModel):
     token: str | None = Field(default=None, max_length=100)
 
 
-class TRPinIn(BaseModel):
-    pin: str | None = Field(default=None, pattern=r"^\d{4,8}$")          # current dashboard PIN (to change it)
-    new_pin: str | None = Field(default=None, pattern=r"^\d{4,8}$")
+class PinIn(BaseModel):
+    pin: str = Field(pattern=r"^\d{4,8}$")
+
+
+class PinSetIn(BaseModel):
+    new_pin: str = Field(pattern=r"^\d{4,8}$")
+
+
+class PinChangeIn(BaseModel):
+    pin: str = Field(pattern=r"^\d{4,8}$")                              # current dashboard PIN
+    new_pin: str = Field(pattern=r"^\d{4,8}$")
+
+
+class AuthConfigIn(BaseModel):
+    idle_minutes: float = Field(ge=1, le=240)
 
 
 class TRLoginIn(BaseModel):
     phone: str = Field(pattern=r"^\+\d{6,15}$")                        # international format, e.g. +34600…
-    tr_pin: str = Field(pattern=r"^\d{4}$")                             # your Trade Republic PIN: used once, not stored
-    pin: str = Field(pattern=r"^\d{4,8}$")                              # dashboard PIN: encrypts the session
+    tr_pin: str = Field(pattern=r"^\d{4}$")                             # your Trade Republic PIN: used once, not kept
 
 
 class TRCodeIn(BaseModel):
     code: str = Field(pattern=r"^\d{4,8}$")
 
 
-class TRUnlockIn(BaseModel):
-    pin: str = Field(pattern=r"^\d{4,8}$")
-
-
 class TRConfigIn(BaseModel):
-    lock_minutes: float | None = Field(default=None, ge=1, le=240)
     map: dict[str, str | None] | None = None
 
 
@@ -153,7 +161,7 @@ def _seed_mock_portfolio(db: DB, engine: QuoteEngine) -> None:
                                 "bought_at": bought.isoformat(), "fees": 1.0})
 
 
-def build_app(db_path: str | None = None, provider: str | None = None) -> FastAPI:
+def build_app(db_path: str | None = None, provider: str | None = None, require_pin: bool | None = None) -> FastAPI:
     provider = (provider or PROVIDER).lower()
     db = DB(db_path or os.path.join(DATA_DIR, "stonks.db"))
     prov = MockProvider() if provider == "mock" else YahooProvider()
@@ -214,7 +222,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
         async def __call__(self, scope, receive, send):
             if (scope["type"] != "http" or scope["method"] == "GET" or not scope["path"].startswith("/api/")
-                    or scope["path"] == "/api/settings"):    # settings: put_settings decides
+                    or scope["path"] == "/api/settings"                   # settings: put_settings decides
+                    or scope["path"].startswith(("/api/auth", "/api/tr/"))):   # lock / TR login: no data changed
                 return await self.inner(scope, receive, send)
             status = {}
 
@@ -1743,9 +1752,10 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
 
     streamer = streammod.Streamer(_make_feed, _on_ticks)
 
-    # ---- Trade Republic: live LS Exchange prices for your TR holdings (app/trlive.py)
+    # ---- Trade Republic: live prices for your TR holdings, mostly from Lang & Schwarz (app/trlive.py)
     _tr_fx: dict = {"at": 0.0, "rates": {}}
-    _tr_symmap: dict[str, list[str]] = {}        # ISIN -> our symbols
+    _tr = {"map": {}, "mapped": None}            # map: ISIN -> [our symbols] (swapped whole, never edited in place)
+    LIVE_FRESH = 120.0
 
     def _tr_rate(ccy: str) -> float | None:
         """Multiplier from `ccy` into EUR (TR quotes in EUR), refreshed every minute."""
@@ -1757,37 +1767,43 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             _tr_fx["rates"][ccy] = engine.fx_rates({ccy}, "EUR").get(ccy)
         return _tr_fx["rates"][ccy]
 
-    _tr_mapped = [None]                          # holdings snapshot the ISIN → symbol map was built for
+    def _tr_covered() -> set[str]:
+        """Our tickers TR priced in the last 2 minutes (only those leave Yahoo's stream)."""
+        now, mapped = time.time(), {s_ for v in _tr["map"].values() for s_ in v}
+        return {s_ for s_, (_, at, *_) in list(engine.live_px.items()) if s_ in mapped and now - at < LIVE_FRESH}
 
     def _on_tr_ticks(batch: list[dict]):
-        if tr.portfolio_at != _tr_mapped[0]:      # new / refreshed holdings: (re)build the map once
-            _tr_mapped[0] = tr.portfolio_at
+        """Runs on TRLive's flush thread (not the feed's event loop), so the network calls here can't stall it."""
+        if tr.portfolio_at != _tr["mapped"]:     # new / refreshed holdings: (re)build the map once
+            _tr["mapped"] = tr.portfolio_at
             try:
                 _tr_mapping()
             except Exception as e:  # noqa: BLE001
                 log.info("TR mapping failed: %s", e)
-        out = []
+        out, m = [], _tr["map"]
         for t in batch:
-            for sym in _tr_symmap.get(t["isin"], []):
+            for sym in m.get(t["isin"], []):
                 q = engine.quotes([sym]).get(sym)
                 ccy = (q.currency if q else None) or "EUR"
                 r = _tr_rate(ccy)
                 if not r:
                     continue
                 conv = lambda v: v / r if v else None  # noqa: E731 — EUR → the listing's currency
-                engine.set_live(sym, conv(t["p"]))      # the Pi's own totals use it too, not only the page
+                engine.set_live(sym, conv(t["p"]), t["t"] / 1000)   # the Pi's own totals use it too
                 out.append({"s": sym, "p": conv(t["p"]), "bid": conv(t["bid"]), "ask": conv(t["ask"]), "t": t["t"],
-                            "src": "TR", "eur": t["p"]})
+                            "src": "TR", "eur": t["p"], "venue": t.get("venue")})
         if out:
             _live_last[0] = time.time()
             bus.publish("ticks", {"ticks": out})
 
     def _tr_mapping() -> dict[str, dict]:
         """ISIN of each TR holding -> our symbol: your choice (settings.tr_map), else Yahoo's search for the ISIN
-        (or the fund's name) matched against the tickers you hold, preferring ones in a 'Trade Republic' account."""
+        (and the instrument's name) matched against the tickers you hold, preferring a 'Trade Republic' account.
+        A failed match is retried when the tickers you hold change."""
         overrides = db.get_settings().get("tr_map") or {}
         lots = [x for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None]
         held = {x["symbol"].upper() for x in lots}
+        held_sig = hashlib.sha1(",".join(sorted(held)).encode()).hexdigest()[:12]
         tr_acct = {x["symbol"].upper() for x in lots if re.search(r"trade\s*republic", x.get("account") or "", re.I)}
         out = {}
         for pos in tr.portfolio:
@@ -1795,30 +1811,40 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
             if isin in overrides:
                 out[isin] = {"symbol": overrides[isin] or None, "how": "yours"}
                 continue
+            name = (tr.instruments.get(isin) or {}).get("name")
             key = f"trmap:{isin}"
             hit = db.get_meta([key], 86400).get(key)
-            if hit is None or (hit.get("symbol") and hit["symbol"] not in held):
+            stale = hit is None or (hit.get("symbol") and hit["symbol"] not in held) \
+                or (not hit.get("symbol") and (hit.get("held") != held_sig or (name and not hit.get("named"))))
+            if stale:
                 cands = []
                 try:
                     cands = [r["symbol"].upper() for r in prov.search(isin, limit=15)]
-                    if pos.get("name"):
-                        cands += [r["symbol"].upper() for r in _listings_by_name(pos["name"], set())]
+                    if name:
+                        cands += [r["symbol"].upper() for r in _listings_by_name(name, set())]
                 except Exception:  # noqa: BLE001
                     pass
                 pick = next((c for c in cands if c in tr_acct), None) or next((c for c in cands if c in held), None)
-                hit = {"symbol": pick}
+                hit = {"symbol": pick, "held": held_sig, "named": bool(name)}
                 db.put_meta(key, hit)
             out[isin] = {"symbol": hit.get("symbol"), "how": "auto" if hit.get("symbol") else None}
-        _tr_symmap.clear()
-        for isin, m in out.items():
-            if m["symbol"]:
-                _tr_symmap.setdefault(isin, []).append(m["symbol"])
+        new: dict[str, list[str]] = {}
+        for isin, mm in out.items():
+            if mm["symbol"]:
+                new.setdefault(isin, []).append(mm["symbol"])
+        _tr["map"] = new
         return out
 
-    tr = trlive.TRLive(db, trlive.Vault(db, trlive.load_pepper(os.path.dirname(os.path.abspath(db.path)) if hasattr(db, "path") else DATA_DIR)),
-                       _on_tr_ticks, api_factory=(lambda ph, pin: trlive.FakeTRApi(ph, pin)) if provider == "mock" else None,
-                       lock_minutes=lambda: float((db.get_settings().get("tr") or {}).get("lock_minutes") or 10))
+    # ---- dashboard PIN lock (app/auth.py); the same PIN encrypts the Trade Republic session
+    vault = trlive.Vault(db, trlive.load_pepper(os.path.dirname(os.path.abspath(db.path)) if hasattr(db, "path") else DATA_DIR))
+    auth = authmod.Auth(vault, lambda: float((db.get_settings().get("auth") or {}).get("idle_minutes") or 10),
+                        enabled=REQUIRE_PIN if require_pin is None else require_pin)
+    app.state.auth = auth
+    tr = trlive.TRLive(db, vault, _on_tr_ticks, key=lambda: auth.key,
+                       api_factory=(lambda ph, pin: trlive.FakeTRApi(ph, pin)) if provider == "mock" else None)
     app.state.tr = tr
+    if auth.enabled:
+        app.add_middleware(authmod.AuthMiddleware, auth=auth)       # outermost: nothing below runs while locked
     _stream_keep: list = [0.0, set()]           # keep-until time, last watched keys
     app.state.streamer = streamer
 
@@ -1847,8 +1873,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         elif realtime() and time.time() < _stream_keep[0]:
             watched = set(_stream_keep[1]) | watched
         if realtime() and watched:
-            covered = {s_ for v in _tr_symmap.values() for s_ in v} if tr.state() == "live" else set()
-            ours = [s_ for s_ in _stream_symbols(watched) if s_ not in covered]      # TR's LS prices win
+            covered = _tr_covered()
+            ours = [s_ for s_ in _stream_symbols(watched) if s_ not in covered]      # TR's prices win while they flow
             m: dict[str, list[str]] = {}
             for s_ in ours:
                 m.setdefault(engine.sources.get(s_, s_), []).append(s_)
@@ -1907,20 +1933,96 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         out["fresh_at"] = max([t for t in (port_ok, _live_last[0]) if t], default=None)
         return out
 
+    # ---- dashboard lock (app/auth.py)
+    def _cookie(resp: Response, request: Request, tok: str | None):
+        if tok is None:
+            resp.delete_cookie(authmod.COOKIE, path="/")
+        else:
+            secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https"
+            resp.set_cookie(authmod.COOKIE, tok, httponly=True, samesite="strict", secure=secure, path="/")
+
+    def _auth_call(fn, *a):
+        try:
+            return fn(*a)
+        except trlive.VaultError as e:
+            raise HTTPException(400, str(e)) from None
+
+    @app.get("/api/auth")
+    def auth_status(request: Request):
+        return auth.status(request.cookies.get(authmod.COOKIE))
+
+    @app.post("/api/auth/setup")
+    def auth_setup(body: PinSetIn, request: Request, response: Response):
+        tok = _auth_call(auth.setup, body.new_pin)
+        _cookie(response, request, tok)
+        return auth.status(tok)
+
+    @app.post("/api/auth/unlock")
+    def auth_unlock(body: PinIn, request: Request, response: Response):
+        tok, payload = _auth_call(auth.unlock, body.pin)
+        _cookie(response, request, tok)
+        try:
+            tr.resume(payload)                    # the Trade Republic feed starts (or keeps running)
+        except Exception as e:  # noqa: BLE001
+            log.info("TR resume failed: %s", type(e).__name__)
+        return auth.status(tok)
+
+    @app.post("/api/auth/ping")
+    def auth_ping(request: Request):
+        """The page reports that you used it (clicks, keys, scrolling): that's what keeps the session open."""
+        tok = request.cookies.get(authmod.COOKIE)
+        auth.touch(tok)
+        return {"remaining": auth.remaining(tok)}
+
+    @app.post("/api/auth/lock")
+    def auth_lock(request: Request, response: Response):
+        auth.end(request.cookies.get(authmod.COOKIE))
+        _cookie(response, request, None)
+        return auth.status(None)
+
+    @app.post("/api/auth/pin")
+    def auth_pin(body: PinChangeIn, request: Request):
+        tok = request.cookies.get(authmod.COOKIE)
+        tr.save()                                 # the newest TR cookies go into the re-encrypted copy
+        with vault.lock:
+            _auth_call(auth.change_pin, tok, body.pin, body.new_pin)
+        return auth.status(tok)
+
+    @app.put("/api/auth/config")
+    def auth_config(body: AuthConfigIn, request: Request):
+        db.update_settings({"auth": {**(db.get_settings().get("auth") or {}), "idle_minutes": body.idle_minutes}})
+        return auth.status(request.cookies.get(authmod.COOKIE))
+
     # ---- Trade Republic endpoints (no secret ever leaves the Pi: no cookies, no phone number, no PIN)
     def _tr_status():
         st = tr.status()
         mp = _tr_mapping() if tr.portfolio else {}
-        dash: dict[str, float] = {}
-        for x in db.list_positions():
-            if x.get("symbol"):
-                dash[x["symbol"].upper()] = dash.get(x["symbol"].upper(), 0.0) + float(x["quantity"] or 0)
+        lots = db.list_positions()
+        sold: dict[tuple, float] = {}
         for x in db.list_transactions():                      # units sold are no longer held
-            if (x.get("type") or "").upper() == "SELL" and x.get("symbol") and x["symbol"].upper() in dash:
-                dash[x["symbol"].upper()] -= float(x.get("quantity") or 0)
-        st["held"] = sorted({x["symbol"].upper() for x in db.list_positions() if x.get("symbol") and x.get("manual_price") is None})
-        st["positions"] = [{**p, "symbol": (mp.get(p["isin"]) or {}).get("symbol"), "how": (mp.get(p["isin"]) or {}).get("how"),
-                            "dash_qty": dash.get(((mp.get(p["isin"]) or {}).get("symbol") or "").upper())} for p in tr.portfolio]
+            if (x.get("type") or "").upper() == "SELL" and x.get("symbol"):
+                k = (x["symbol"].upper(), (x.get("account") or "").strip().lower())
+                sold[k] = sold.get(k, 0.0) + float(x.get("quantity") or 0)
+
+        def units(sym: str | None):
+            """Units of `sym` in your Trade Republic account(s), or in all accounts if none is called that."""
+            if not sym:
+                return None
+            mine = [x for x in lots if (x.get("symbol") or "").upper() == sym.upper()]
+            tra = [x for x in mine if re.search(r"trade\s*republic", x.get("account") or "", re.I)]
+            use = tra or mine
+            if not use:
+                return None
+            accts = {(x.get("account") or "").strip().lower() for x in use}
+            return sum(float(x["quantity"] or 0) for x in use) - sum(v for (s_, a), v in sold.items() if s_ == sym.upper() and a in accts)
+
+        st["held"] = sorted({x["symbol"].upper() for x in lots if x.get("symbol") and x.get("manual_price") is None})
+        st["positions"] = []
+        for p in tr.portfolio:
+            m = mp.get(p["isin"]) or {}
+            ins = tr.instruments.get(p["isin"]) or {}
+            st["positions"].append({**p, "name": ins.get("name"), "venue": ins.get("venue"), "issue": ins.get("error"),
+                                    "symbol": m.get("symbol"), "how": m.get("how"), "dash_qty": units(m.get("symbol"))})
         return st
 
     def _tr_call(fn, *a):
@@ -1938,16 +2040,9 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
     def tr_status():
         return _tr_status()
 
-    @app.post("/api/tr/pin")
-    def tr_pin(body: TRPinIn):
-        if not body.new_pin:
-            raise HTTPException(400, "Enter the new PIN.")
-        _tr_call(tr.set_pin, body.new_pin, body.pin)
-        return _tr_status()
-
     @app.post("/api/tr/login")
     def tr_login(body: TRLoginIn):
-        _tr_call(tr.start_login, body.phone, body.tr_pin, body.pin)
+        _tr_call(tr.start_login, body.phone, body.tr_pin)
         return _tr_status()
 
     @app.post("/api/tr/login/code")
@@ -1955,47 +2050,35 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         _tr_call(tr.submit_code, body.code)
         return _tr_status()
 
-    @app.post("/api/tr/unlock")
-    def tr_unlock(body: TRUnlockIn):
-        _tr_call(tr.unlock, body.pin)
+    @app.post("/api/tr/reconnect")
+    def tr_reconnect():
+        _tr_call(tr.resume)
         return _tr_status()
 
-    @app.post("/api/tr/lock")
-    def tr_lock():
-        tr.lock()
-        engine.drop_live([s_ for v in _tr_symmap.values() for s_ in v])   # back to Yahoo's prices now
-        return _tr_status()
-
-    @app.post("/api/tr/forget")
-    def tr_forget(body: TRUnlockIn):
-        _tr_call(tr.forget, body.pin)
-        return _tr_status()
-
-    @app.post("/api/tr/reset")
-    def tr_reset():
-        """Forgot the dashboard PIN: delete it and the saved session (log in again afterwards)."""
-        engine.drop_live([s_ for v in _tr_symmap.values() for s_ in v])
-        tr.reset()
+    @app.post("/api/tr/disconnect")
+    def tr_disconnect():
+        tr.disconnect()
+        engine.drop_live([s_ for v in _tr["map"].values() for s_ in v])   # back to Yahoo's prices now
         return _tr_status()
 
     @app.put("/api/tr/config")
     def tr_config(body: TRConfigIn):
-        if body.lock_minutes is not None:
-            db.update_settings({"tr": {**(db.get_settings().get("tr") or {}), "lock_minutes": body.lock_minutes}})
-        if body.map is not None:
-            cur = db.get_settings().get("tr_map") or {}
-            for isin, sym in body.map.items():
-                if not re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", isin):
-                    raise HTTPException(400, f"Not an ISIN: {isin}")
-                if sym in (None, "", "auto"):
-                    cur.pop(isin, None)
-                elif sym == "none":                            # don't use TR's price for this holding
-                    cur[isin] = ""
-                else:
-                    cur[isin] = sym.strip().upper()
-            db.update_settings({"tr_map": cur})
-            _tr_mapped[0] = None                               # rebuild on the next tick
-        return _tr_status()
+        cur = db.get_settings().get("tr_map") or {}
+        for isin, sym in (body.map or {}).items():
+            if not re.match(r"^[A-Z]{2}[A-Z0-9]{9}\d$", isin):
+                raise HTTPException(400, f"Not an ISIN: {isin}")
+            if sym in (None, "", "auto"):
+                cur.pop(isin, None)
+            elif sym == "none":                                # don't use TR's price for this holding
+                cur[isin] = ""
+            else:
+                cur[isin] = sym.strip().upper()
+        db.update_settings({"tr_map": cur})
+        _tr["mapped"] = None                                   # rebuild on the next tick
+        old = {s_ for v in _tr["map"].values() for s_ in v}
+        out = _tr_status()
+        engine.drop_live(old - {s_ for v in _tr["map"].values() for s_ in v})
+        return out
 
     @app.get("/api/stream/test")
     def stream_test(symbols: str = "AAPL,BTC-USD", seconds: float = 10):
@@ -2059,6 +2142,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def fmt(kind, data):
             return f"event: {kind}\ndata: {_json.dumps(data)}\n\n"
 
+        tok = request.cookies.get(authmod.COOKIE)
+
         async def gen():
             n = 0
             try:
@@ -2066,8 +2151,8 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
                 yield fmt("hello", {"watch": keys, "live_seconds": live_seconds(), "realtime": realtime(),
                                     "ages": {k: snap.age(k) for k in keys}})
                 while not limit or n < limit:
-                    if await request.is_disconnected():
-                        break
+                    if await request.is_disconnected() or not auth.valid(tok):
+                        break                             # gone, or the dashboard locked
                     try:
                         ev = await asyncio.wait_for(sub.q.get(), 15)
                     except asyncio.TimeoutError:
@@ -3047,7 +3132,7 @@ def build_app(db_path: str | None = None, provider: str | None = None) -> FastAP
         def index():
             # cache-bust JS/CSS so a rebuilt container never runs with stale browser-cached assets
             html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "sheet.js", "premarket.js", "app.css"):
+            for name in ("app.js", "hours.js", "planner.js", "portfolio.js", "insights.js", "targets.js", "telegram.js", "risk.js", "ideas.js", "ranges.js", "ta.js", "ta-ind.js", "ta-ext.js", "pnlhist.js", "dividends.js", "sheet.js", "premarket.js", "trpanel.js", "lock.js", "app.css"):
                 f = STATIC_DIR / name
                 if f.exists():
                     v = hashlib.sha1(f.read_bytes()).hexdigest()[:10]

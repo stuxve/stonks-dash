@@ -1,4 +1,4 @@
-"""Trade Republic live prices (app/trlive.py): the PIN vault, login → live → lock → unlock, mapping, the API.
+"""Dashboard PIN lock (app/auth.py) and Trade Republic live prices (app/trlive.py).
 Runs against FakeTRApi (demo mode), never against Trade Republic."""
 import os
 import time
@@ -8,22 +8,10 @@ os.environ["STONKS_NO_WARMUP"] = "1"
 import pytest
 from fastapi.testclient import TestClient
 
-from app import trlive
+from app import auth as authmod, trlive
 from app.main import build_app
 
-PIN, PIN2 = "4821", "907316"          # test values only
-
-
-@pytest.fixture
-def app(tmp_path):
-    return build_app(db_path=str(tmp_path / "t.db"), provider="mock")
-
-
-@pytest.fixture
-def client(app):
-    c = TestClient(app)
-    yield c
-    app.state.tr.lock()
+PIN, PIN2 = "482193", "907316"        # test values only
 
 
 def _wait(fn, timeout=8.0):
@@ -36,64 +24,235 @@ def _wait(fn, timeout=8.0):
     return fn()
 
 
-def _go_live(client):
-    # the demo portfolio already holds SAN.MC 900 and MSFT 12, the same as FakeTRApi's holdings
-    assert client.post("/api/tr/pin", json={"new_pin": PIN}).json()["state"] == "no_session"
-    r = client.post("/api/tr/login", json={"phone": "+34600123456", "tr_pin": "1234", "pin": PIN})
-    assert r.status_code == 200 and r.json()["state"] == "pending"
+@pytest.fixture
+def app(tmp_path):
+    a = build_app(db_path=str(tmp_path / "t.db"), provider="mock", require_pin=True)
+    a.state.tr.RETRY_MIN = 0.3
+    yield a
+    a.state.tr.stop()
+
+
+@pytest.fixture
+def client(app):
+    return TestClient(app)
+
+
+def _setup(client):
+    r = client.post("/api/auth/setup", json={"new_pin": PIN})
+    assert r.status_code == 200 and r.json()["state"] == "unlocked"
+    return r
+
+
+def _tr_live(client, app, **fake):
+    if fake:
+        app.state.tr.api_factory = lambda ph, pin: trlive.FakeTRApi(ph, pin, **fake)
+    r = client.post("/api/tr/login", json={"phone": "+34600123456", "tr_pin": "1234"})
+    assert r.status_code == 200, r.text
     assert _wait(lambda: client.get("/api/tr").json()["state"] == "live")
-    return _wait(lambda: (d := client.get("/api/tr").json())["positions"] and all(p["symbol"] for p in d["positions"]) and d)
+    return _wait(lambda: (d := client.get("/api/tr").json())["positions"] and all(p["name"] for p in d["positions"])
+                 and sum(1 for p in d["positions"] if p["symbol"]) >= 2 and d)
 
 
-# ---------------------------------------------------------------------------------------------- vault
-class _DB:
-    def __init__(self):
-        self.m = {}
+# ---------------------------------------------------------------------------------------------- dashboard lock
+def test_everything_is_locked_until_the_pin(client):
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/auth").json()["state"] == "no_pin"
+    for path in ("/api/portfolio", "/api/settings", "/api/export", "/api/tr", "/api/events?limit=1"):
+        assert client.get(path).status_code == 401, path
+    assert client.post("/api/positions", json={"symbol": "X", "quantity": 1, "avg_cost": 1}).status_code == 401
+    r = _setup(client)
+    ck = r.headers["set-cookie"].lower()
+    assert "httponly" in ck and "samesite=strict" in ck
+    assert client.get("/api/portfolio").status_code == 200
+    assert client.post("/api/auth/setup", json={"new_pin": "1111"}).status_code == 400   # only the first time
+    # another browser: locked, wrong PINs count, the right one opens
+    other = TestClient(client.app)
+    assert other.get("/api/auth").json()["state"] == "locked"
+    assert other.post("/api/auth/unlock", json={"pin": "000000"}).status_code == 400
+    assert other.get("/api/auth").json()["attempts_left"] == trlive.Vault.MAX_FAILS - 1
+    assert other.post("/api/auth/unlock", json={"pin": PIN}).json()["state"] == "unlocked"
+    assert other.get("/api/settings").status_code == 200
 
-    def get_meta(self, keys, ttl=None):
-        return {k: self.m[k] for k in keys if k in self.m}
 
-    def put_meta(self, k, v):
-        self.m[k] = v
+def test_idle_lock_counts_only_your_activity(client, app):
+    _setup(client)
+    auth = app.state.auth
+    tok = client.cookies.get(authmod.COOKIE)
+    auth._s[tok]["seen"] -= 9 * 60                       # 9 of 10 minutes without use
+    client.get("/api/portfolio")                          # the page's own requests don't count
+    assert 50 < auth.remaining(tok) < 61
+    assert client.post("/api/auth/ping").json()["remaining"] > 590      # you used it
+    auth._s[tok]["seen"] -= 10 * 60 + 1
+    assert client.get("/api/portfolio").status_code == 401
+    assert client.get("/api/auth").json()["state"] == "locked"
+    # the setting applies right away
+    client.post("/api/auth/unlock", json={"pin": PIN})
+    assert client.put("/api/auth/config", json={"idle_minutes": 30}).json()["idle_minutes"] == 30
+    assert client.put("/api/auth/config", json={"idle_minutes": 0}).status_code == 422
+    assert client.post("/api/auth/lock").json()["state"] == "locked"
+    assert client.get("/api/settings").status_code == 401
 
 
+def test_cross_origin_writes_are_refused(client):
+    _setup(client)
+    bad = {"Origin": "http://evil.example"}
+    assert client.post("/api/auth/lock", headers=bad).status_code == 403
+    assert client.post("/api/auth/unlock", json={"pin": PIN}, headers=bad).status_code == 403
+    assert client.post("/api/positions", json={"symbol": "X", "quantity": 1, "avg_cost": 1}, headers=bad).status_code == 403
+    ok = {"Origin": "http://testserver"}
+    assert client.post("/api/auth/ping", headers=ok).status_code == 200
+
+
+def test_events_stream_ends_when_locked(client, app):
+    _setup(client)
+    tok = client.cookies.get(authmod.COOKIE)
+    app.state.auth.end(tok)
+    assert client.get("/api/events?watch=port:EUR&limit=1").status_code == 401
+
+
+def test_change_pin_locks_other_browsers_and_cli_reset(client, app, tmp_path):
+    _setup(client)
+    other = TestClient(client.app)
+    other.post("/api/auth/unlock", json={"pin": PIN})
+    assert client.post("/api/auth/pin", json={"pin": "111111", "new_pin": PIN2}).status_code == 400
+    assert client.post("/api/auth/pin", json={"pin": PIN, "new_pin": PIN2}).json()["state"] == "unlocked"
+    assert other.get("/api/settings").status_code == 401
+    assert other.post("/api/auth/unlock", json={"pin": PIN}).status_code == 400
+    assert other.post("/api/auth/unlock", json={"pin": PIN2}).status_code == 200
+    authmod._reset(str(tmp_path / "t.db"))
+    assert not app.state.auth.vault.pin_set()
+
+
+# ---------------------------------------------------------------------------------------------- Trade Republic
+def test_login_names_venues_mapping_and_no_secrets(client, app):
+    _setup(client)
+    d = _tr_live(client, app)
+    assert d["phone"] == "+34•••56"
+    by = {p["isin"]: p for p in d["positions"]}
+    assert by["ES0113900J37"]["name"] == "Banco Santander" and by["ES0113900J37"]["venue"] == "LSX"
+    assert by["ES0113900J37"]["symbol"] == "SAN.MC" and by["ES0113900J37"]["dash_qty"] == 900
+    assert by["US5949181045"]["symbol"] == "MSFT" and by["US5949181045"]["how"] == "auto"
+    assert by["XF000BTC0017"]["venue"] == "BHS"          # not on LSX: priced on its own venue
+    assert app.state.tr.api.pin is None                  # the TR PIN isn't kept after the login request
+    eng = app.state.engine
+    assert _wait(lambda: {"SAN.MC", "MSFT", "BTC-USD"} <= set(eng.live_px))
+    assert eng.quotes(["SAN.MC"])["SAN.MC"].price == eng.live_px["SAN.MC"][0]
+    dump = client.get("/api/settings").text + client.get("/api/export").text + client.get("/api/tr").text
+    assert "1234" not in dump and PIN not in dump and "+34600123456" not in dump and "tr_session" not in dump
+
+
+def test_feed_keeps_running_while_the_dashboard_is_locked(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    client.post("/api/auth/lock")
+    n = app.state.tr.ticks
+    assert _wait(lambda: app.state.tr.ticks > n + 3)
+    assert app.state.tr.state() == "live"
+
+
+def test_dropped_connection_reconnects(client, app):
+    _setup(client)
+    _tr_live(client, app, drop_after=12)
+    tr = app.state.tr
+    assert _wait(lambda: tr.error and "reconnecting" in tr.error, 6)
+    assert _wait(lambda: tr.state() == "live" and tr.error is None, 8)
+    n = tr.ticks
+    assert _wait(lambda: tr.ticks > n + 2)
+
+
+def test_session_ended_by_tr_vs_network_error(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    tr = app.state.tr
+    tr.api.ended = True                                  # TR answers 401 at the next check
+    tr.api.drop_after = 1                                # force a reconnect, which checks the session
+    tr.api._recvs = 5
+    assert _wait(lambda: tr.state() == "no_session", 8)
+    assert "ended the session" in tr.error
+    # a network error while resuming keeps the saved session
+    tr2 = app.state.tr
+    tr2.vault.write(app.state.auth.key, {"session": {"phone": "+34600123456", "cookies": []}}, has_session=True)
+
+    class Flaky(trlive.FakeTRApi):
+        def settings(self):
+            raise ConnectionError("DNS")
+    tr2.api_factory = lambda ph, pin: Flaky(ph, pin)
+    tr2.resume()
+    assert _wait(lambda: tr2.error and "reconnecting" in tr2.error, 4)
+    assert tr2.vault._rec().get("has_session") is True
+    tr2.stop()
+
+
+def test_tick_without_ask_uses_the_last_price(client, app):
+    _setup(client)
+    _tr_live(client, app, no_ask=True)
+    assert _wait(lambda: "SAN.MC" in app.state.engine.live_px)
+
+
+def test_authenticator_code_can_be_retried(client, app):
+    _setup(client)
+    app.state.tr.api_factory = lambda ph, pin: trlive.FakeTRApi(ph, pin, needs_code=True)
+    d = client.post("/api/tr/login", json={"phone": "+34600123456", "tr_pin": "1234"}).json()
+    assert d["state"] == "pending" and d["pending"]["needs_code"]
+    assert client.post("/api/tr/login/code", json={"code": "000000"}).status_code == 400
+    assert client.get("/api/tr").json()["state"] == "pending"
+    assert client.post("/api/tr/login/code", json={"code": "123456"}).status_code == 200
+    assert _wait(lambda: client.get("/api/tr").json()["state"] == "live")
+
+
+def test_restart_resumes_on_the_next_unlock(client, app, tmp_path):
+    _setup(client)
+    _tr_live(client, app)
+    app.state.tr.stop()
+    app2 = build_app(db_path=str(tmp_path / "t.db"), provider="mock", require_pin=True)
+    c2 = TestClient(app2)
+    assert c2.get("/api/tr").status_code == 401
+    assert app2.state.tr.state() == "stopped"
+    c2.post("/api/auth/unlock", json={"pin": PIN})
+    assert _wait(lambda: app2.state.tr.state() == "live")
+    app2.state.tr.stop()
+
+
+def test_mapping_override_and_disconnect(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    d = client.put("/api/tr/config", json={"map": {"US5949181045": "none"}}).json()
+    p = next(x for x in d["positions"] if x["isin"] == "US5949181045")
+    assert p["symbol"] is None and p["how"] == "yours"
+    assert "MSFT" not in app.state.engine.live_px
+    d = client.put("/api/tr/config", json={"map": {"US5949181045": "auto"}}).json()
+    assert next(x for x in d["positions"] if x["isin"] == "US5949181045")["symbol"] == "MSFT"
+    assert client.put("/api/tr/config", json={"map": {"nope": "X"}}).status_code == 400
+    d = client.post("/api/tr/disconnect").json()
+    assert d["state"] == "no_session" and not d["positions"]
+    assert not app.state.auth.vault._rec().get("has_session")
+
+
+# ---------------------------------------------------------------------------------------------- units
 def test_vault_encrypts_and_checks_the_pin():
+    class _DB:
+        def __init__(self):
+            self.m = {}
+
+        def get_meta(self, keys, ttl=None):
+            return {k: self.m[k] for k in keys if k in self.m}
+
+        def put_meta(self, k, v):
+            self.m[k] = v
     db = _DB()
     v = trlive.Vault(db, b"pepper" * 6)
-    assert not v.pin_set()
     key = v.set_pin(PIN)
     v.write(key, {"session": {"phone": "+34600123456", "cookies": [{"name": "a", "value": "secret-cookie"}]}}, has_session=True)
     blob = str(db.m[trlive.Vault.KEY])
     assert "secret-cookie" not in blob and "+34600123456" not in blob and PIN not in blob
-    _, payload = v.open(PIN)
-    assert payload["session"]["cookies"][0]["value"] == "secret-cookie"
-    # another install's secret (pepper) can't open it even with the right PIN
+    assert v.open(PIN)[1]["session"]["cookies"][0]["value"] == "secret-cookie"
     with pytest.raises(trlive.VaultError):
-        trlive.Vault(db, b"other!" * 6).open(PIN)
-
-
-def test_vault_wrong_pins_lock_out_and_pin_change_keeps_the_session():
-    db = _DB()
-    v = trlive.Vault(db, b"pepper" * 6)
-    v.write(v.set_pin(PIN), {"session": {"phone": "+1", "cookies": []}}, has_session=True)
-    for _ in range(trlive.Vault.MAX_FAILS - 1):
-        with pytest.raises(trlive.VaultError):
-            v.open("0000")
-    assert v.attempts_left() == 1
-    v.open(PIN)                                        # a right PIN resets the count
-    assert v.attempts_left() == trlive.Vault.MAX_FAILS
-    with pytest.raises(trlive.VaultError):
-        v.set_pin(PIN2, "1111")                        # changing needs the current PIN
-    v.set_pin(PIN2, PIN)
-    with pytest.raises(trlive.VaultError):
-        v.open(PIN)
-    assert v.open(PIN2)[1]["session"]["phone"] == "+1"
-    assert db.m[trlive.Vault.KEY].get("has_session")
+        trlive.Vault(db, b"other!" * 6).open(PIN)          # another install's secret can't open it
     for _ in range(trlive.Vault.MAX_FAILS):
         with pytest.raises(trlive.VaultError):
             v.open("0000")
     with pytest.raises(trlive.VaultError, match="Too many"):
-        v.open(PIN2)                                   # locked out even with the right PIN
+        v.open(PIN)
 
 
 def test_pepper_file_is_private(tmp_path):
@@ -103,68 +262,15 @@ def test_pepper_file_is_private(tmp_path):
     assert oct(os.stat(tmp_path / ".stonks_secret").st_mode & 0o777) == "0o600"
 
 
-def test_tick_price_uses_the_bid_ask_midpoint():
-    p, bid, ask, t = trlive.tick_price({"bid": {"price": "99"}, "ask": {"price": 101}, "last": {"price": 100.5, "time": 5}})
-    assert (p, bid, ask, t) == (100.0, 99.0, 101.0, 5)
-    assert trlive.tick_price({"last": {"price": 7}})[0] == 7.0
-
-
-# ---------------------------------------------------------------------------------------------- API
-def test_states_login_and_mapping(client, app):
-    assert client.get("/api/tr").json()["state"] == "no_pin"
-    assert client.post("/api/tr/login", json={"phone": "+34600123456", "tr_pin": "1234", "pin": PIN}).status_code == 400
-    d = _go_live(client)
-    assert d["phone"] == "+34•••56" and d["unlocked_until"] > time.time() + 500
-    by = {p["isin"]: p for p in d["positions"]}
-    assert by["ES0113900J37"]["symbol"] == "SAN.MC" and by["ES0113900J37"]["qty"] == 900 and by["ES0113900J37"]["dash_qty"] == 900
-    assert by["US5949181045"]["symbol"] == "MSFT" and by["US5949181045"]["how"] == "auto"
-    assert "SAN.MC" in d["held"]
-    # ticks reach the price engine, converted to the listing's currency (MSFT: EUR → USD)
+def test_tick_price_and_weekend_1d(app):
+    assert trlive.tick_price({"bid": {"price": "99"}, "ask": {"price": 101}, "last": {"price": 100.5, "time": 5}})[:3] == (100.0, 99.0, 101.0)
+    assert trlive.tick_price({"bid": {"price": 99}, "last": {"price": 7}})[0] == 7.0
     eng = app.state.engine
-    assert _wait(lambda: "SAN.MC" in eng.live_px and "MSFT" in eng.live_px)
-    assert eng.quotes(["SAN.MC"])["SAN.MC"].price == eng.live_px["SAN.MC"][0]
-    assert _wait(lambda: client.get("/api/tr").json()["ticks"] > 2)
-    # nothing secret in settings, the export or the API
-    dump = client.get("/api/settings").text + client.get("/api/export").text + client.get("/api/tr").text
-    assert "1234" not in dump and PIN not in dump and "+34600123456" not in dump and "tr_session" not in dump
-
-
-def test_lock_unlock_change_pin_and_auto_lock(client, app):
-    _go_live(client)
-    assert client.post("/api/tr/lock").json()["state"] == "locked"
-    assert not app.state.engine.live_px                   # back to Yahoo's prices
-    r = client.post("/api/tr/unlock", json={"pin": "0000"})
-    assert r.status_code == 400 and client.get("/api/tr").json()["attempts_left"] == trlive.Vault.MAX_FAILS - 1
-    assert client.post("/api/tr/unlock", json={"pin": PIN}).json()["state"] == "live"
-    # change the PIN while unlocked: the next lock saves with the new key
-    assert client.post("/api/tr/pin", json={"pin": PIN, "new_pin": PIN2}).json()["state"] == "live"
-    client.post("/api/tr/lock")
-    assert client.post("/api/tr/unlock", json={"pin": PIN}).status_code == 400
-    assert client.post("/api/tr/unlock", json={"pin": PIN2}).json()["state"] == "live"
-    # auto-lock: once the time is up the watchdog locks it (checks every 5 s)
-    assert client.put("/api/tr/config", json={"lock_minutes": 3}).json()["lock_minutes"] == 3
-    app.state.tr.unlocked_until = time.time() - 1
-    assert client.get("/api/tr").json()["state"] == "locked"
-    assert _wait(lambda: app.state.tr.api is None, 7)
-
-
-def test_mapping_override_and_forget(client):
-    _go_live(client)
-    d = client.put("/api/tr/config", json={"map": {"US5949181045": "none"}}).json()
-    p = next(x for x in d["positions"] if x["isin"] == "US5949181045")
-    assert p["symbol"] is None and p["how"] == "yours"
-    d = client.put("/api/tr/config", json={"map": {"US5949181045": "auto"}}).json()
-    assert next(x for x in d["positions"] if x["isin"] == "US5949181045")["symbol"] == "MSFT"
-    assert client.put("/api/tr/config", json={"map": {"nope": "X"}}).status_code == 400
-    assert client.put("/api/tr/config", json={"lock_minutes": 0}).status_code == 422
-    assert client.post("/api/tr/forget", json={"pin": "0000"}).status_code == 400
-    d = client.post("/api/tr/forget", json={"pin": PIN}).json()
-    assert d["state"] == "no_session" and not d["positions"]
-
-
-def test_reset_when_the_pin_is_forgotten(client):
-    _go_live(client)
-    client.post("/api/tr/lock")
-    d = client.post("/api/tr/reset").json()
-    assert d["state"] == "no_pin" and not d["positions"] and d["phone"] is None
-    assert client.post("/api/tr/unlock", json={"pin": PIN}).status_code == 400
+    q0 = eng.quotes(["SAN.MC"])["SAN.MC"]
+    last_day = time.mktime(time.strptime(q0.last_date, "%Y-%m-%d")) + 20 * 3600     # a quote on the last bar's day
+    eng.set_live("SAN.MC", q0.price * 1.01, last_day)
+    q = eng.quotes(["SAN.MC"])["SAN.MC"]
+    assert q.prev_close == q0.prev_close                  # still compares with the bar before
+    eng.set_live("SAN.MC", q0.price * 1.01, last_day + 86400)                       # the next day
+    q = eng.quotes(["SAN.MC"])["SAN.MC"]
+    assert q.prev_close == pytest.approx(q0.price) and q.changes["1D"] == pytest.approx(1.0, abs=1e-6)

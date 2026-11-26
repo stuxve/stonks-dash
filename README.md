@@ -33,13 +33,13 @@ The base image `python:3.12-slim` is multi-arch, so the same compose file also b
 | Variable | Default | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — | Bot token for Telegram alerts (optional; it can also be pasted in Sell targets). |
-| `STONKS_BIND` | `127.0.0.1` | Host interface. **The app has no authentication.** Keep it on localhost, or expose it only behind a VPN (WireGuard) or a reverse proxy with auth. |
+| `STONKS_BIND` | `127.0.0.1` | Host interface. The dashboard is behind a PIN, but it's plain HTTP (no encryption, so the PIN crosses your network in clear). Keep it on localhost or your LAN, or expose it only through a VPN (WireGuard) or an HTTPS reverse proxy. |
 | `STONKS_PORT` | `8000` | Host port |
 | `STONKS_PROVIDER` | `yahoo` | `yahoo` for live data, or `mock` for offline demo data |
 | `STONKS_QUOTE_TTL` | `60` | Seconds to cache the latest prices |
 | `STONKS_HISTORY_TTL` | `21600` | Seconds to cache the 13-month daily history used for 1W…1Y changes |
 | `STONKS_SEC_UA` | `stonks-dash personal portfolio dashboard` | User-Agent for SEC EDGAR (long revenue / net income history). The SEC asks for a name and email, e.g. `Jane Doe jane@example.com`; set it if the chart reports a 403. |
-| `STONKS_SECRET` | random, in `/data/.stonks_secret` | Extra secret mixed into the key that encrypts the Trade Republic session. Setting or changing it later makes the saved session unreadable: use *Forgot the PIN?* in the TR panel and set it up again. |
+| `STONKS_SECRET` | random, in `/data/.stonks_secret` | Extra secret mixed into the key derived from the dashboard PIN. Setting or changing it later makes the PIN stop working: run the reset command (see *Dashboard PIN lock*) and set a new PIN. |
 | `TZ` | `Europe/Madrid` | Container timezone |
 
 Data lives in the named volume `stonks-data` (`/data/stonks.db`). To back it up, use **Settings → Export JSON** in the UI or `docker cp stonks-dash:/data/stonks.db .`.
@@ -104,7 +104,7 @@ The size and group choices are saved per board. Period, range and currency are g
 
   **Golden cross / death cross**: the 50-day simple moving average (SMA, the plain average of the last 50 daily closes) crossing above (golden 🌟) or below (death 💀) the 200-day SMA, for your holdings and, by default, the Highs & lows watch list (*Crosses for* switches to holdings only). Only completed daily closes count, so a cross is announced once, after the close (from 22:15 local time, when US markets have closed). The message gives both averages, the close against the 200-day average and the previous cross. The first time the Pi sees a ticker it only announces a cross from the last 2 sessions. The panel lists each ticker's current state and the date of its last cross. It's a lagging trend signal: it confirms a move that has already happened.
 
-  Commands in the chat: `/status`, `/summary`, `/crosses` (50-day vs 200-day state of each ticker), `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. Remember the app has no login: anyone on your network can open it and change these settings.
+  Commands in the chat: `/status`, `/summary`, `/crosses` (50-day vs 200-day state of each ticker), `/mute [hours]`, `/unmute`. Buys without any exit set are skipped unless you tick that option. The bot answers only the linked chat.
 - **Highs & lows** shows, for each holding and for the last 15 days, 6 months and 1 year:
   - the lowest and highest price (intraday or closing), with dates;
   - how far today's price is from each one, and where it sits in that range (the bar);
@@ -333,29 +333,48 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
   - It reconnects by itself if it drops.
   - `/api/worker` shows its state: connected, tickers, messages and last error.
 
-**Trade Republic live prices** (the **TR** button in the header). While unlocked, the Pi takes the prices of your Trade Republic holdings from Lang & Schwarz Exchange (LSX), the venue TR trades on, 07:30–23:00. That covers US stocks before the US open and the European ETFs Yahoo barely updates.
+**Dashboard PIN lock.** The whole dashboard is behind a PIN, enforced on the Pi: every `/api` call without a session gets a 401 (unauthorized), so a locked dashboard serves no data, not even to `curl`.
 
-- **First time.**
-  1. Choose a dashboard PIN (4–8 digits).
-  2. Log in with your phone number (`+34…`) and your Trade Republic PIN, plus the dashboard PIN.
-  3. Confirm the login in the Trade Republic app, or type the code from your authenticator app if TR asks for one.
-- **What you see.**
-  - The panel lists your TR holdings and the ticker each one is shown as. It matches them by ISIN (the 12-character security code) against the tickers you hold, preferring positions whose account contains "Trade Republic".
-  - You can pick another ticker, or *don't use*.
-  - Those tickers then get LSX prices (the midpoint between bid and ask, converted from euros to the listing's currency) instead of Yahoo's, on every page and in the Pi's own totals.
-  - Hover a price to see bid, ask and the euro price.
-- **Auto-lock.**
-  - After 10 minutes (Security settings: 1–240) the Pi locks the session and prices go back to Yahoo. The header pill counts down.
-  - *Lock now* locks at once. Unlocking takes only the dashboard PIN, as long as TR still accepts the saved session. TR ends sessions after a while or when you log in elsewhere; then log in again.
+- **First visit.** Choose a PIN (4–8 digits; 6–8 is safer).
+- **Auto-lock.** After **10 minutes without use** (Settings → *Security*: 1–240) the dashboard locks, and every open tab reloads into the lock screen.
+  - Only your activity counts: clicks, keys, scrolling and touches, reported to the Pi at most every 30 s.
+  - The page's own background refreshes don't count, so an open but unused tab locks too.
+- **Locking and the PIN.** The lock icon in the header (Settings → *Lock now* on phones) locks at once. Settings → *Security* also changes the PIN; other browsers then have to enter the new one.
+- **Session cookie.** Unlocking sets a random session cookie that scripts can't read (HttpOnly) and that other sites can't send (SameSite=Strict). Requests that change something from another origin are refused. Sessions live in memory, so restarting the container locks every browser.
+- **Wrong PINs.** 5 wrong PINs block attempts for 15 minutes.
+- **Forgot the PIN.** On the Pi:
+
+  ```bash
+  sudo docker exec stonks-dash python -m app.auth reset
+  sudo docker restart stonks-dash
+  ```
+
+  This deletes the PIN and the saved Trade Republic session; your portfolio data stays. Then set a new PIN in the page.
+- **How the PIN is stored.** It isn't, as such. It derives a key with scrypt (deliberately slow and memory-hard) together with a random secret kept outside the database: `STONKS_SECRET` if set, otherwise `/data/.stonks_secret`, mode 600. A right PIN is one whose key decrypts the vault (AES-GCM).
+  - A copy of the database alone reveals nothing.
+  - Someone with the whole `/data` volume could try every 4–8-digit PIN offline, so keep the volume private and use 6–8 digits.
+
+**Trade Republic live prices** (the **TR** button in the header). The Pi takes the prices of your Trade Republic holdings from TR's own feed: Lang & Schwarz Exchange (LSX, 07:30–23:00) for stocks and ETFs, or each instrument's own venue when it isn't on LSX (crypto, for example). That covers US stocks before the US open and the European ETFs Yahoo barely updates.
+
+- **Connecting.** Click **TR**, enter your phone number (`+34…`) and your Trade Republic PIN, then confirm the login in the Trade Republic app (or type the code from your authenticator app; a wrong code can be retried).
+- **Matching.**
+  - The panel lists your TR holdings with their names, venues and the ticker each one is shown as.
+  - It matches them by ISIN (the 12-character security code) and the instrument's name against the tickers you hold, preferring positions whose account contains "Trade Republic". You can pick another ticker, or *don't use*.
+  - *Dashboard units* counts your Trade Republic account, or all accounts if none is named that, and turns amber when it differs from TR.
+- **Prices.** Those tickers then get TR's prices instead of Yahoo's: the midpoint between bid and ask, converted from euros to the listing's currency. This applies on every page and in the Pi's own totals. Hover a price to see bid, ask, venue and the euro price.
+  - If TR's prices stop for 2 minutes (venue closed, connection down), Yahoo's take over again.
+- **While the dashboard is locked.** The feed keeps running, so the background worker and Telegram alerts keep TR prices.
+  - It reconnects by itself after a dropped connection (5 s, then longer pauses up to 5 min).
+  - It saves the refreshed session (encrypted) every few minutes.
+  - After a container restart it starts again at your next unlock.
+  - If TR ends the session (after a while, or when you log in elsewhere), the panel says so: log in again.
 - **Security.**
-  - Your TR PIN is sent to Trade Republic once, for the login, and never stored.
-  - The session cookies TR returns are stored encrypted (AES-GCM) in the database. The key is derived with scrypt from your dashboard PIN plus a random secret kept outside the database: `STONKS_SECRET` if set, otherwise `/data/.stonks_secret`, mode 600.
-  - A copy of the database alone can't be decrypted. Someone with the whole `/data` volume could try every 4–8-digit PIN, though, so use 6–8 digits and keep the volume private.
-  - 5 wrong PINs block attempts for 15 minutes. You can change the PIN in Security settings. *Forget the session* deletes it. *Forgot the PIN?* deletes the PIN and the session, so you start over.
-  - The dashboard itself has no login (see `STONKS_BIND`). Anyone who can open it can see the panel, but can't unlock it without the PIN.
+  - Your TR PIN is sent to Trade Republic once, for the login request; the Pi doesn't store it or keep it in memory.
+  - The session cookies TR returns are stored encrypted with the dashboard PIN's key (see above).
+  - *Disconnect* stops the feed and deletes the session.
 - **Unofficial.**
   - Trade Republic has no public API. This uses [pytr](https://github.com/pytr-org/pytr), which talks to the private API of TR's web app as you.
-  - It is read-only: holdings and prices, no order calls.
+  - It is read-only: holdings, instrument details and prices, no order calls.
   - TR may change the API (rebuild with a newer pytr) or object to automated access under its terms. Use it at your own risk.
 
 **Live updates while a page is open.** The page opens one Server-Sent Events connection to the Pi (SSE: a single HTTP response the server keeps writing to; `/api/events`). It tells the Pi what it's showing: your portfolio, a Markets board, or the dividends in Market hours. Every **15 s** (Settings → *Live prices*: 10 s to 1 min, or off), the Pi refreshes exactly that and pushes an event the moment the new result is ready. The page reloads only when prices actually moved; otherwise just the *Updated* clock advances. The header then reads *Updated 10:31:05 · live 15s*.
@@ -395,10 +414,12 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | GET | `/api/chart?symbol=SAN.MC&range=1D` | Line chart for the ticker sheet: 1D (5-minute bars, against the previous close), 1W (30-minute), 1M (hourly), 1Y (daily), MAX (weekly); points, reference value, change |
 | GET | `/api/ta?symbol=SAN.MC&interval=5m` | Bars for Analysis: `interval` 1m, 5m, 15m, 30m, 1h, 4h (intraday, UTC ISO times) or D (daily, default), plus support/resistance zones |
 | GET | `/api/events?watch=port:EUR,heat:1:EUR,sym:AAPL` | Live updates (Server-Sent Events): `hello`, then `update` {key, at, changed} after every refresh of a watched result, `ticks` [{s, p, t, chp, dv}] in real-time mode (with `src: "TR"`, `bid`, `ask`, `eur` for Trade Republic prices), and `clear` after any edit; the watched results are refreshed every `live_seconds` while the stream is open |
-| GET | `/api/tr` | Trade Republic panel state (`no_pin`, `no_session`, `pending`, `locked`, `live`), countdown, holdings and their tickers |
-| POST | `/api/tr/pin` `{new_pin, pin?}` · `/api/tr/login` `{phone, tr_pin, pin}` · `/api/tr/login/code` `{code}` | Set or change the dashboard PIN; log in (confirm in the TR app, or send the authenticator code) |
-| POST | `/api/tr/unlock` `{pin}` · `/api/tr/lock` · `/api/tr/forget` `{pin}` | Unlock for `lock_minutes`, lock now, delete the saved session |
-| PUT | `/api/tr/config` `{lock_minutes?, map?: {ISIN: ticker \| "auto" \| "none"}}` | Auto-lock minutes and ticker choices |
+| GET | `/api/auth` | Lock state (`no_pin`, `locked`, `unlocked`), minutes before auto-lock, PIN attempts left. Public, like `/api/health` |
+| POST | `/api/auth/setup` `{new_pin}` · `/api/auth/unlock` `{pin}` · `/api/auth/lock` | Set the first PIN, unlock (sets the session cookie), lock now |
+| POST | `/api/auth/ping` · `/api/auth/pin` `{pin, new_pin}` · PUT `/api/auth/config` `{idle_minutes}` | Report that you used the page; change the PIN; auto-lock minutes |
+| GET | `/api/tr` | Trade Republic feed state (`no_session`, `pending`, `connecting`, `live`, `stopped`), holdings with names, venues and tickers |
+| POST | `/api/tr/login` `{phone, tr_pin}` · `/api/tr/login/code` `{code}` · `/api/tr/reconnect` · `/api/tr/disconnect` | Log in (confirm in the TR app, or send the authenticator code), restart the feed, delete the session |
+| PUT | `/api/tr/config` `{map: {ISIN: ticker \| "auto" \| "none"}}` | Ticker choices |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |
 | GET | `/api/earnings` | Earnings calendar for the stocks you hold: next date, estimates, past surprises, typical move |

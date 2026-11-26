@@ -893,7 +893,7 @@ class MockProvider:
         return [{"symbol": s, "name": self.info(s)["name"], "exchange": "MOCK",
                  "type": self._quote_type(s)} for s in hits]
 
-    ISIN_LISTINGS = {"ES0113900J37": ["SAN.MC"], "US5949181045": ["MSFT"]}
+    ISIN_LISTINGS = {"ES0113900J37": ["SAN.MC"], "US5949181045": ["MSFT"], "XF000BTC0017": ["BTC-USD"]}
     # a fund Yahoo lists under its ISIN (no prices) and under real tickers (prices) — for the resolver tests
     ISIN_FUNDS = {"IE00TEST0001": ("Demo MSCI World ex USA UCITS ETF 1C", ["DWXU.DE", "DWXU.L", "DWXU.MI"])}
 
@@ -974,14 +974,15 @@ class QuoteEngine:
         self.meta_retry = 600.0
         self._lock = threading.Lock()
         self.last_update: float | None = None
-        self.live_px: dict[str, tuple[float, float]] = {}   # symbol -> (price in major units, received) from a live feed
+        self.live_px: dict[str, tuple[float, float, str]] = {}   # symbol -> (price, received, tick date) from a live feed
         self.live_ttl = 120.0
 
-    def set_live(self, symbol: str, price: float) -> None:
-        """A live price (Trade Republic's Lang & Schwarz feed) that overrides the last close in `quotes()` for
-        `live_ttl` seconds, so totals the Pi computes match the prices pushed to the page."""
+    def set_live(self, symbol: str, price: float, tick_ts: float | None = None) -> None:
+        """A live price (Trade Republic's feed) that overrides the last close in `quotes()` for `live_ttl` seconds,
+        so totals the Pi computes match the prices pushed to the page. `tick_ts`: when the price was quoted."""
         if price and price > 0:
-            self.live_px[symbol] = (float(price), time.time())
+            day = time.strftime("%Y-%m-%d", time.localtime(tick_ts or time.time()))
+            self.live_px[symbol] = (float(price), time.time(), day)
 
     def drop_live(self, symbols=None) -> None:
         for s in list(self.live_px if symbols is None else symbols):
@@ -1448,8 +1449,9 @@ class QuoteEngine:
                 q.spark = [round(float(v) / div, 6) for v in series.iloc[-30:].tolist()]
                 lv = self.live_px.get(s)
                 if lv and time.time() - lv[1] < self.live_ttl:
-                    # the reference for "1D" is yesterday's close: the last bar if it's from before today
-                    ref = q.price if ld and str(ld)[:10] < time.strftime("%Y-%m-%d") else q.prev_close
+                    # "1D" compares with the close before the quote's day: the last bar if it's from an earlier day
+                    # (a weekend quote of Friday evening still compares with Thursday's close, like Yahoo)
+                    ref = q.price if ld and str(ld)[:10] < lv[2] else q.prev_close
                     q.price, q.prev_close = lv[0], ref or q.prev_close
                     if ref:
                         q.changes = {**(ch or {}), "1D": (lv[0] / ref - 1) * 100}

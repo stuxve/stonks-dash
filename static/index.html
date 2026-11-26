@@ -29,6 +29,9 @@
   <button id="refresh-btn" class="icon-btn" title="Refresh now" aria-label="Refresh">
     <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg>
   </button>
+  <button id="lock-btn" class="icon-btn" title="Lock the dashboard now" aria-label="Lock">
+    <svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+  </button>
   <button id="settings-btn" class="icon-btn" title="Settings" aria-label="Settings">
     <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
   </button>
@@ -663,6 +666,20 @@
         <option value="60">Every minute</option><option value="300">Every 5 min</option><option value="900">Every 15 min</option>
       </select>
     </label>
+    <div class="field" id="s-security">Security
+      <div class="row">
+        <label class="field">Lock after (minutes without use)<input id="s-idle" type="number" min="1" max="240" step="1"></label>
+        <button id="s-lock-now" class="btn ghost" type="button">Lock now</button>
+      </div>
+      <div class="row">
+        <input id="s-pin-cur" type="password" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="Current PIN">
+        <input id="s-pin-new" type="password" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="New PIN">
+        <input id="s-pin-new2" type="password" inputmode="numeric" maxlength="8" autocomplete="off" placeholder="Repeat new PIN">
+        <button id="s-pin-change" class="btn ghost" type="button">Change PIN</button>
+      </div>
+      <p id="s-pin-msg" class="hint" hidden></p>
+      <p class="hint">5 wrong PINs block attempts for 15 minutes. The PIN also encrypts your Trade Republic session.</p>
+    </div>
     <div class="field">Backup
       <div class="row">
         <a class="btn ghost" href="/api/export" download="stonks-dash-backup.json">Export JSON</a>
@@ -674,6 +691,7 @@
   <div class="dlg-foot"><div class="grow"></div><button class="btn primary" onclick="this.closest('dialog').close()">Done</button></div>
 </dialog>
 
+<script src="/static/lock.js"></script>
 <script src="/static/vendor/d3.min.js"></script>
 <script src="/static/vendor/lightweight-charts.js"></script>
 <script src="/static/ta-ind.js"></script>

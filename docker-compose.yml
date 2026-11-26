@@ -5,7 +5,7 @@ services:
     container_name: stonks-dash
     restart: unless-stopped
     ports:
-      # No auth built in: bound to localhost by default.
+      # PIN-locked, but plain HTTP: bound to localhost by default.
       # For LAN / VPN access set STONKS_BIND=0.0.0.0 (or put it behind your reverse proxy).
       - "${STONKS_BIND:-127.0.0.1}:${STONKS_PORT:-8000}:8000"
     environment:
@@ -15,7 +15,7 @@ services:
       STONKS_HISTORY_TTL: ${STONKS_HISTORY_TTL:-21600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}   # optional: Telegram alerts bot (or paste it in Sell targets)
-      STONKS_SECRET: ${STONKS_SECRET:-}             # optional: extra secret for the Trade Republic session key (default: /data/.stonks_secret)
+      STONKS_SECRET: ${STONKS_SECRET:-}             # optional: extra secret for the dashboard PIN's key (default: /data/.stonks_secret)
       STONKS_SEC_UA: ${STONKS_SEC_UA:-stonks-dash personal portfolio dashboard}   # SEC EDGAR asks for "Name email@example.com"
     volumes:
       - stonks-data:/data

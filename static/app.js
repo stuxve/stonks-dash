@@ -1,5 +1,6 @@
 /* stonks-dash frontend — vanilla JS + d3 treemap */
-(() => {
+// starts once the dashboard is unlocked (static/lock.js)
+window.StonksLock.ready.then(() => {
   "use strict";
 
   const PERIODS = ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y"];
@@ -41,6 +42,7 @@
       init.headers["Content-Type"] = "application/json";
     }
     const r = await fetch(path, init);
+    if (r.status === 401) { window.StonksLock.lost(); throw new Error("Locked"); }   // the session ended
     if (!r.ok) {
       let msg = r.statusText;
       try { const j = await r.json(); msg = typeof j.detail === "string" ? j.detail : Array.isArray(j.detail) ? j.detail.map((x) => `${(x.loc || []).slice(-1)[0] || ""}: ${x.msg}`).join("; ") : JSON.stringify(j.detail); } catch {}
@@ -697,7 +699,9 @@
     if (!tkOn(sym)) return "";
     const k = state.ticks?.[sym];
     const fresh = k && k.moved && Date.now() - k.at < 1500;
-    const tip = k?.src === "TR" ? `Lang & Schwarz via Trade Republic, ${new Date(k.t).toLocaleTimeString()}: bid/ask midpoint${k.bid ? ` (bid ${k.bid.toFixed(4)}, ask ${k.ask.toFixed(4)})` : ""}${k.eur ? `, ${k.eur.toFixed(4)} € converted` : ""}`
+    const px = (v) => (v == null ? "—" : v.toLocaleString(undefined, { maximumSignificantDigits: 7 }));
+    const venue = k?.venue === "LSX" || !k?.venue ? "Lang & Schwarz" : k.venue;
+    const tip = k?.src === "TR" ? `${venue} via Trade Republic, ${new Date(k.t).toLocaleTimeString()}: ${k.bid != null && k.ask != null ? `bid/ask midpoint (bid ${px(k.bid)}, ask ${px(k.ask)})` : "last price"}${k.eur ? `, ${px(k.eur)} € converted` : ""}`
       : k ? `Last real-time trade ${new Date(k.t).toLocaleTimeString()}` : "No real-time trade received yet (market closed, thin trading, or not covered by Yahoo's feed): the price refreshes every 15 s";
     return `class="tk ${fresh ? (k.dir > 0 ? "tk-up" : k.dir < 0 ? "tk-dn" : "") : ""} ${k && Date.now() - k.at < 120e3 ? "tk-live" : ""}" title="${esc(tip)}"`;
   }
@@ -892,7 +896,7 @@
     for (const t of list) {
       const prev = state.ticks[t.s];
       state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p,
-        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur };
+        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur, venue: t.venue };
     }
     badgeFresh(Date.now() / 1000 + badge.skew);
     stamp(Date.now() / 1000, true);
@@ -1312,7 +1316,30 @@
     $("#s-label").value = state.settings.tile_label || "symbol";
     $("#s-refresh").value = String(state.settings.refresh_seconds ?? 60);
     $("#s-live").value = String(state.settings.live_seconds ?? 15);
+    const a = window.StonksLock.status();
+    $("#s-idle").value = String(a?.idle_minutes ?? 10);
+    $("#s-security").hidden = !a?.enabled;
+    $("#s-pin-msg").hidden = true;
     dlgSet.showModal();
+  });
+  // ---- dashboard lock (static/lock.js, app/auth.py)
+  $("#lock-btn").addEventListener("click", () => window.StonksLock.lockNow());
+  $("#s-lock-now").addEventListener("click", () => window.StonksLock.lockNow());
+  $("#s-idle").addEventListener("change", async (e) => {
+    const v = Math.max(1, Math.min(240, Math.round(+e.target.value || 10)));
+    e.target.value = v;
+    try { Object.assign(window.StonksLock.status(), await api("/api/auth/config", { method: "PUT", body: { idle_minutes: v } })); } catch (err) { alert(err.message); }
+  });
+  $("#s-pin-change").addEventListener("click", async () => {
+    const m = $("#s-pin-msg"), cur = $("#s-pin-cur").value, nw = $("#s-pin-new").value;
+    const say = (t, bad = true) => { m.textContent = t; m.className = bad ? "error" : "hint"; m.hidden = false; };
+    if (!/^\d{4,8}$/.test(nw)) return say("The new PIN must be 4–8 digits.");
+    if (nw !== $("#s-pin-new2").value) return say("The two new PINs don't match.");
+    try {
+      await api("/api/auth/pin", { method: "POST", body: { pin: cur, new_pin: nw } });
+      say("PIN changed. Other browsers have to enter the new one.", false);
+    } catch (err) { say(err.message); }
+    for (const id of ["#s-pin-cur", "#s-pin-new", "#s-pin-new2"]) $(id).value = "";
   });
   $("#s-scheme").addEventListener("change", (e) => { saveSettings({ color_scheme: e.target.value }); redraw(); });
   $("#s-label").addEventListener("change", (e) => { saveSettings({ tile_label: e.target.value }); redraw(); });
@@ -1407,4 +1434,4 @@
     if (location.hash.startsWith("#ta")) { v = "ta"; const q = decodeURIComponent(location.hash.split("/")[1] || ""); if (q) state.settings.ta = { ...(state.settings.ta || {}), symbol: q.toUpperCase() }; }
     switchView(v);
   })();
-})();
+});
