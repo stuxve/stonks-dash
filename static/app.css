@@ -973,3 +973,4 @@ body.locked > *:not(#lockscreen) { display: none !important; }
 #s-security .row { margin: 6px 0; }
 #s-security .row input { width: 120px; }
 @media (max-width: 720px) { #s-security .row input { width: 100%; } #lock-btn { display: none; } }
+.tr-tag { color: var(--up); border: 1px solid rgba(48, 204, 90, .4); border-radius: 99px; padding: 0 6px; font-size: 10px; font-weight: 600; }

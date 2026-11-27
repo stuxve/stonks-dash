@@ -977,12 +977,17 @@ class QuoteEngine:
         self.live_px: dict[str, tuple[float, float, str]] = {}   # symbol -> (price, received, tick date) from a live feed
         self.live_ttl = 120.0
 
-    def set_live(self, symbol: str, price: float, tick_ts: float | None = None) -> None:
+    def set_live(self, symbol: str, price: float, tick_ts: float | None = None, pre: float | None = None) -> None:
         """A live price (Trade Republic's feed) that overrides the last close in `quotes()` for `live_ttl` seconds,
-        so totals the Pi computes match the prices pushed to the page. `tick_ts`: when the price was quoted."""
+        so totals the Pi computes match the prices pushed to the page. `tick_ts`: when the price was quoted.
+        `pre`: that venue's previous close, which "1D" is then measured against (as the TR app does)."""
         if price and price > 0:
             day = time.strftime("%Y-%m-%d", time.localtime(tick_ts or time.time()))
-            self.live_px[symbol] = (float(price), time.time(), day)
+            self.live_px[symbol] = (float(price), time.time(), day, float(pre) if pre and pre > 0 else None)
+
+    def live_fresh(self, symbol: str) -> bool:
+        lv = self.live_px.get(symbol)
+        return bool(lv and time.time() - lv[1] < self.live_ttl)
 
     def drop_live(self, symbols=None) -> None:
         for s in list(self.live_px if symbols is None else symbols):
@@ -1453,6 +1458,8 @@ class QuoteEngine:
                     # "1D" compares with the close before the quote's day: the last bar if it's from an earlier day
                     # (a weekend quote of Friday evening still compares with Thursday's close, like Yahoo)
                     ref = q.price if ld and str(ld)[:10] < lv[2] else q.prev_close
+                    if len(lv) > 3 and lv[3]:
+                        ref = lv[3]                   # the venue's own previous close, like the TR app
                     q.price, q.prev_close = lv[0], ref or q.prev_close
                     if ref:
                         q.changes = {**(ch or {}), "1D": (lv[0] / ref - 1) * 100}

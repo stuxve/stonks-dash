@@ -263,8 +263,10 @@ def test_pepper_file_is_private(tmp_path):
 
 
 def test_tick_price_and_weekend_1d(app):
-    assert trlive.tick_price({"bid": {"price": "99"}, "ask": {"price": 101}, "last": {"price": 100.5, "time": 5}})[:3] == (100.0, 99.0, 101.0)
-    assert trlive.tick_price({"bid": {"price": 99}, "last": {"price": 7}})[0] == 7.0
+    # `last` (what TR values your portfolio with), the midpoint only without it; `pre` = the venue's previous close
+    assert trlive.tick_price({"bid": {"price": "99"}, "ask": {"price": 101}, "last": {"price": 100.5, "time": 5}})[:3] == (100.5, 99.0, 101.0)
+    assert trlive.tick_price({"bid": {"price": 99}, "ask": {"price": 101}})[0] == 100.0
+    assert trlive.tick_pre({"pre": {"price": "98.5"}}) == 98.5 and trlive.tick_pre({}) is None
     eng = app.state.engine
     q0 = eng.quotes(["SAN.MC"])["SAN.MC"]
     last_day = time.mktime(time.strptime(q0.last_date, "%Y-%m-%d")) + 20 * 3600     # a quote on the last bar's day
@@ -281,7 +283,7 @@ def _live_job(app):
     app.state.worker.jobs["live"].fn()
 
 
-def _others_live(client, app, syms, timeout=15):
+def _others_live(client, app, syms, timeout=30):
     def ok():
         _live_job(app)
         d = client.get("/api/tr").json()
@@ -335,3 +337,26 @@ def test_charts_take_intraday_from_tr(client, app):
     app.state.tr.stop()
     app.state.tr._aloop = None
     assert client.get("/api/chart?symbol=NVDA&range=1D").json()["chart_source"] is None
+
+
+def test_day_change_like_the_tr_app_and_tr_stays_the_source_when_quiet(client, app):
+    _setup(client)
+    _tr_live(client, app)
+    eng, tr = app.state.engine, app.state.tr
+    assert _wait(lambda: "MSFT" in eng.live_px and eng.live_px["MSFT"][3])
+    d = client.get("/api/tr/quote?symbol=MSFT").json()
+    assert d["isin"] == "US5949181045" and d["shown"]["from_tr"]
+    # today's change is measured against TR's previous close, as in the app (same ratio in EUR or US$)
+    assert d["shown"]["day_pct"] == pytest.approx(d["tr_day_pct"], abs=0.05)
+    pos = next(p for p in client.get("/api/portfolio?base=EUR").json()["positions"] if p["symbol"] == "MSFT")
+    assert pos["live_src"] == "TR"
+    # no new ticks (venue closed): the last price is re-sent, so TR stays the source past the 2-minute window
+    tr.RESEND_S = 0.5
+    eng.live_ttl = 2.0
+    tr.api.drop_after = None
+    async def quiet():
+        import asyncio
+        await asyncio.sleep(3600)
+    tr.api.recv = quiet
+    time.sleep(4)
+    assert eng.live_fresh("MSFT")

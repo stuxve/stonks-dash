@@ -82,7 +82,7 @@ window.StonksTR = function (ctx) {
           <button class="btn ghost xs" data-a="disconnect">Disconnect</button></p>
         <div class="table-wrap"><table class="grid tr-map"><thead><tr><th>Trade Republic holding</th><th class="num">TR units</th><th>Shown as</th><th class="num">Dashboard units</th></tr></thead>
           <tbody>${rows || '<tr><td colspan="4" class="hint">Loading your holdings…</td></tr>'}</tbody></table></div>
-        <p class="hint">Prices are the bid/ask midpoint in euros, converted to each listing's currency (e.g. US$ for MSFT). They replace Yahoo's for these tickers while they flow (Lang &amp; Schwarz trades 07:30–23:00).</p>
+        <p class="hint">Prices are TR's last price in euros, converted to each listing's currency (e.g. US$ for MSFT), and today's change is measured against that venue's previous close, as in the app. They replace Yahoo's while TR is connected (Lang &amp; Schwarz trades 07:30–23:00).</p>
         ${othersTable()}`;
     }
     body.innerHTML = `${keepMsg}${st.error ? `<p class="warn-t">${esc(st.error)}</p>` : ""}${html}

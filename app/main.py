@@ -660,7 +660,8 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                  "price_currency": p["currency"], "changes": {}, "value": None, "cost": None, "pnl": None,
                  "pnl_pct": None, "day_pnl": None, "quote_type": None, "sector": None, "industry": None,
                  "spark": [], "display_name": p["name"] or p["symbol"],
-                 "price_source": engine.sources.get(p["symbol"]) if p["manual_price"] is None else None}
+                 "price_source": engine.sources.get(p["symbol"]) if p["manual_price"] is None else None,
+                 "live_src": "TR" if p["manual_price"] is None and p["symbol"] and engine.live_fresh(p["symbol"]) else None}
             fx_cost = fx.get(p["currency"])
             if p["manual_price"] is not None:
                 price, pccy, prev = p["manual_price"], p["currency"], None
@@ -1799,9 +1800,12 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                 if not r:
                     continue
                 conv = lambda v: v / r if v else None  # noqa: E731 — EUR → the listing's currency
-                engine.set_live(sym, conv(t["p"]), t["t"] / 1000)   # the Pi's own totals use it too
+                pre = t.get("pre")
+                if pre and not 0.5 < t["p"] / pre < 2:      # not the same instrument / units: don't trust it
+                    pre = None
+                engine.set_live(sym, conv(t["p"]), t["t"] / 1000, conv(pre))   # the Pi's own totals use it too
                 out.append({"s": sym, "p": conv(t["p"]), "bid": conv(t["bid"]), "ask": conv(t["ask"]), "t": t["t"],
-                            "src": "TR", "eur": t["p"], "venue": t.get("venue")})
+                            "pre": conv(pre), "src": "TR", "eur": t["p"], "venue": t.get("venue")})
         if out:
             _live_last[0] = time.time()
             bus.publish("ticks", {"ticks": out})
@@ -2269,6 +2273,30 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         tr.disconnect()
         engine.drop_live([s_ for v in _tr["map"].values() for s_ in v])   # back to Yahoo's prices now
         return _tr_status()
+
+    @app.get("/api/tr/quote")
+    def tr_quote(symbol: str):
+        """Compare with the TR app: TR's raw prices for a ticker (EUR), how they're converted, and what the
+        dashboard shows next to Yahoo's own figures."""
+        sym = symbol.strip().upper()
+        isin = next((i for i, v in _tr_all().items() if sym in v), None)
+        raw = dict(tr.latest.get(isin) or {}) if isin else {}
+        yq = engine.quotes([sym], live=False).get(sym)
+        q = engine.quotes([sym]).get(sym)
+        ccy = (yq.currency if yq else None) or "EUR"
+        r = _tr_rate(ccy)
+        lv = engine.live_px.get(sym)
+        return {"symbol": sym, "isin": isin, "instrument": tr.instruments.get(isin or "") or None,
+                "tr_eur": {k: raw.get(k) for k in ("p", "bid", "ask", "pre", "t")} if raw else None,
+                "tr_day_pct": (raw["p"] / raw["pre"] - 1) * 100 if raw.get("p") and raw.get("pre") else None,
+                "currency": ccy, "eur_per_unit": r,
+                "shown": {"price": q.price if q and q.ok else None, "prev_close": q.prev_close if q else None,
+                          "day_pct": (q.changes or {}).get("1D") if q else None,
+                          "from_tr": bool(lv and engine.live_fresh(sym)),
+                          "tr_age_s": round(time.time() - lv[1]) if lv else None},
+                "yahoo": {"price": yq.price if yq and yq.ok else None, "prev_close": yq.prev_close if yq else None,
+                          "day_pct": (yq.changes or {}).get("1D") if yq else None, "last_bar": yq.last_date if yq else None,
+                          "via": engine.sources.get(sym)}}
 
     @app.get("/api/tr/lookup")
     def tr_lookup(symbol: str):

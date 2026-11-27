@@ -367,7 +367,13 @@ The Pi refreshes the data and runs the alerts on its own, whether or not a page 
   - The panel lists your TR holdings with their names, venues and the ticker each one is shown as.
   - It matches them by ISIN (the 12-character security code) and the instrument's name against the tickers you hold, preferring positions whose account contains "Trade Republic". You can pick another ticker, or *don't use*.
   - *Dashboard units* counts your Trade Republic account, or all accounts if none is named that, and turns amber when it differs from TR.
-- **Prices.** Those tickers then get TR's prices instead of Yahoo's: the midpoint between bid and ask, converted from euros to the listing's currency. This applies on every page and in the Pi's own totals. Hover a price to see bid, ask, venue and the euro price.
+- **Prices, as in the TR app.**
+  - **Price:** those tickers get TR's `last` price (the one TR values your portfolio with) instead of Yahoo's, converted from euros to the listing's currency. This applies on every page and in the Pi's own totals.
+  - **Today's change (1D, Today's P&L):** measured against that venue's previous close (Lang & Schwarz at 23:00), as the app does, not against the home exchange's last close.
+  - **Badge:** Holdings shows a green **TR** tag instead of Yahoo's *pre* / *after* / *est* badges, since Lang & Schwarz already trades before and after the US and European sessions.
+  - **Hover:** a price shows bid, ask, venue and the euro price.
+  - **While connected:** TR stays the source even when the venue is closed (the last price is kept, like the app at night).
+  - **Compare with the app:** `/api/tr/quote?symbol=MSFT` shows TR's raw euro prices next to what the dashboard shows and Yahoo's own figures.
   - If TR's prices stop for 2 minutes (venue closed, connection down), Yahoo's take over again.
 - **While the dashboard is locked.** The feed keeps running, so the background worker and Telegram alerts keep TR prices.
   - It reconnects by itself after a dropped connection (5 s, then longer pauses up to 5 min).
@@ -426,6 +432,7 @@ The header shows **● Pi 30s ago**: when the background refresh last updated yo
 | GET | `/api/tr` | Trade Republic feed state (`no_session`, `pending`, `connecting`, `live`, `stopped`), holdings with names, venues and tickers |
 | POST | `/api/tr/login` `{phone, tr_pin}` · `/api/tr/login/code` `{code}` · `/api/tr/reconnect` · `/api/tr/disconnect` | Log in (confirm in the TR app, or send the authenticator code), restart the feed, delete the session |
 | GET | `/api/tr/lookup?symbol=NVDA` | Look a ticker up on TR now: the instrument (ISIN, name, venue) and how it matched |
+| GET | `/api/tr/quote?symbol=NVDA` | TR's raw prices for a ticker (EUR last, bid, ask, previous close), how they're converted, what the dashboard shows and Yahoo's own figures |
 | PUT | `/api/tr/config` `{map: {ISIN: ticker \| "auto" \| "none"}, isin: {ticker: ISIN \| "auto" \| "none"}}` | Choices for your TR holdings, and for any other ticker |
 | GET / POST | `/api/worker`, `/api/worker/run?job=` | Background refresh: each job's last run, duration, error and next run; run one job (or all) now |
 | GET/PUT/POST | `/api/alerts`, `/api/alerts/config`, `/api/alerts/token`, `/api/alerts/link`, `/api/alerts/unlink`, `/api/alerts/test`, `/api/alerts/check` | Telegram alerts: status and log, settings, write-only bot token, one-time link code, test message, check now |

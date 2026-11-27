@@ -151,7 +151,8 @@ def load_cookies(session, cookies: list[dict]):
 
 
 def tick_price(payload: dict) -> tuple[float | None, float | None, float | None, int | None]:
-    """(price, bid, ask, time ms) from a TR ticker message: the bid/ask midpoint, or the last trade."""
+    """(price, bid, ask, time ms) from a TR ticker message. The price is `last`, the one TR values your portfolio
+    with (pytr does the same); the bid/ask midpoint only when there's no `last`."""
     def px(k):
         try:
             return float((payload.get(k) or {}).get("price"))
@@ -160,9 +161,16 @@ def tick_price(payload: dict) -> tuple[float | None, float | None, float | None,
     bid, ask, last = px("bid"), px("ask"), px("last")
     t = (payload.get("last") or payload.get("bid") or {}).get("time")
     mid = (bid + ask) / 2 if bid and ask else None
-    return (mid or last), bid, ask, (int(t) if t else None)
+    return (last or mid), bid, ask, (int(t) if t else None)
 
 
+def tick_pre(payload: dict) -> float | None:
+    """The venue's previous close (`pre`): what the TR app measures today's change against."""
+    try:
+        v = float((payload.get("pre") or {}).get("price"))
+        return v if v > 0 else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _auth_ended(e: Exception) -> bool:
@@ -181,6 +189,7 @@ class TRLive:
     `on_ticks(list)` gets [{isin, p (EUR), bid, ask, t, venue}] about once a second, from its own thread."""
 
     RETRY_MIN, RETRY_MAX = 5.0, 300.0
+    RESEND_S = 30.0
 
     def __init__(self, db, vault: Vault, on_ticks: Callable[[list[dict]], None], key: Callable[[], bytes | None],
                  api_factory: Callable | None = None):
@@ -204,6 +213,7 @@ class TRLive:
         self._waiters: dict[str, asyncio.Future] = {}
         self._early: dict[str, dict] = {}        # one-shot answers that arrived before their waiter
         self.subscribed: set[str] = set()
+        self.latest: dict[str, dict] = {}        # ISIN -> last tick (re-sent every 30 s: no tick = price unchanged)
         self._lock = threading.Lock()
         threading.Thread(target=self._flush, name="stonks-tr-flush", daemon=True).start()
 
@@ -455,6 +465,7 @@ class TRLive:
                         sid = await api.ticker(isin, exchange=ins["venue"])
                         tickers[sid], by_isin[isin] = isin, sid
                 for isin in set(by_isin) - set(want):
+                    self.latest.pop(isin, None)
                     sid = by_isin.pop(isin)
                     tickers.pop(sid, None)
                     await api.unsubscribe(sid)
@@ -500,10 +511,12 @@ class TRLive:
                         isin = tickers[sid]
                         p, bid, ask, t = tick_price(payload)
                         if p:
+                            tick = {"isin": isin, "p": p, "bid": bid, "ask": ask, "pre": tick_pre(payload),
+                                    "t": t or int(time.time() * 1000),
+                                    "venue": (self.instruments.get(isin) or {}).get("venue")}
                             with self._lock:
-                                self._pending_ticks[isin] = {"isin": isin, "p": p, "bid": bid, "ask": ask,
-                                                             "t": t or int(time.time() * 1000),
-                                                             "venue": (self.instruments.get(isin) or {}).get("venue")}
+                                self._pending_ticks[isin] = tick
+                                self.latest[isin] = tick
                             self.last_tick, self.ticks = time.time(), self.ticks + 1
                             self.error = None
                     elif kind in self.ONESHOT:                   # answered before its waiter was registered
@@ -531,11 +544,18 @@ class TRLive:
                 pass
 
     def _flush(self):
-        """Hand the ticks over about once a second, outside the feed's event loop (the handler may hit the network)."""
+        """Hand the ticks over about once a second, outside the feed's event loop (the handler may hit the network).
+        TR only sends a ticker when it changes, so every 30 s the last price of each subscribed instrument is sent
+        again: while connected, TR stays the source even when the venue is closed (like the app at night)."""
+        resent = 0.0
         while True:
             time.sleep(1.0)
             with self._lock:
                 batch, self._pending_ticks = list(self._pending_ticks.values()), {}
+                if self.connected and time.time() - resent > self.RESEND_S:
+                    resent = time.time()
+                    have = {t["isin"] for t in batch}
+                    batch += [t for i, t in self.latest.items() if i in self.subscribed and i not in have]
             if batch:
                 try:
                     self.on_ticks(batch)
@@ -677,6 +697,7 @@ class FakeTRApi:
             if p0:
                 self._px[isin] = p0
                 seeded.add(isin)
+                self.__dict__.setdefault("_pre", {}).pop(isin, None)    # yesterday's close from the new start
         return self._px.get(isin, 100.0)
 
     async def ticker(self, isin, exchange="LSX"):
@@ -702,7 +723,9 @@ class FakeTRApi:
         sid, s = random.choice(tick)
         isin = s["id"].split(".")[0]
         p = self._px[isin] = self._start(isin) * (1 + random.gauss(0, 0.0006))
-        out = {"bid": {"price": round(p * 0.9995, 4)}, "last": {"price": round(p, 4), "time": int(time.time() * 1000)}}
+        pre = self.__dict__.setdefault("_pre", {}).setdefault(isin, p / (1 + random.gauss(0, 0.01)))
+        out = {"bid": {"price": round(p * 0.9995, 4)}, "last": {"price": round(p, 4), "time": int(time.time() * 1000)},
+               "pre": {"price": round(pre, 4)}}
         if not self.no_ask:
             out["ask"] = {"price": round(p * 1.0005, 4)}
         return sid, s, out

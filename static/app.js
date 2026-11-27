@@ -671,7 +671,7 @@ window.StonksLock.ready.then(() => {
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
-      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${p.symbol ? `<div>${pre.badge(p.symbol, p.price_currency)}</div>` : ""}</td>
+      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${p.symbol ? `<div>${extBadge(p.symbol, p.price_currency, p)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
       <td class="num"><span class="${tkCls(p.symbol)}">${fmtMoney(p.value, b)}</span></td>
       <td class="num ${cls(p.pnl)}"><span class="${tkCls(p.symbol)}">${fmtSigned(p.pnl, b)}</span></td>
@@ -689,6 +689,17 @@ window.StonksLock.ready.then(() => {
   }
   // real-time: a price that just changed flashes green / red; hover says when the last trade came in
   // the cells computed from the price (value, P&L, 1D, vs index) flash with it
+  // A ticker Trade Republic prices already includes pre-market and after-hours (Lang & Schwarz trades 07:30–23:00),
+  // so it gets a "TR" tag instead of Yahoo's pre / after / indicative badge
+  function trPriced(sym, p) {
+    const k = state.ticks?.[sym];
+    return (k?.src === "TR" && Date.now() - k.at < 120e3) || p?.live_src === "TR";
+  }
+  function extBadge(sym, ccy, p) {
+    if (!trPriced(sym, p)) return pre.badge(sym, ccy);
+    const k = state.ticks?.[sym], v = k?.venue && k.venue !== "LSX" ? k.venue : "Lang & Schwarz";
+    return `<span class="pm-badge tr-tag" title="Price and today's change from Trade Republic (${esc(v)}), measured against that venue's previous close, as in the TR app">TR</span>`;
+  }
   // Trade Republic ticks (Lang & Schwarz, static/trpanel.js) count as real-time even with Yahoo's stream off
   const tkOn = (sym) => !!sym && (live.rt || (state.ticks?.[sym]?.src === "TR" && Date.now() - state.ticks[sym].at < 120e3));
   function tkCls(sym) {
@@ -701,7 +712,7 @@ window.StonksLock.ready.then(() => {
     const fresh = k && k.moved && Date.now() - k.at < 1500;
     const px = (v) => (v == null ? "—" : v.toLocaleString(undefined, { maximumSignificantDigits: 7 }));
     const venue = k?.venue === "LSX" || !k?.venue ? "Lang & Schwarz" : k.venue;
-    const tip = k?.src === "TR" ? `${venue} via Trade Republic, ${new Date(k.t).toLocaleTimeString()}: ${k.bid != null && k.ask != null ? `bid/ask midpoint (bid ${px(k.bid)}, ask ${px(k.ask)})` : "last price"}${k.eur ? `, ${px(k.eur)} € converted` : ""}`
+    const tip = k?.src === "TR" ? `${venue} via Trade Republic, ${new Date(k.t).toLocaleTimeString()}: last price${k.bid != null && k.ask != null ? ` (bid ${px(k.bid)}, ask ${px(k.ask)})` : ""}${k.pre ? `, today vs ${px(k.pre)} (previous close there)` : ""}${k.eur ? `, ${px(k.eur)} € converted` : ""}`
       : k ? `Last real-time trade ${new Date(k.t).toLocaleTimeString()}` : "No real-time trade received yet (market closed, thin trading, or not covered by Yahoo's feed): the price refreshes every 15 s";
     return `class="tk ${fresh ? (k.dir > 0 ? "tk-up" : k.dir < 0 ? "tk-dn" : "") : ""} ${k && Date.now() - k.at < 120e3 ? "tk-live" : ""}" title="${esc(tip)}"`;
   }
@@ -718,7 +729,7 @@ window.StonksLock.ready.then(() => {
         <span class="ml-logo" style="background:hsl(${hueOf(sym || p.display_name || "?")} 45% 38%)">${esc((sym || p.display_name || "?").replace(/^\^/, "").replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase())}</span>
         <span class="ml-main"><b>${esc(p.display_name || sym)}</b><span>${fmtNum(p.quantity)} · ${esc(sym)}${p.lots ? ` · ${p.lots.length} lots` : ""}</span></span>
         <span class="ml-num"><b ${tickAttr(sym)}>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
-          <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span>${sym ? pre.badge(sym, p.price_currency) : ""}</span></button>`;
+          <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span>${sym ? extBadge(sym, p.price_currency, p) : ""}</span></button>`;
     }).join("") + `<div class="ml-total"><span>Total · ${list.length} positions</span><b>${fmtMoney(t.value, b)}</b><span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)} (${fmtPct(t.pnl_pct)})</span></div>`
       : '<div class="empty">No positions yet.</div>';
   }
@@ -896,7 +907,7 @@ window.StonksLock.ready.then(() => {
     for (const t of list) {
       const prev = state.ticks[t.s];
       state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p,
-        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur, venue: t.venue };
+        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur, venue: t.venue, pre: t.pre };
     }
     badgeFresh(Date.now() / 1000 + badge.skew);
     stamp(Date.now() / 1000, true);
@@ -913,7 +924,8 @@ window.StonksLock.ready.then(() => {
     for (const r of d.positions) {
       const t = by[r.symbol], rate = fx[r.price_currency];
       if (!t || !r.ok || r.quote_type === "MANUAL" || !rate || t.p === r.price) continue;
-      if (r._prev == null) { const ch = r.changes?.["1D"]; r._prev = ch != null ? r.price / (1 + ch / 100) : 0; }
+      if (t.pre) r._prev = t.pre;                                   // TR: its venue's previous close
+      else if (r._prev == null) { const ch = r.changes?.["1D"]; r._prev = ch != null ? r.price / (1 + ch / 100) : 0; }
       r.price = t.p;
       r.value = r.quantity * t.p * rate;
       r.pnl = r.value - r.cost;
@@ -944,6 +956,7 @@ window.StonksLock.ready.then(() => {
       const t = by[x.symbol];
       if (!t || !x.ok || t.p === x.price) continue;
       x.price = t.p;
+      if (t.pre) x.prev_close = t.pre;
       if (x.prev_close) x.changes = { ...x.changes, "1D": (t.p / x.prev_close - 1) * 100 };
       changed = true;
     }
@@ -1383,7 +1396,7 @@ window.StonksLock.ready.then(() => {
   const trp = window.StonksTR({ api, esc, $, state });
 
   // ================================================================== symbol sheet (static/sheet.js)
-  const sheet = window.StonksSheet({ ext: (s) => pre.row(s), extBadge: (s, c) => pre.badge(s, c), api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
+  const sheet = window.StonksSheet({ ext: (s) => pre.row(s), extBadge: (s, c) => extBadge(s, c, state.port?.positions?.find((x) => x.symbol === s)), api, state, base, saveSettings, fmtMoney, fmtPrice, fmtSigned, fmtPct, fmtNum, fmtDate, fmtHeld, cls,
     positionFor: (sym) => (state.port ? shownPositions(state.port, { ...pView(), combine: true, group: "none" }).find((p) => p.symbol === sym) : null),
     openTx: (...a) => pf.openTx(...a), openPosition: (...a) => openPosition(...a), openChart: (s) => openChart(s), $,
     onOpenChange: () => liveConnect() });
