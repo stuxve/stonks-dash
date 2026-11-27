@@ -661,6 +661,21 @@ window.StonksLock.ready.then(() => {
       <div class="sub">±3%+: ${dy.up3 + dy.dn3} d/yr</div></td>`;
   }
 
+  // US stocks (anything priced in US$) and crypto: price and value also in the other of US$ / €, at today's rate
+  function dualCcy(p, d = state.port) {
+    if (!p?.ok || !d) return null;
+    const other = p.price_currency === "USD" ? "EUR" : p.quote_type === "CRYPTOCURRENCY" && p.price_currency === "EUR" ? "USD" : null;
+    if (!other) return null;
+    const fx = d.fx || {}, b = base();
+    const toBase = (c) => (c === b ? 1 : fx[c]);                 // base units per 1 unit of c
+    const from = toBase(p.price_currency), to = toBase(other);
+    // the value (shown in your base currency) also in the one of US$ / € that isn't the base
+    const vccy = p.price_currency !== b ? p.price_currency : other, vto = toBase(vccy);
+    if (!from || !to) return null;
+    return { ccy: other, price: p.price * from / to, vccy: vccy !== b && vto ? vccy : null, value: (v) => (v == null || !vto ? null : v / vto) };
+  }
+  const dualLine = (txt) => `<div class="sub dual">≈ ${txt}</div>`;
+
   function renderTable(d, positions = d.positions) {
     const b = base();
     const total = d.totals.value || 0;
@@ -678,35 +693,37 @@ window.StonksLock.ready.then(() => {
     const t = $("#p-table");
     t.tHead.innerHTML = `<tr>${COLS.map((c) => `<th class="sortable ${c.num ? "num" : ""}" data-k="${c.key}"${c.title ? ` title="${esc(c.title)}"` : ""}>${c.label}${c.key === key ? `<span class="arr">${dir > 0 ? "▲" : "▼"}</span>` : ""}</th>`).join("")}<th></th></tr>`;
     const open = state.expanded || (state.expanded = new Set());
-    const lotRow = (l) => `<tr class="lot-row" data-id="${l.id}">
+    let lc = null;
+    const lotRow = (l, lp) => `<tr class="lot-row" data-id="${l.id}">
       <td class="asset"><span class="sub">↳ lot</span></td>
       <td>${esc(l.account || "")}${l.group_name ? `<div class="sub">${esc(l.group_name)}</div>` : ""}</td>
       ${heldCell(l.bought_at)}
       <td class="num">${fmtNum(l.quantity)}</td>
       <td class="num">${fmtPrice(l.avg_cost, l.currency)}</td>
       <td></td><td></td><td></td><td></td>
-      <td class="num">${fmtMoney(l.value, b)}</td>
+      <td class="num">${fmtMoney(l.value, b)}${(lc = dualCcy({ ...l, ok: true, price: 1, price_currency: lp.price_currency, quote_type: lp.quote_type }, d))?.vccy ? dualLine(fmtMoney(lc.value(l.value), lc.vccy)) : ""}</td>
       <td class="num ${cls(l.pnl)}">${fmtSigned(l.pnl, b)}</td>
       <td class="num ${cls(l.pnl_pct)}">${fmtPct(l.pnl_pct)}</td>
       ${vsCell(l)}
       <td class="num">${total && l.value ? (l.value / total * 100).toFixed(1) + "%" : "—"}</td>
       <td><div class="row-actions"><button class="sell" title="Sell from this account">Sell</button><button class="edit" title="Edit lot">Edit</button><button class="del" title="Delete lot">Delete</button></div></td></tr>`;
-    t.tBodies[0].innerHTML = rows.map((p) => (p.lots ? `<tr class="merged ${open.has(p.mkey) ? "open" : ""}" data-mkey="${esc(p.mkey)}">` : `<tr data-id="${p.id}">`) + `
+    let dc = null;
+    t.tBodies[0].innerHTML = rows.map((p) => (dc = null, p.lots ? `<tr class="merged ${open.has(p.mkey) ? "open" : ""}" data-mkey="${esc(p.mkey)}">` : `<tr data-id="${p.id}">`) + `
       <td class="asset">${p.lots ? `<button class="exp" title="Show lots">${open.has(p.mkey) ? "▾" : "▸"}</button>` : ""}<b>${esc(p.symbol || "—")}</b>${p.quote_type === "MANUAL" ? '<span class="pill">manual</span>' : ""}${p.lots ? `<span class="pill">${p.lots.length} lots</span>` : ""}${p.price_source ? `<span class="pill" title="Yahoo's prices for ${esc(p.symbol)} are short or stale, so prices, charts and alerts use ${esc(p.price_source)}, another listing of the same fund (same currency and price).">via ${esc(p.price_source)}</span>` : ""}<div class="sub">${esc(p.display_name)}</div></td>
       <td>${esc(p.account || "")}${p.group_name ? `<div class="sub">${esc(p.group_name)}</div>` : ""}</td>
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
-      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${p.symbol ? `<div>${extBadge(p.symbol, p.price_currency, p)}</div>` : ""}</td>
+      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${(dc = dualCcy(p, d)) ? dualLine(fmtPrice(dc.price, dc.ccy)) : ""}${p.symbol ? `<div>${extBadge(p.symbol, p.price_currency, p)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
-      <td class="num"><span class="${tkCls(p.symbol)}">${fmtMoney(p.value, b)}</span></td>
+      <td class="num"><span class="${tkCls(p.symbol)}">${fmtMoney(p.value, b)}</span>${dc?.vccy ? dualLine(fmtMoney(dc.value(p.value), dc.vccy)) : ""}</td>
       <td class="num ${cls(p.pnl)}"><span class="${tkCls(p.symbol)}">${fmtSigned(p.pnl, b)}</span></td>
       <td class="num ${cls(p.pnl_pct)}"><span class="${tkCls(p.symbol)}">${fmtPct(p.pnl_pct)}</span></td>
       ${vsCell(p)}
       <td class="num">${p.weight == null ? "—" : p.weight.toFixed(1) + "%"}</td>
       <td>${p.lots ? `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart-btn" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="exp-btn">${open.has(p.mkey) ? "Hide lots" : "Lots"}</button></div>`
         : `<div class="row-actions">${p.symbol && p.quote_type !== "MANUAL" ? `<button class="chart-btn" data-sym="${esc(p.symbol)}" title="Technical analysis">Chart</button>` : ""}<button class="sell" title="Record a sale">Sell</button><button class="edit" title="Edit">Edit</button><button class="del" title="Delete">Delete</button></div>`}</td>
-    </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map(lotRow).join("") : "")).join("");
+    </tr>` + (p.lots && open.has(p.mkey) ? p.lots.map((l) => lotRow(l, p)).join("") : "")).join("");
     const tt = d.totals;
     t.tFoot.innerHTML = rows.length ? `<tr><td>Total</td><td></td><td></td><td></td><td></td><td></td>
       <td class="num ${cls(tt.day_pct)}">${fmtPct(tt.day_pct)}</td><td></td><td></td><td class="num">${fmtMoney(tt.value, b)}</td>
@@ -749,12 +766,13 @@ window.StonksLock.ready.then(() => {
     const b = base(), t = d.totals, el = $("#p-mlist");
     const list = rows.slice().sort((a, c) => (c.value || 0) - (a.value || 0));
     const arrow = (v) => (v > 0 ? "▲" : v < 0 ? "▼" : "");
+    let mdc = null;
     el.innerHTML = list.length ? list.map((p) => {
       const sym = p.symbol || "", man = !p.symbol || p.quote_type === "MANUAL";
       return `<button class="ml-row" data-sym="${esc(sym)}" ${man ? "disabled" : ""}>
         <span class="ml-logo" style="background:hsl(${hueOf(sym || p.display_name || "?")} 45% 38%)">${esc((sym || p.display_name || "?").replace(/^\^/, "").replace(/[^A-Z0-9]/gi, "").slice(0, 2).toUpperCase())}</span>
         <span class="ml-main"><b>${esc(p.display_name || sym)}</b><span>${fmtNum(p.quantity)} · ${esc(sym)}${p.lots ? ` · ${p.lots.length} lots` : ""}</span></span>
-        <span class="ml-num"><b ${tickAttr(sym)}>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b><span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
+        <span class="ml-num"><b ${tickAttr(sym)}>${p.ok ? fmtMoney(p.value, b) : "n/a"}</b>${(mdc = dualCcy(p, d))?.vccy ? `<span class="dual">≈ ${fmtMoney(mdc.value(p.value), mdc.vccy)}</span>` : ""}<span class="${cls(p.pnl_pct)}">${arrow(p.pnl_pct)} ${p.pnl_pct == null ? "—" : Math.abs(p.pnl_pct).toFixed(2) + " %"}</span>
           <span class="ml-day ${cls(p.changes?.["1D"])}">today ${fmtPct(p.changes?.["1D"])}</span>${sym ? extBadge(sym, p.price_currency, p) : ""}</span></button>`;
     }).join("") + `<div class="ml-total"><span>Total · ${list.length} positions</span><b>${fmtMoney(t.value, b)}</b><span class="${cls(t.pnl)}">${fmtSigned(t.pnl, b)} (${fmtPct(t.pnl_pct)})</span></div>`
       : '<div class="empty">No positions yet.</div>';

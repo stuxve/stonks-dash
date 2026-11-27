@@ -979,3 +979,6 @@ body.locked > *:not(#lockscreen) { display: none !important; }
 .kpis.private .v { letter-spacing: .08em; color: var(--muted) !important; }
 .kpis.private .v span { color: var(--muted) !important; }
 @media (max-width: 400px) { .topbar { gap: 4px !important; } .topbar .icon-btn { width: 30px; padding: 0; } }
+/* US$ / € side by side for US stocks and crypto */
+.dual { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.ml-num .dual { display: block; }
