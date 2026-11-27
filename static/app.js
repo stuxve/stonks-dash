@@ -485,7 +485,31 @@ window.StonksLock.ready.then(() => {
   }
   const shownPositions = (d, v) => (v.combine ? combineLots(d.positions, v.group) : d.positions);
 
-  function drawPortfolio() {
+  // Redraws replace the rows; keep the row you're looking at in the same place on screen (an expanded lot, a
+  // live update every few seconds, rows changing height) instead of letting the page jump. At the very top of
+  // the page nothing is pinned, so the heatmap stays in view.
+  const ANCHORS = "#view-portfolio tr[data-mkey], #view-portfolio tr[data-id], #p-mlist .ml-row[data-sym]";
+  const anchorKey = (el) => (el.dataset.mkey != null ? `tr[data-mkey="${CSS.escape(el.dataset.mkey)}"]`
+    : el.dataset.id != null ? `tr[data-id="${CSS.escape(el.dataset.id)}"]` : `.ml-row[data-sym="${CSS.escape(el.dataset.sym)}"]`);
+  function keepScroll(fn, prefer = null) {
+    if (window.scrollY < 2 && !prefer) return fn();
+    const a = prefer || [...document.querySelectorAll(ANCHORS)].find((el) => {
+      const r = el.getBoundingClientRect();
+      return r.height > 0 && r.top >= 0 && r.top < innerHeight;
+    });
+    if (!a) return fn();
+    const sel = anchorKey(a), top = a.getBoundingClientRect().top, inList = !!a.closest("#p-mlist");
+    const out = fn();
+    const b = document.querySelector(inList ? `#p-mlist ${sel}` : `#view-portfolio ${sel}`);
+    if (b) {
+      const dy = b.getBoundingClientRect().top - top;
+      if (Math.abs(dy) > 1) window.scrollBy(0, dy);
+    }
+    return out;
+  }
+
+  function drawPortfolio() { return keepScroll(drawPortfolio0); }
+  function drawPortfolio0() {
     const d = state.port;
     if (!d) return;
     const v = pView();
@@ -798,7 +822,7 @@ window.StonksLock.ready.then(() => {
     if (th) {
       const k = th.dataset.k;
       state.sort = { key: k, dir: state.sort.key === k ? -state.sort.dir : (k === "display_name" || k === "account" ? 1 : -1) };
-      return renderTable(state.port, shownPositions(state.port, pView()));
+      return keepScroll(() => renderTable(state.port, shownPositions(state.port, pView())));
     }
     const chartBtn = e.target.closest("button.chart-btn");
     if (chartBtn) { openChart(chartBtn.dataset.sym); e.stopPropagation(); return; }
@@ -816,7 +840,13 @@ window.StonksLock.ready.then(() => {
     if (mr) {
       const k = mr.dataset.mkey, open = state.expanded || (state.expanded = new Set());
       open.has(k) ? open.delete(k) : open.add(k);
-      return drawPortfolio();
+      e.preventDefault();
+      // only the table changes; the row you clicked stays exactly where it was on screen. Collapsing near the end
+      // of the page would make it shorter and the browser would pull the view up: hold the height until you
+      // switch tabs instead.
+      const view = $("#view-portfolio"), h = view.offsetHeight;
+      view.style.minHeight = `${h}px`;
+      return keepScroll(() => renderTable(state.port, shownPositions(state.port, pView())), mr);
     }
     const tr = e.target.closest("tr[data-id]");
     if (!tr) return;
@@ -1032,7 +1062,7 @@ window.StonksLock.ready.then(() => {
     if (now - tickDraw.fast < 900) return;
     tickDraw.fast = now;
     const rows = shownPositions(d, pView());
-    renderKpis(d.totals); renderMobileList(d, rows); renderTable(d, rows);
+    keepScroll(() => { renderKpis(d.totals); renderMobileList(d, rows); renderTable(d, rows); });
   }
   function liveReload() {                                       // several events in a row → one reload
     clearTimeout(live.t);
@@ -1112,6 +1142,7 @@ window.StonksLock.ready.then(() => {
   $$(".tabs button").forEach((b) => b.addEventListener("click", () => switchView(b.dataset.view)));
   function switchView(v) {
     state.view = v;
+    $("#view-portfolio").style.minHeight = "";                   // height held after collapsing lots
     setTimeout(schedule, 0);
     $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.view === v));
     $("#view-markets").hidden = v !== "markets";
@@ -1482,6 +1513,19 @@ window.StonksLock.ready.then(() => {
     window.scrollTo(0, 0);
   }
   window.addEventListener("stonks:chart", (e) => openChart(e.detail));
+
+  // ================================================================== phones: sideways-scrolling rows show a fade
+  // on the side that has more (toolbars, board chips, sub-tabs, period buttons)
+  const SCROLLERS = ".toolbar, .boardbar, .subnav-tabs, .ta-tools, #board-chips, .seg-scroll";
+  const markMore = (el) => {
+    const more = el.scrollWidth - el.clientWidth > 4;
+    el.classList.toggle("more-r", more && el.scrollLeft + el.clientWidth < el.scrollWidth - 4);
+    el.classList.toggle("more-l", more && el.scrollLeft > 4);
+  };
+  const markAll = () => { if (innerWidth <= 720) $$(SCROLLERS).forEach(markMore); };
+  document.addEventListener("scroll", (e) => { if (e.target instanceof Element && e.target.matches(SCROLLERS)) markMore(e.target); }, true);
+  addEventListener("resize", markAll);
+  setInterval(markAll, 1500);                                       // content changes with every view and redraw
 
   // ================================================================== boot
   (async function boot() {

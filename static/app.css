@@ -822,11 +822,12 @@ tr.earn-soon td:first-child { box-shadow: inset 3px 0 0 #f5a524; }
   .toolbar.ta-top { flex-wrap: wrap; }
   .hours-bar { flex-wrap: wrap; }
 
-  /* portfolio: KPI cards swipe sideways; sub-tabs on one swipeable line */
-  .kpis { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; gap: 8px; margin: 0 -12px 10px; padding: 0 12px 2px; scrollbar-width: none; }
-  .kpis > .kpi { flex: 0 0 46%; scroll-snap-align: start; padding: 10px 12px; border-radius: 12px; }
-  .kpi .v { font-size: 18px; }
-  .kpi .d { font-size: 11.5px; }
+  /* portfolio: summary boxes in two columns, all visible at once; sub-tabs on one swipeable line */
+  .kpis, .kpis.small { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 0 10px; overflow: visible; }
+  .kpis > .kpi { padding: 9px 11px; border-radius: 12px; min-width: 0; }
+  .kpi .k { font-size: 11px; }
+  .kpi .v { font-size: 17px; overflow: hidden; text-overflow: ellipsis; }
+  .kpi .d { font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
   .subnav { flex-wrap: wrap; gap: 8px; padding-bottom: 0; border-bottom: 0; }
   .subnav-tabs { display: flex; gap: 4px; flex: 1 0 100%; overflow-x: auto; scrollbar-width: none; margin: 0 -12px; padding: 0 12px;
     border-bottom: 1px solid var(--border); }
@@ -982,3 +983,17 @@ body.locked > *:not(#lockscreen) { display: none !important; }
 /* US$ / € side by side for US stocks and crypto */
 .dual { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .ml-num .dual { display: block; }
+/* the page keeps the row you're looking at in place itself (static/app.js keepScroll); the browser's own scroll
+   anchoring would fight it when rows are replaced */
+#view-portfolio { overflow-anchor: none; }
+
+/* phones: rows that scroll sideways fade at the edge while there's more to see (static/app.js marks them) */
+@media (max-width: 720px) {
+  .more-r { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 44px), transparent); }
+  .more-l { -webkit-mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to left, #000 calc(100% - 44px), transparent); }
+  .more-l.more-r { -webkit-mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent); mask-image: linear-gradient(to right, transparent, #000 44px, #000 calc(100% - 44px), transparent); }
+  .clock { flex-wrap: wrap; row-gap: 2px; }
+  .hours-bar > .clock { flex: 1 1 100%; min-width: 0; }
+  .clock span { white-space: normal; }
+  .badge { white-space: nowrap; }
+}
