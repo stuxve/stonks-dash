@@ -393,6 +393,10 @@ window.StonksLock.ready.then(() => {
     if (!silent && !state.port) pMap.innerHTML = `<div class="loading">Fetching quotes…</div>`;
     state.port = await api(`/api/portfolio?base=${base()}`);
     $("#demo-badge").hidden = state.port.provider !== "mock";
+    // the Pi's copy can be a few seconds older than the last live price this page got: put those back on top,
+    // so a refresh never steps values back (and then forward again with the next price)
+    const recent = Object.entries(state.ticks || {}).filter(([, k]) => Date.now() - k.at < 30e3);
+    if (recent.length) patchPortfolio(state.port, Object.fromEntries(recent.map(([s, k]) => [s, { s, ...k }])));
     drawPortfolio();
     loadMoves();
     pf.onPortfolio();
@@ -732,9 +736,9 @@ window.StonksLock.ready.then(() => {
       <td class="num">${fmtNum(l.quantity)}</td>
       <td class="num">${fmtPrice(l.avg_cost, l.currency)}</td>
       <td></td><td></td><td></td><td></td>
-      <td class="num">${fmtMoney(l.value, b)}${(lc = dualCcy({ ...l, ok: true, price: 1, price_currency: lp.price_currency, quote_type: lp.quote_type }, d))?.vccy ? dualLine(fmtMoney(lc.value(l.value), lc.vccy)) : ""}</td>
-      <td class="num ${cls(l.pnl)}">${fmtSigned(l.pnl, b)}</td>
-      <td class="num ${cls(l.pnl_pct)}">${fmtPct(l.pnl_pct)}</td>
+      <td class="num"><span class="${tkCls(lp.symbol)}">${fmtMoney(l.value, b)}</span>${(lc = dualCcy({ ...l, ok: true, price: 1, price_currency: lp.price_currency, quote_type: lp.quote_type }, d))?.vccy ? dualLine(fmtMoney(lc.value(l.value), lc.vccy)) : ""}</td>
+      <td class="num ${cls(l.pnl)}"><span class="${tkCls(lp.symbol)}">${fmtSigned(l.pnl, b)}</span></td>
+      <td class="num ${cls(l.pnl_pct)}"><span class="${tkCls(lp.symbol)}">${fmtPct(l.pnl_pct)}</span></td>
       ${vsCell(l)}
       <td class="num">${total && l.value ? (l.value / total * 100).toFixed(1) + "%" : "—"}</td>
       <td><div class="row-actions"><button class="sell" title="Sell from this account">Sell</button><button class="edit" title="Edit lot">Edit</button><button class="del" title="Delete lot">Delete</button></div></td></tr>`;
@@ -988,7 +992,7 @@ window.StonksLock.ready.then(() => {
     for (const t of list) {
       const prev = state.ticks[t.s];
       state.ticks[t.s] = { t: t.t, at: Date.now(), p: t.p, dir: prev && t.p !== prev.p ? Math.sign(t.p - prev.p) : prev?.dir || 0, moved: !prev || t.p !== prev.p,
-        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur, venue: t.venue, pre: t.pre };
+        src: t.src, bid: t.bid, ask: t.ask, eur: t.eur, eur_pre: t.eur_pre, venue: t.venue, pre: t.pre };
     }
     badgeFresh(Date.now() / 1000 + badge.skew);
     stamp(Date.now() / 1000, true);
