@@ -66,6 +66,7 @@ window.StonksLock.ready.then(() => {
     }).format(v);
   };
   const fmtSigned = (v, ccy) => (v == null ? "—" : (v > 0 ? "+" : v < 0 ? "−" : "") + fmtMoney(Math.abs(v), ccy));
+  const fmtMoney0 = fmtMoney, fmtSigned0 = fmtSigned;            // renderKpis wraps them for restricted mode
   const fmtNum = (v, d = 4) => (v == null ? "—" : new Intl.NumberFormat(undefined, { maximumFractionDigits: d }).format(v));
   const fmtPrice = (v, ccy) => {
     if (v == null) return "—";
@@ -525,8 +526,33 @@ window.StonksLock.ready.then(() => {
     renderTable(d, positions);
   }
 
+  // ---- restricted mode (the eye button): the amounts in the summary boxes show as dashes, until pressed again.
+  // Remembered in this browser only; percentages and counts stay visible.
+  try { state.private = localStorage.getItem("stonks.private") === "1"; } catch { state.private = false; }
+  const HIDDEN = "––––––";
+  function privBtn() {
+    const btn = $("#priv-btn");
+    btn.setAttribute("aria-pressed", String(!!state.private));
+    btn.classList.toggle("on", !!state.private);
+    btn.title = state.private ? "Restricted mode: amounts hidden. Click to show them" : "Hide the amounts in the summary boxes";
+    btn.innerHTML = state.private
+      ? '<svg viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M10.6 5.1A9.8 9.8 0 0 1 12 5c6 0 10 7 10 7a17 17 0 0 1-3.2 3.9M6.6 6.6A17 17 0 0 0 2 12s4 7 10 7a9.6 9.6 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+  }
+  privBtn();
+  $("#priv-btn").addEventListener("click", () => {
+    state.private = !state.private;
+    try { localStorage.setItem("stonks.private", state.private ? "1" : "0"); } catch {}
+    privBtn();
+    if (state.port) renderKpis(state.port.totals);
+  });
+
   function renderKpis(t) {
     const b = base();
+    const hide = !!state.private;
+    const fmtMoney = (v, c) => (hide ? HIDDEN : fmtMoney0(v, c));
+    const fmtSigned = (v, c) => (hide ? HIDDEN : fmtSigned0(v, c));
+    $("#kpis").classList.toggle("private", hide);
     $("#kpis").innerHTML = [
       ["Market value", fmtMoney(t.value, b), `${t.count} position${t.count === 1 ? "" : "s"}${t.missing ? ` · <span class="down">${t.missing} without price</span>` : ""}`],
       ["Invested", fmtMoney(t.cost, b), "cost basis at current FX"],

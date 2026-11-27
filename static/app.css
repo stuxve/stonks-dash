@@ -974,3 +974,8 @@ body.locked > *:not(#lockscreen) { display: none !important; }
 #s-security .row input { width: 120px; }
 @media (max-width: 720px) { #s-security .row input { width: 100%; } #lock-btn { display: none; } }
 .tr-tag { color: var(--up); border: 1px solid rgba(48, 204, 90, .4); border-radius: 99px; padding: 0 6px; font-size: 10px; font-weight: 600; }
+/* restricted mode (eye button): the summary amounts show as dashes */
+#priv-btn.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.kpis.private .v { letter-spacing: .08em; color: var(--muted) !important; }
+.kpis.private .v span { color: var(--muted) !important; }
+@media (max-width: 400px) { .topbar { gap: 4px !important; } .topbar .icon-btn { width: 30px; padding: 0; } }
