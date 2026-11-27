@@ -649,7 +649,7 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
         open_lots = [x for x in lots if fr.remaining.get(x["id"], 0) > ledger.EPS]
         syms = [x["symbol"] for x in open_lots if x["symbol"] and x["manual_price"] is None]
         quotes = engine.quotes(syms) if syms else {}
-        ccys = {x["currency"] for x in open_lots} | {q.currency for q in quotes.values()}
+        ccys = {x["currency"] for x in open_lots} | {q.currency for q in quotes.values()} | {"EUR"}
         fx = engine.fx_rates(ccys, base)
         rows = []
         tot = {"value": 0.0, "cost": 0.0, "day_pnl": 0.0}
@@ -674,12 +674,23 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
             else:
                 price = None
             fx_price = fx.get(pccy) if price is not None else None
+            # priced by Trade Republic: value it with TR's own euro price (as the app does), not via the listing's
+            # currency, so it matches the app exactly; the listing-currency price stays for charts and targets
+            tre = _tr["eur"].get(p["symbol"]) if r["live_src"] == "TR" and fx.get("EUR") else None
+            if tre and price is not None:
+                price_eur, pre_eur = tre
+                r["price_eur"] = price_eur
             if price is not None and fx_price and fx_cost:
                 value = qty * price * fx_price
+                if tre:
+                    value = qty * price_eur * fx["EUR"]
                 cost = ledger.lot_cost_native(p, qty) * fx_cost
                 r.update(ok=True, price=price, price_currency=pccy, value=value, cost=cost,
                          pnl=value - cost, pnl_pct=((value / cost - 1) * 100) if cost else None)
-                if prev:
+                if tre and pre_eur:
+                    r["day_pnl"] = qty * (price_eur - pre_eur) * fx["EUR"]
+                    tot["day_pnl"] += r["day_pnl"]
+                elif prev:
                     r["day_pnl"] = qty * (price - prev) * fx_price
                     tot["day_pnl"] += r["day_pnl"]
                 tot["value"] += value
@@ -1758,7 +1769,8 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
     _tr_fx: dict = {"at": 0.0, "rates": {}}
     # map: your TR holdings' ISIN -> [our symbols]; extra: other tickers on screen, ISIN -> [our symbols]
     # (both swapped whole, never edited in place, so readers on other threads see a consistent dict)
-    _tr = {"map": {}, "mapped": None, "extra": {}, "pending": [], "hist": {}}
+    # eur: our symbol -> (TR's euro price, TR's euro previous close), what Holdings values TR-priced rows with
+    _tr = {"map": {}, "mapped": None, "extra": {}, "pending": [], "hist": {}, "eur": {}}
     LIVE_FRESH = 120.0
 
     def _tr_rate(ccy: str) -> float | None:
@@ -1804,8 +1816,9 @@ def build_app(db_path: str | None = None, provider: str | None = None, require_p
                 if pre and not 0.5 < t["p"] / pre < 2:      # not the same instrument / units: don't trust it
                     pre = None
                 engine.set_live(sym, conv(t["p"]), t["t"] / 1000, conv(pre))   # the Pi's own totals use it too
+                _tr["eur"][sym] = (t["p"], pre)
                 out.append({"s": sym, "p": conv(t["p"]), "bid": conv(t["bid"]), "ask": conv(t["ask"]), "t": t["t"],
-                            "pre": conv(pre), "src": "TR", "eur": t["p"], "venue": t.get("venue")})
+                            "pre": conv(pre), "src": "TR", "eur": t["p"], "eur_pre": pre, "venue": t.get("venue")})
         if out:
             _live_last[0] = time.time()
             bus.publish("ticks", {"ticks": out})

@@ -350,6 +350,10 @@ def test_day_change_like_the_tr_app_and_tr_stays_the_source_when_quiet(client, a
     assert d["shown"]["day_pct"] == pytest.approx(d["tr_day_pct"], abs=0.05)
     pos = next(p for p in client.get("/api/portfolio?base=EUR").json()["positions"] if p["symbol"] == "MSFT")
     assert pos["live_src"] == "TR"
+    # valued with TR's own euro price, as in the app (no detour through US$)
+    eur, pre = app.state.tr.latest["US5949181045"]["p"], app.state.tr.latest["US5949181045"]["pre"]
+    assert pos["price_eur"] and pos["value"] == pytest.approx(pos["quantity"] * pos["price_eur"], rel=1e-9)
+    assert abs(pos["price_eur"] / eur - 1) < 0.01 and pos["price_currency"] == "USD"
     # no new ticks (venue closed): the last price is re-sent, so TR stays the source past the 2-minute window
     tr.RESEND_S = 0.5
     eng.live_ttl = 2.0

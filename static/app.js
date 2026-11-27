@@ -675,6 +675,13 @@ window.StonksLock.ready.then(() => {
     return { ccy: other, price: p.price * from / to, vccy: vccy !== b && vto ? vccy : null, value: (v) => (v == null || !vto ? null : v / vto) };
   }
   const dualLine = (txt) => `<div class="sub dual">≈ ${txt}</div>`;
+  // Priced by Trade Republic in another currency than €: TR's own euro price first (as in the app), the listing's below
+  function priceCell(p, d, dc) {
+    if (!p.ok) return '<span class="down">n/a</span>';
+    if (p.price_eur != null && p.price_currency !== "EUR" && trPriced(p.symbol, p))
+      return `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price_eur, "EUR")}</span>${dualLine(fmtPrice(p.price, p.price_currency))}`;
+    return `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>${dc ? dualLine(fmtPrice(dc.price, dc.ccy)) : ""}`;
+  }
 
   function renderTable(d, positions = d.positions) {
     const b = base();
@@ -714,7 +721,7 @@ window.StonksLock.ready.then(() => {
       ${heldCell(p.bought_at, p.lots ? "since " : "")}
       <td class="num">${fmtNum(p.quantity)}</td>
       <td class="num">${fmtPrice(p.avg_cost, p.currency)}</td>
-      <td class="num">${p.ok ? `<span ${tickAttr(p.symbol)}>${fmtPrice(p.price, p.price_currency)}</span>` : '<span class="down">n/a</span>'}${(dc = dualCcy(p, d)) ? dualLine(fmtPrice(dc.price, dc.ccy)) : ""}${p.symbol ? `<div>${extBadge(p.symbol, p.price_currency, p)}</div>` : ""}</td>
+      <td class="num">${priceCell(p, d, (dc = dualCcy(p, d)))}${p.symbol ? `<div>${extBadge(p.symbol, p.price_currency, p)}</div>` : ""}</td>
       ${dayCell(p)}${weekCell(p)}${typCell(p)}
       <td class="num"><span class="${tkCls(p.symbol)}">${fmtMoney(p.value, b)}</span>${dc?.vccy ? dualLine(fmtMoney(dc.value(p.value), dc.vccy)) : ""}</td>
       <td class="num ${cls(p.pnl)}"><span class="${tkCls(p.symbol)}">${fmtSigned(p.pnl, b)}</span></td>
@@ -971,10 +978,18 @@ window.StonksLock.ready.then(() => {
       if (t.pre) r._prev = t.pre;                                   // TR: its venue's previous close
       else if (r._prev == null) { const ch = r.changes?.["1D"]; r._prev = ch != null ? r.price / (1 + ch / 100) : 0; }
       r.price = t.p;
-      r.value = r.quantity * t.p * rate;
+      const eurRate = base() === "EUR" ? 1 : fx.EUR;
+      if (t.src === "TR" && t.eur && eurRate) {                      // TR: valued with its own euro price, as the app
+        r.price_eur = t.eur;
+        r.value = r.quantity * t.eur * eurRate;
+        if (t.eur_pre) r.day_pnl = r.quantity * (t.eur - t.eur_pre) * eurRate;
+      } else {
+        r.value = r.quantity * t.p * rate;
+        if (r._prev) r.day_pnl = r.quantity * (t.p - r._prev) * rate;
+      }
       r.pnl = r.value - r.cost;
       r.pnl_pct = r.cost ? (r.value / r.cost - 1) * 100 : null;
-      if (r._prev) { r.day_pnl = r.quantity * (t.p - r._prev) * rate; r.changes = { ...r.changes, "1D": (t.p / r._prev - 1) * 100 }; }
+      if (r._prev) r.changes = { ...r.changes, "1D": (t.p / r._prev - 1) * 100 };
       if (r.bench_value != null && r.cost) r.vs_bench = (r.value - r.bench_value) / r.cost * 100;   // the index part doesn't move
       changed = true;
     }
